@@ -445,6 +445,7 @@ set(FILECHECK_TESTS
     llvm-passes/inline-divergent-scopes-and-materialize-trivial-goto.ll
     llvm-passes/inline-divergent-scopes.ll
     llvm-passes/inline-helpers.ll
+    llvm-passes/materialize-gvec-calls.ll
     llvm-passes/mark-inline-helpers-up-to.ll
     llvm-passes/materialize-trivial-goto.ll
     llvm-passes/peephole-opt-for-decompilation.ll
