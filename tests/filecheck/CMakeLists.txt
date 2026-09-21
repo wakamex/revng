@@ -434,6 +434,8 @@ set(FILECHECK_TESTS
     clift/types/struct-with-recursion.mlir
     clift/types/union-with-large-tree.mlir
     clift/types/union-with-pointer-recursion.mlir
+    lift/gvec-add.S
+    lift/gvec-equality.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll

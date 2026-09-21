@@ -8,6 +8,7 @@ revng_add_library_internal(
   CodeGenerator.cpp
   CSVOffsets.cpp
   ExternalJumpsHandler.cpp
+  InlineGVecHelpers.cpp
   InstructionTranslator.cpp
   IRAnnotators.cpp
   LibTcg.cpp
@@ -29,6 +30,7 @@ target_link_libraries(
          revngBasicAnalyses
          revngModelImporterDebugInfo
          revngFunctionCallIdentification
+         revngInlineHelpers
          revngModel
          revngSupport
          revngTypeShrinking

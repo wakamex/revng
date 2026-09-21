@@ -74,6 +74,7 @@
 
 #include "CodeGenerator.h"
 #include "ExternalJumpsHandler.h"
+#include "InlineGVecHelpers.h"
 #include "InstructionTranslator.h"
 #include "JumpTargetManager.h"
 
@@ -694,5 +695,6 @@ void CodeGenerator::translate(LibTcg &LibTcg,
                                       PCH.get());
   JumpOutHandler.createExternalJumpsHandler();
 
+  inlineGVecHelpers(*RootFunction, Variables);
   Variables.finalize();
 }
