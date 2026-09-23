@@ -6,6 +6,8 @@
 
 #include <map>
 
+#include "llvm/ADT/SmallSet.h"
+
 #include "revng/ADT/ConstantRangeSet.h"
 #include "revng/MFP/Graph.h"
 #include "revng/MFP/MFP.h"
@@ -35,7 +37,8 @@ private:
   const llvm::DominatorTree &DT;
   llvm::Instruction *Context;
   llvm::SmallPtrSetImpl<llvm::Instruction *> &Instructions;
-  bool ZeroExtendConstraints = false;
+  std::map<llvm::Instruction *, llvm::SmallSet<llvm::Instruction *, 4>>
+    Candidates;
 
 public:
   AdvancedValueInfoMFI(llvm::LazyValueInfo &LVI,
@@ -43,13 +46,7 @@ public:
                        const llvm::DominatorTree &DT,
                        llvm::Instruction *Context,
                        InstructionsSet &Instructions,
-                       bool ZeroExtendConstraints) :
-    LVI(LVI),
-    DFRA(DFRA),
-    DT(DT),
-    Context(Context),
-    Instructions(Instructions),
-    ZeroExtendConstraints(ZeroExtendConstraints) {}
+                       bool ZeroExtendConstraints);
 
 public:
   LatticeElement combineValues(const LatticeElement &LHS,

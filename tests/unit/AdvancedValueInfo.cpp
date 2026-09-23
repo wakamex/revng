@@ -235,6 +235,34 @@ end:
                                aI64(8) } } });
 }
 
+BOOST_AUTO_TEST_CASE(TestExtensionConstraintsAcrossNodes) {
+  checkAdvancedValueInfo(R"LLVM(
+  %original = load i64, i64* @pc
+  %to_store = and i64 %original, 255
+  %narrow = trunc i64 %to_store to i8
+  %extended = zext i8 %narrow to i64
+  %signed = sext i8 %narrow to i64
+  %duplicate = add i8 %narrow, %narrow
+  %small = icmp ult i64 %extended, 4
+  br i1 %small, label %filtered, label %end
+
+filtered:
+  %keep = icmp ne i8 %narrow, 1
+  br i1 %keep, label %store, label %end
+
+store:
+  store i64 %to_store, i64* @pc
+  br label %end
+
+end:
+  unreachable
+)LLVM",
+                         // Preserve the existing conservative result across
+                         // extension constraints.
+                         { { "to_store",
+                             { aI64(0), aI64(1), aI64(2), aI64(3) } } });
+}
+
 BOOST_AUTO_TEST_CASE(TestPhi) {
   checkAdvancedValueInfo(R"LLVM(
   br label %start

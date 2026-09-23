@@ -43,6 +43,36 @@ static Logger AVILogger("avi");
 
 inline RunningStatistics AVICFEGSizeStatitistics("avi-cfeg-size");
 
+AdvancedValueInfoMFI::AdvancedValueInfoMFI(LazyValueInfo &LVI,
+                                           DataFlowRangeAnalysis &DFRA,
+                                           const DominatorTree &DT,
+                                           Instruction *Context,
+                                           InstructionsSet &Instructions,
+                                           bool ZeroExtendConstraints) :
+  LVI(LVI), DFRA(DFRA), DT(DT), Context(Context), Instructions(Instructions) {
+  // The IR is unchanged during this request. Discover candidates once and
+  // retain their iteration order across all control-flow nodes and revisits.
+  for (Instruction *I : Instructions) {
+    auto &InstructionCandidates = Candidates[I];
+    InstructionCandidates.insert(I);
+
+    if (ZeroExtendConstraints) {
+      // Steal constraints from trunc'd versions of this value and use the most
+      // accurate
+      for (User *U : I->users()) {
+        if (auto *Trunc = dyn_cast<TruncInst>(U)) {
+          InstructionCandidates.insert(Trunc);
+          for (User *U2 : Trunc->users()) {
+            if (auto *ZExt = dyn_cast<ZExtInst>(U2)) {
+              InstructionCandidates.insert(ZExt);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 AdvancedValueInfoMFI::LatticeElement
 AdvancedValueInfoMFI::combineValues(const LatticeElement &LHS,
                                     const LatticeElement &RHS) const {
@@ -90,24 +120,6 @@ AdvancedValueInfoMFI::applyTransferFunction(Label L,
     uint32_t BitWidth = I->getType()->getIntegerBitWidth();
     ConstantRangeSet Range(BitWidth, true);
 
-    SmallSet<Instruction *, 4> Candidates;
-    Candidates.insert(I);
-
-    if (ZeroExtendConstraints) {
-      // Steal constraints from trunc'd versions of this value and use the most
-      // accurate
-      for (User *U : I->users()) {
-        if (auto *Trunc = dyn_cast<TruncInst>(U)) {
-          Candidates.insert(Trunc);
-          for (User *U2 : Trunc->users()) {
-            if (auto *ZExt = dyn_cast<ZExtInst>(U2)) {
-              Candidates.insert(ZExt);
-            }
-          }
-        }
-      }
-    }
-
     if (AVILogger.isEnabled()) {
       AVILogger << "Considering constraints on " << getName(I);
       if (L->Destination != nullptr) {
@@ -120,7 +132,7 @@ AdvancedValueInfoMFI::applyTransferFunction(Label L,
     }
 
     LoggerIndent Indent(AVILogger);
-    for (Instruction *Candidate : Candidates) {
+    for (Instruction *Candidate : Candidates.at(I)) {
       revng_log(AVILogger, "Considering " << getName(Candidate));
       LoggerIndent Indent(AVILogger);
       if (Candidate->getParent() != L->Source
