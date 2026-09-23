@@ -7,6 +7,7 @@
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
+#include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/CodeGen/UnreachableBlockElim.h"
 #include "llvm/IR/Function.h"
@@ -705,6 +706,9 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     // the same predicate in a single "if" (in particular in ARM) and obtain
     // more accurate constraints.
     FPM.addPass(JumpThreadingPass());
+    // Type shrinking does not use LVI. Drop its per-value deletion callbacks
+    // before rewriting instructions, rather than retaining them until EarlyCSE.
+    FPM.addPass(InvalidateAnalysisPass<LazyValueAnalysis>());
 
     // Shrink instructions
 
