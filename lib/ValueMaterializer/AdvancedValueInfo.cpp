@@ -285,10 +285,8 @@ runAVI(const DataFlowGraph &DFG,
 
     DFGEntryPoints.insert(BB);
 
-    // Taint all the nodes to go from ContextBB to LimitedStartBB
-    auto Nodes = nodesBetweenReverse(ContextBB, BB);
-
-    NodeSet.insert(Nodes.begin(), Nodes.end());
+    // Taint all the nodes to go from BB to ContextBB
+    insertNodesBetween(BB, ContextBB, NodeSet);
   }
 
   NodeSet.insert(ContextBB);

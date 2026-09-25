@@ -398,6 +398,52 @@ nodesBetweenReverse(GraphT Source, GraphT Destination) {
   return nodesBetweenImpl<GraphT, Inverse<GraphT>>(Source, Destination);
 }
 
+/// Insert into \p Result the nodes that `nodesBetween(Source, Target)` returns.
+///
+/// The forward search only enters nodes found by the backward search from
+/// `Target`: every node on a shortest path from `Source` to a node between the
+/// two also reaches `Target` without passing through `Source`. This avoids
+/// exploring the part of the graph reachable from `Source` that cannot reach
+/// `Target`.
+///
+/// Nodes are inserted in the backward search order, then `Source` and
+/// `Target`. This is also the order of `nodesBetweenReverse(Target, Source)`
+/// whenever its first search visits fewer nodes than its second.
+template<class GraphT, class SetT>
+void insertNodesBetween(GraphT Source, GraphT Target, SetT &Result) {
+  using FGT = llvm::GraphTraits<GraphT>;
+  using BGT = llvm::GraphTraits<llvm::Inverse<GraphT>>;
+  using NodeRef = typename FGT::NodeRef;
+
+  revng_assert(Source != nullptr);
+  revng_assert(Target != nullptr);
+
+  auto Backward = findReachableNodes<NodeRef, BGT>(Target, Source);
+
+  llvm::SmallVector<NodeRef, 16> Worklist{ Source };
+  llvm::SmallPtrSet<NodeRef, 16> Forward{ Source };
+  while (not Worklist.empty()) {
+    NodeRef Node = Worklist.pop_back_val();
+    for (NodeRef Child :
+         llvm::make_range(FGT::child_begin(Node), FGT::child_end(Node))) {
+      if (Child != Target and Backward.contains(Child)
+          and Forward.insert(Child).second) {
+        Worklist.push_back(Child);
+      }
+    }
+  }
+
+  if (Forward.size() > 1 or hasSuccessor<GraphT, FGT>(Source, Target)) {
+    for (NodeRef Node : Backward)
+      if (Forward.contains(Node))
+        Result.insert(Node);
+    Result.insert(Source);
+    Result.insert(Target);
+  } else if (Source == Target) {
+    Result.insert(Source);
+  }
+}
+
 /// Helper function which checks that the `ScopeGraph` is a DAG
 template<class GraphT, class NodeT>
 bool isDAG(GraphT Graph, Logger *Log = nullptr) {

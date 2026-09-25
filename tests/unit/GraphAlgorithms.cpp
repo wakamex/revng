@@ -4,6 +4,8 @@
 
 #define BOOST_TEST_MODULE GraphAlgorithms
 bool init_unit_test();
+#include <random>
+
 #include "boost/test/unit_test.hpp"
 
 #include "llvm/ADT/SmallSet.h"
@@ -369,4 +371,52 @@ BOOST_AUTO_TEST_CASE(NullTargetTest) {
   revng_check(ReachableSet[0] == RG.InitialBlock);
   revng_check(ReachableSet[1] == RG.SmallerBlock);
   revng_check(ReachableSet[2] == RG.EndBlock);
+}
+
+BOOST_AUTO_TEST_CASE(InsertNodesBetweenMatchesNodesBetween) {
+  using NodeType = BidirectionalNode<MyBidirectionalNode>;
+  using BlockSet = llvm::SmallSetVector<NodeType *, 4>;
+  using Predecessors = llvm::GraphTraits<llvm::Inverse<NodeType *>>;
+
+  // Random graphs with cycles, self-loops, parallel edges and unreachable
+  // nodes, compared on every source and target pair
+  std::mt19937 Random(20260925);
+  unsigned OrderedComparisons = 0;
+  for (unsigned Iteration = 0; Iteration < 300; ++Iteration) {
+    GenericGraph<NodeType> Graph;
+    std::vector<NodeType *> Nodes;
+    unsigned Size = 1 + Iteration % 12;
+    for (unsigned Index = 0; Index < Size; ++Index)
+      Nodes.push_back(Graph.addNode(Index));
+
+    std::uniform_int_distribution<unsigned> Pick(0, Size - 1);
+    unsigned Edges = Random() % (2 * Size + 1);
+    for (unsigned Edge = 0; Edge < Edges; ++Edge)
+      Nodes[Pick(Random)]->addSuccessor(Nodes[Pick(Random)]);
+
+    for (NodeType *Source : Nodes) {
+      for (NodeType *Target : Nodes) {
+        BlockSet Expected = nodesBetween(Source, Target);
+        BlockSet Reverse = nodesBetweenReverse(Target, Source);
+        BlockSet Actual;
+        insertNodesBetween(Source, Target, Actual);
+
+        revng_check(Actual.size() == Expected.size());
+        revng_check(Reverse.size() == Expected.size());
+        for (NodeType *Node : Expected)
+          revng_check(Actual.contains(Node) and Reverse.contains(Node));
+
+        // The reverse primitive iterates its smaller search when intersecting
+        auto BackwardSize = findReachableNodes<NodeType *, Predecessors>(Target,
+                                                                         Source)
+                              .size();
+        auto ForwardSize = findReachableNodes(Source, Target).size();
+        if (BackwardSize < ForwardSize) {
+          revng_check(Actual.getArrayRef() == Reverse.getArrayRef());
+          ++OrderedComparisons;
+        }
+      }
+    }
+  }
+  revng_check(OrderedComparisons > 0);
 }
