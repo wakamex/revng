@@ -42,6 +42,12 @@ using std::map;
 static Logger AVILogger("avi");
 
 inline RunningStatistics AVICFEGSizeStatitistics("avi-cfeg-size");
+inline RunningStatistics AVISkippedRegionStatistics("avi-skipped-region-size");
+
+/// Constraint propagation over a region this large spans most of a lifted
+/// function: it takes tens of minutes and, in the observed cases, recovers no
+/// value. Such requests proceed without oracle constraints.
+static constexpr size_t MaxAnalyzedBlocks = 100'000;
 
 AdvancedValueInfoMFI::AdvancedValueInfoMFI(LazyValueInfo &LVI,
                                            DataFlowRangeAnalysis &DFRA,
@@ -290,6 +296,13 @@ runAVI(const DataFlowGraph &DFG,
   }
 
   NodeSet.insert(ContextBB);
+
+  if (NodeSet.size() > MaxAnalyzedBlocks) {
+    revng_log(ValueMaterializerLogger,
+              "Skipping a CFG subset of " << NodeSet.size() << " blocks");
+    AVISkippedRegionStatistics.push(NodeSet.size());
+    return {};
+  }
 
   //
   // Create the subgraph of the CFG containing Whitelist
