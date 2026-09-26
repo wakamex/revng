@@ -3,6 +3,7 @@
 //
 
 #include <compare>
+#include <optional>
 
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SmallVector.h"
@@ -973,8 +974,8 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   PM.add(new FunctionCallIdentification(Root, Globals, Model->Architecture()));
   PM.run(TheModule);
 
-  ValueToValueMapTy OldToNew;
-  Function *OptimizedFunction = createTemporaryRoot(TheFunction, OldToNew);
+  std::optional<ValueToValueMapTy> OldToNew(std::in_place);
+  Function *OptimizedFunction = createTemporaryRoot(TheFunction, *OldToNew);
 
   MetaAddress::Features CommonFeatures = findCommonFeatures(OptimizedFunction);
 
@@ -984,8 +985,8 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   revng::IRBuilder Builder(TheModule.getContext());
   for (CallBase *Call : callersIn(JTM.exitTB(), TheFunction)) {
     BasicBlock *BB = Call->getParent();
-    auto It = OldToNew.find(Call);
-    if (It == OldToNew.end())
+    auto It = OldToNew->find(Call);
+    if (It == OldToNew->end())
       continue;
     Builder.SetInsertPoint(cast<CallInst>(&*It->second));
     ProgramCounterHandler *PCH = JTM.programCounterHandler();
@@ -995,6 +996,11 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
                      ComposedIntegerPC,
                      TrackedInstructionType::WrittenInPC);
   }
+
+  // The map holds a tracking handle on every original and cloned value, which
+  // makes each later deletion or replacement in the clone update it. Nothing
+  // reads it after this point, so release it before optimizing.
+  OldToNew.reset();
 
   promoteHelpersToIntrinsics(OptimizedFunction, Builder);
 
