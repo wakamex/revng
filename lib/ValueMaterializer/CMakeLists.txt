@@ -7,6 +7,7 @@ revng_add_library_internal(
   SHARED
   AdvancedValueInfo.cpp
   ControlFlowEdgesGraph.cpp
+  ControlFlowGraphIndex.cpp
   DataFlowGraph.cpp
   DataFlowRangeAnalysis.cpp
   ValueMaterializer.cpp)

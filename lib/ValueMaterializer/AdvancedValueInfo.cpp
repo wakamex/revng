@@ -224,7 +224,8 @@ runAVI(const DataFlowGraph &DFG,
        const llvm::DominatorTree &DT,
        llvm::LazyValueInfo &LVI,
        DataFlowRangeAnalysis &DFRA,
-       bool ZeroExtendConstraints) {
+       bool ZeroExtendConstraints,
+       ControlFlowGraphIndex *CFGIndex) {
   using namespace llvm;
 
   //
@@ -286,6 +287,11 @@ runAVI(const DataFlowGraph &DFG,
   SmallPtrSet<BasicBlock *, 16> NodeSet;
   auto Explore = [&](BasicBlock *BB) {
     DFGEntryPoints.insert(BB);
+    if (CFGIndex != nullptr)
+      return CFGIndex->insertBlocksBetween(BB,
+                                           ContextBB,
+                                           NodeSet,
+                                           MaxAnalyzedBlocks);
     return insertNodesBetween(BB, ContextBB, NodeSet, MaxAnalyzedBlocks);
   };
 

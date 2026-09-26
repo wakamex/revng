@@ -12,6 +12,7 @@
 #include "revng/MFP/Graph.h"
 #include "revng/MFP/MFP.h"
 #include "revng/ValueMaterializer/ControlFlowEdgesGraph.h"
+#include "revng/ValueMaterializer/ControlFlowGraphIndex.h"
 #include "revng/ValueMaterializer/DataFlowRangeAnalysis.h"
 
 namespace llvm {
@@ -77,7 +78,8 @@ runAVI(const DataFlowGraph &DFG,
        const llvm::DominatorTree &DT,
        llvm::LazyValueInfo &LVI,
        DataFlowRangeAnalysis &DFRA,
-       bool ZeroExtendConstraints);
+       bool ZeroExtendConstraints,
+       ControlFlowGraphIndex *CFGIndex = nullptr);
 
 template<>
 void mfp::dump(llvm::raw_ostream &Stream,

@@ -4,10 +4,13 @@
 
 #define BOOST_TEST_MODULE AdvancedValueInfo
 bool init_unit_test();
+#include <random>
+
 #include "boost/test/unit_test.hpp"
 
 #include "llvm/Analysis/Passes.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/InitializePasses.h"
@@ -15,9 +18,11 @@ bool init_unit_test();
 
 #include "revng/ADT/Queue.h"
 #include "revng/Support/Debug.h"
+#include "revng/Support/GraphAlgorithms.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/UnitTestHelpers/LLVMTestHelpers.h"
 #include "revng/UnitTestHelpers/UnitTestHelpers.h"
+#include "revng/ValueMaterializer/ControlFlowGraphIndex.h"
 #include "revng/ValueMaterializer/DataFlowRangeAnalysis.h"
 #include "revng/ValueMaterializer/ValueMaterializer.h"
 
@@ -688,4 +693,60 @@ BOOST_AUTO_TEST_CASE(TestDataFlowRangeAnalysis) {
   )LLVM";
   testVisit(Body,
             ConstantRangeSet(Range(30, 40)) | ConstantRangeSet(Range(60, 70)));
+}
+
+BOOST_AUTO_TEST_CASE(TestControlFlowGraphIndexMatchesGenericSearch) {
+  // Random functions with switches, cycles, self-loops and unreachable
+  // blocks, compared on every block pair with random limits
+  std::mt19937 Random(20260926);
+  for (unsigned Iteration = 0; Iteration < 60; ++Iteration) {
+    LLVMContext C;
+    Module M("index", C);
+    auto *Int64 = Type::getInt64Ty(C);
+    auto *Signature = FunctionType::get(Type::getVoidTy(C), { Int64 }, false);
+    auto *F = Function::Create(Signature,
+                               GlobalValue::ExternalLinkage,
+                               "f",
+                               &M);
+    unsigned Size = 2 + Iteration % 14;
+    std::vector<BasicBlock *> Blocks;
+    for (unsigned I = 0; I < Size; ++I)
+      Blocks.push_back(BasicBlock::Create(C, "", F));
+
+    for (unsigned I = 0; I < Size; ++I) {
+      IRBuilder<> Builder(Blocks[I]);
+      unsigned Successors = Random() % 4;
+      if (Successors == 0) {
+        Builder.CreateRetVoid();
+        continue;
+      }
+      auto Pick = [&] { return Blocks[1 + Random() % (Size - 1)]; };
+      auto *Switch = Builder.CreateSwitch(F->getArg(0), Pick());
+      for (unsigned Case = 1; Case < Successors; ++Case)
+        Switch->addCase(ConstantInt::get(Int64, Case), Pick());
+    }
+    revng_check(not verifyFunction(*F, &dbgs()));
+
+    ControlFlowGraphIndex Index(*F);
+    for (BasicBlock *Source : Blocks) {
+      for (BasicBlock *Target : Blocks) {
+        size_t Limit = Random() % (Size + 2);
+        SmallPtrSet<BasicBlock *, 16> Expected, Actual;
+        bool ExpectedFits = insertNodesBetween(Source, Target, Expected, Limit);
+        bool ActualFits = Index.insertBlocksBetween(Source,
+                                                    Target,
+                                                    Actual,
+                                                    Limit);
+        revng_check(ExpectedFits == ActualFits);
+        if (ExpectedFits)
+          revng_check(Expected == Actual);
+
+        SmallPtrSet<BasicBlock *, 16> Unlimited;
+        revng_check(Index.insertBlocksBetween(Source, Target, Unlimited));
+        SmallPtrSet<BasicBlock *, 16> Reference;
+        revng_check(insertNodesBetween(Source, Target, Reference));
+        revng_check(Unlimited == Reference);
+      }
+    }
+  }
 }

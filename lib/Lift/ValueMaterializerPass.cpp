@@ -92,6 +92,10 @@ PreservedAnalyses ValueMaterializerPass::run(Function &F,
   auto &LVI = FAM.getResult<LazyValueAnalysis>(F);
   auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
 
+  // The requests below only attach metadata, so the control-flow graph stays
+  // unchanged and every request can search the same index
+  ControlFlowGraphIndex CFGIndex(F);
+
   BasicBlock *Entry = &F.getEntryBlock();
   auto GetConstantArgument = [](CallBase *Call, unsigned Index) {
     return cast<ConstantInt>(Call->getArgOperand(Index))->getLimitedValue();
@@ -121,7 +125,8 @@ PreservedAnalyses ValueMaterializerPass::run(Function &F,
                                                      DFRA,
                                                      DT,
                                                      Limits,
-                                                     Oracle);
+                                                     Oracle,
+                                                     &CFGIndex);
     if (Results.values())
       Values = std::move(*Results.values());
 

@@ -51,6 +51,7 @@ private:
   const llvm::DominatorTree &DT;
   DataFlowGraph::Limits TheLimits;
   Oracle::Values Oracle;
+  ControlFlowGraphIndex *CFGIndex;
 
   //
   // Outputs
@@ -71,7 +72,8 @@ private:
                     DataFlowRangeAnalysis &DFRA,
                     const llvm::DominatorTree &DT,
                     DataFlowGraph::Limits TheLimits,
-                    Oracle::Values Oracle) :
+                    Oracle::Values Oracle,
+                    ControlFlowGraphIndex *CFGIndex) :
     Context(Context),
     V(V),
     MO(MO),
@@ -79,18 +81,22 @@ private:
     DFRA(DFRA),
     DT(DT),
     TheLimits(TheLimits),
-    Oracle(Oracle) {}
+    Oracle(Oracle),
+    CFGIndex(CFGIndex) {}
 
 public:
-  static ValueMaterializer getValuesFor(llvm::Instruction *Context,
-                                        llvm::Value *V,
-                                        MemoryOracle &MO,
-                                        llvm::LazyValueInfo &LVI,
-                                        DataFlowRangeAnalysis &DFRA,
-                                        const llvm::DominatorTree &DT,
-                                        DataFlowGraph::Limits TheLimits,
-                                        Oracle::Values Oracle) {
-    ValueMaterializer Result(Context, V, MO, LVI, DFRA, DT, TheLimits, Oracle);
+  static ValueMaterializer
+  getValuesFor(llvm::Instruction *Context,
+               llvm::Value *V,
+               MemoryOracle &MO,
+               llvm::LazyValueInfo &LVI,
+               DataFlowRangeAnalysis &DFRA,
+               const llvm::DominatorTree &DT,
+               DataFlowGraph::Limits TheLimits,
+               Oracle::Values Oracle,
+               ControlFlowGraphIndex *CFGIndex = nullptr) {
+    ValueMaterializer
+      Result(Context, V, MO, LVI, DFRA, DT, TheLimits, Oracle, CFGIndex);
     Result.run();
     return Result;
   }
