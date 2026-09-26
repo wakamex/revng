@@ -376,12 +376,11 @@ BOOST_AUTO_TEST_CASE(NullTargetTest) {
 BOOST_AUTO_TEST_CASE(InsertNodesBetweenMatchesNodesBetween) {
   using NodeType = BidirectionalNode<MyBidirectionalNode>;
   using BlockSet = llvm::SmallSetVector<NodeType *, 4>;
-  using Predecessors = llvm::GraphTraits<llvm::Inverse<NodeType *>>;
 
   // Random graphs with cycles, self-loops, parallel edges and unreachable
-  // nodes, compared on every source and target pair
+  // nodes, compared on every source and target pair with random limits
   std::mt19937 Random(20260925);
-  unsigned OrderedComparisons = 0;
+  unsigned Exceeded = 0;
   for (unsigned Iteration = 0; Iteration < 300; ++Iteration) {
     GenericGraph<NodeType> Graph;
     std::vector<NodeType *> Nodes;
@@ -398,25 +397,25 @@ BOOST_AUTO_TEST_CASE(InsertNodesBetweenMatchesNodesBetween) {
       for (NodeType *Target : Nodes) {
         BlockSet Expected = nodesBetween(Source, Target);
         BlockSet Reverse = nodesBetweenReverse(Target, Source);
-        BlockSet Actual;
-        insertNodesBetween(Source, Target, Actual);
-
-        revng_check(Actual.size() == Expected.size());
         revng_check(Reverse.size() == Expected.size());
         for (NodeType *Node : Expected)
-          revng_check(Actual.contains(Node) and Reverse.contains(Node));
+          revng_check(Reverse.contains(Node));
 
-        // The reverse primitive iterates its smaller search when intersecting
-        auto BackwardSize = findReachableNodes<NodeType *, Predecessors>(Target,
-                                                                         Source)
-                              .size();
-        auto ForwardSize = findReachableNodes(Source, Target).size();
-        if (BackwardSize < ForwardSize) {
-          revng_check(Actual.getArrayRef() == Reverse.getArrayRef());
-          ++OrderedComparisons;
-        }
+        BlockSet Actual;
+        revng_check(insertNodesBetween(Source, Target, Actual));
+        revng_check(Actual.size() == Expected.size());
+        for (NodeType *Node : Expected)
+          revng_check(Actual.contains(Node));
+
+        size_t Limit = Random() % (Size + 2);
+        BlockSet Limited;
+        bool Fits = insertNodesBetween(Source, Target, Limited, Limit);
+        revng_check(Fits == (Expected.size() <= Limit));
+        if (Fits)
+          revng_check(Limited.size() == Expected.size());
+        Exceeded += not Fits;
       }
     }
   }
-  revng_check(OrderedComparisons > 0);
+  revng_check(Exceeded > 0);
 }

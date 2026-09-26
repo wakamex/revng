@@ -281,32 +281,39 @@ runAVI(const DataFlowGraph &DFG,
     });
   };
 
+  // Taint all the nodes to go from each entry point to ContextBB, stopping
+  // once the region is known to exceed the limit
   SmallPtrSet<BasicBlock *, 16> NodeSet;
-  for (BasicBlock *BB : InstructionBlocks) {
-    if (not IsDominated(BB)) {
-      DFGEntryPoints.insert(BB);
-      // Taint all the nodes to go from BB to ContextBB
-      insertNodesBetween(BB, ContextBB, NodeSet);
-    }
-  }
+  auto Explore = [&](BasicBlock *BB) {
+    DFGEntryPoints.insert(BB);
+    return insertNodesBetween(BB, ContextBB, NodeSet, MaxAnalyzedBlocks);
+  };
+
+  bool Fits = true;
+  for (BasicBlock *BB : InstructionBlocks)
+    if (Fits and not IsDominated(BB))
+      Fits = Explore(BB);
 
   // A dominated block outside those regions is reached only through
   // ContextBB: explore from it as well.
-  SmallVector<BasicBlock *, 4> Unreached;
-  for (BasicBlock *BB : InstructionBlocks)
-    if (IsDominated(BB) and not NodeSet.contains(BB))
-      Unreached.push_back(BB);
+  if (Fits) {
+    SmallVector<BasicBlock *, 4> Unreached;
+    for (BasicBlock *BB : InstructionBlocks)
+      if (IsDominated(BB) and not NodeSet.contains(BB))
+        Unreached.push_back(BB);
 
-  for (BasicBlock *BB : Unreached) {
-    DFGEntryPoints.insert(BB);
-    insertNodesBetween(BB, ContextBB, NodeSet);
+    for (BasicBlock *BB : Unreached)
+      if (Fits)
+        Fits = Explore(BB);
   }
 
   NodeSet.insert(ContextBB);
 
-  if (NodeSet.size() > MaxAnalyzedBlocks) {
+  if (not Fits or NodeSet.size() > MaxAnalyzedBlocks) {
+    // When the search stopped early, NodeSet holds only part of the region
     revng_log(ValueMaterializerLogger,
-              "Skipping a CFG subset of " << NodeSet.size() << " blocks");
+              "Skipping a CFG subset of at least " << NodeSet.size()
+                                                   << " blocks");
     AVISkippedRegionStatistics.push(NodeSet.size());
     return {};
   }

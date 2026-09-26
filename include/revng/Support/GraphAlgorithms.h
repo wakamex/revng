@@ -5,6 +5,7 @@
 //
 
 #include <algorithm>
+#include <limits>
 #include <ranges>
 #include <set>
 #include <vector>
@@ -398,19 +399,22 @@ nodesBetweenReverse(GraphT Source, GraphT Destination) {
   return nodesBetweenImpl<GraphT, Inverse<GraphT>>(Source, Destination);
 }
 
-/// Insert into \p Result the nodes that `nodesBetween(Source, Target)` returns.
+/// Insert into \p Result the nodes that `nodesBetween(Source, Target)`
+/// returns, in no particular order. If they number more than \p Limit, return
+/// false instead, possibly after inserting only some of them.
 ///
-/// The forward search only enters nodes found by the backward search from
-/// `Target`: every node on a shortest path from `Source` to a node between the
-/// two also reaches `Target` without passing through `Source`. This avoids
-/// exploring the part of the graph reachable from `Source` that cannot reach
-/// `Target`.
-///
-/// Nodes are inserted in the backward search order, then `Source` and
-/// `Target`. This is also the order of `nodesBetweenReverse(Target, Source)`
-/// whenever its first search visits fewer nodes than its second.
+/// The forward search from `Source` and the backward search from `Target`
+/// advance alternately. A node found by both lies between the two, so the
+/// search stops as soon as more than `Limit` nodes are known to. Once either
+/// search finishes, the other restarts and only enters the nodes it found:
+/// every node on a shortest path from `Source` to a node between the two
+/// also reaches `Target` without passing through `Source`, and symmetrically.
+/// The work is thus bounded by about twice the smaller of the two searches.
 template<class GraphT, class SetT>
-void insertNodesBetween(GraphT Source, GraphT Target, SetT &Result) {
+bool insertNodesBetween(GraphT Source,
+                        GraphT Target,
+                        SetT &Result,
+                        size_t Limit = std::numeric_limits<size_t>::max()) {
   using FGT = llvm::GraphTraits<GraphT>;
   using BGT = llvm::GraphTraits<llvm::Inverse<GraphT>>;
   using NodeRef = typename FGT::NodeRef;
@@ -418,30 +422,77 @@ void insertNodesBetween(GraphT Source, GraphT Target, SetT &Result) {
   revng_assert(Source != nullptr);
   revng_assert(Target != nullptr);
 
-  auto Backward = findReachableNodes<NodeRef, BGT>(Target, Source);
+  if (Source == Target) {
+    Result.insert(Source);
+    return Limit >= 1;
+  }
 
-  llvm::SmallVector<NodeRef, 16> Worklist{ Source };
-  llvm::SmallPtrSet<NodeRef, 16> Forward{ Source };
-  while (not Worklist.empty()) {
-    NodeRef Node = Worklist.pop_back_val();
-    for (NodeRef Child :
-         llvm::make_range(FGT::child_begin(Node), FGT::child_end(Node))) {
-      if (Child != Target and Backward.contains(Child)
-          and Forward.insert(Child).second) {
-        Worklist.push_back(Child);
+  struct Search {
+    llvm::SmallVector<NodeRef, 16> Stack;
+    llvm::SmallPtrSet<NodeRef, 16> Visited;
+  };
+
+  // Visit the children of one node, never entering Stop and, when Within is
+  // not null, only entering its nodes. Returns the newly visited nodes.
+  auto Step = [](Search &S, NodeRef Stop, auto Children, const auto *Within) {
+    llvm::SmallVector<NodeRef, 4> New;
+    NodeRef Node = S.Stack.pop_back_val();
+    for (NodeRef Child : Children(Node)) {
+      if (Child != Stop and (Within == nullptr or Within->contains(Child))
+          and S.Visited.insert(Child).second) {
+        S.Stack.push_back(Child);
+        New.push_back(Child);
       }
     }
+    return New;
+  };
+  auto Successors = [](NodeRef Node) {
+    return llvm::make_range(FGT::child_begin(Node), FGT::child_end(Node));
+  };
+  auto Predecessors = [](NodeRef Node) {
+    return llvm::make_range(BGT::child_begin(Node), BGT::child_end(Node));
+  };
+  using Set = llvm::SmallPtrSet<NodeRef, 16>;
+  const Set *Unrestricted = nullptr;
+
+  Search Forward{ { Source }, { Source } };
+  Search Backward{ { Target }, { Target } };
+  // Nodes found by both searches lie between Source and Target, which then
+  // also belong to the result
+  size_t Common = 0;
+  while (not Forward.Stack.empty() and not Backward.Stack.empty()) {
+    for (NodeRef Node : Step(Forward, Target, Successors, Unrestricted))
+      Common += Backward.Visited.contains(Node);
+    for (NodeRef Node : Step(Backward, Source, Predecessors, Unrestricted))
+      Common += Forward.Visited.contains(Node);
+    if (Common > 0 and Common + 2 > Limit)
+      return false;
   }
 
-  if (Forward.size() > 1 or hasSuccessor<GraphT, FGT>(Source, Target)) {
-    for (NodeRef Node : Backward)
-      if (Forward.contains(Node))
-        Result.insert(Node);
+  // Search again, only within the nodes the finished search found
+  Search Between;
+  if (Backward.Stack.empty()) {
+    Between = Search{ { Source }, { Source } };
+    while (not Between.Stack.empty())
+      Step(Between, Target, Successors, &Backward.Visited);
+    Between.Visited.erase(Source);
+  } else {
+    Between = Search{ { Target }, { Target } };
+    while (not Between.Stack.empty())
+      Step(Between, Source, Predecessors, &Forward.Visited);
+    Between.Visited.erase(Target);
+  }
+
+  if (not Between.Visited.empty()
+      or hasSuccessor<GraphT, FGT>(Source, Target)) {
+    if (Between.Visited.size() + 2 > Limit)
+      return false;
+    Result.insert(Between.Visited.begin(), Between.Visited.end());
     Result.insert(Source);
     Result.insert(Target);
-  } else if (Source == Target) {
-    Result.insert(Source);
   }
+
+  return true;
 }
 
 /// Helper function which checks that the `ScopeGraph` is a DAG
