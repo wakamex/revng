@@ -43,6 +43,7 @@
 
 #include "JumpTargetManager.h"
 #include "NoReturnAnalysis.h"
+#include "PromoteLocalTemporaries.h"
 #include "RootAnalyzer.h"
 #include "ValueMaterializerPass.h"
 
@@ -91,6 +92,19 @@ public:
       eraseFromParent(Call);
 
     return PreservedAnalyses::none();
+  }
+};
+
+/// Promote per-block temporaries in one walk before the general promotion
+class PromoteLocalTemporariesPass
+  : public PassInfoMixin<PromoteLocalTemporariesPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM) {
+    if (not promoteLocalTemporaries(F, AM.getResult<DominatorTreeAnalysis>(F)))
+      return PreservedAnalyses::all();
+    PreservedAnalyses Result;
+    Result.preserveSet<CFGAnalyses>();
+    return Result;
   }
 };
 
@@ -695,6 +709,7 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     FPM.addPass(ShrinkInstructionOperandsPass());
 
     // Canonicalization
+    FPM.addPass(PromoteLocalTemporariesPass());
     FPM.addPass(PromotePass());
     FPM.addPass(EarlyCSEPass(true));
     FPM.addPass(InstCombinePass(InstCombineMaxIterations));

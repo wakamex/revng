@@ -16,6 +16,7 @@ revng_add_library_internal(
   JumpTargetManager.cpp
   NoReturnAnalysis.cpp
   PostLiftVerifyPass.cpp
+  PromoteLocalTemporaries.cpp
   RootAnalyzer.cpp
   SelfReferencingDbgAnnotationWriter.cpp
   ValueMaterializerPass.cpp
