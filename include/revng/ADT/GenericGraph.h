@@ -527,6 +527,27 @@ public:
       removeSuccessorEdge(Base::Successors.begin());
   }
 
+  /// Remove every outgoing edge of the nodes in \p Sources, a set providing
+  /// `contains`. Removing edges one at a time takes time quadratic in a
+  /// node's degree; this takes time linear in the affected edges. The
+  /// remaining edges keep their order.
+  template<typename SetT>
+  static void clearSuccessors(const SetT &Sources) {
+    llvm::SmallPtrSet<BidirectionalNode *, 16> Targets;
+    for (BidirectionalNode *Source : Sources)
+      for (const auto &Edge : Source->Successors)
+        Targets.insert(Edge.Neighbor);
+
+    for (BidirectionalNode *Target : Targets) {
+      llvm::erase_if(Target->Predecessors, [&Sources](const auto &Edge) {
+        return Sources.contains(Edge.Neighbor);
+      });
+    }
+
+    for (BidirectionalNode *Source : Sources)
+      Source->Successors.clear();
+  }
+
 public:
   llvm::iterator_range<const_child_iterator> predecessors() const {
     return this->toNeighborRange(Predecessors);

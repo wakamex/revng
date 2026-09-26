@@ -103,9 +103,7 @@ void DataFlowGraph::removeCycles() {
         SCCNodes.insert(Node);
 
   // Purge all successors
-  for (Node *SCCNode : SCCNodes)
-    while (SCCNode->hasSuccessors())
-      SCCNode->removeSuccessor(SCCNode->successors().begin());
+  Node::clearSuccessors(SCCNodes);
 }
 
 void DataFlowGraph::purgeUnreachable() {

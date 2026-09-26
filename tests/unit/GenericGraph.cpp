@@ -4,8 +4,11 @@
 
 #define BOOST_TEST_MODULE GenericGraph
 bool init_unit_test();
+#include <random>
+
 #include "boost/test/unit_test.hpp"
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SCCIterator.h"
@@ -614,4 +617,64 @@ BOOST_AUTO_TEST_CASE(MutableEdgeNodeRemovalTest) {
   revng_check(B->predecessorCount() == 0);
   revng_check(C->successorCount() == 0);
   revng_check(C->predecessorCount() == 1);
+}
+
+BOOST_AUTO_TEST_CASE(ClearSuccessorsOfSetMatchesOneAtATime) {
+  struct Data {
+    int Index;
+  };
+  using Node = BidirectionalNode<Data>;
+  using Edges = std::vector<std::pair<std::vector<int>, std::vector<int>>>;
+
+  auto Snapshot = [](GenericGraph<Node> &Graph) {
+    Edges Result;
+    for (Node *N : Graph.nodes()) {
+      std::vector<int> Successors, Predecessors;
+      for (Node *S : N->successors())
+        Successors.push_back(S->Index);
+      for (Node *P : N->predecessors())
+        Predecessors.push_back(P->Index);
+      Result.emplace_back(Successors, Predecessors);
+    }
+    return Result;
+  };
+
+  // Random graphs with parallel edges and self-loops; clear the outgoing
+  // edges of a random subset both ways and compare every edge list in order
+  std::mt19937 Random(20260926);
+  for (unsigned Iteration = 0; Iteration < 200; ++Iteration) {
+    unsigned Size = 1 + Iteration % 16;
+    unsigned EdgeCount = Random() % (4 * Size + 1);
+    std::vector<std::pair<unsigned, unsigned>> EdgeList;
+    for (unsigned I = 0; I < EdgeCount; ++I)
+      EdgeList.emplace_back(Random() % Size, Random() % Size);
+    std::vector<bool> Selected;
+    for (unsigned I = 0; I < Size; ++I)
+      Selected.push_back(Random() % 2);
+
+    auto Build = [&](GenericGraph<Node> &Graph, std::vector<Node *> &Nodes) {
+      for (unsigned I = 0; I < Size; ++I)
+        Nodes.push_back(Graph.addNode(Data{ static_cast<int>(I) }));
+      for (auto [From, To] : EdgeList)
+        Nodes[From]->addSuccessor(Nodes[To]);
+    };
+
+    GenericGraph<Node> Expected, Actual;
+    std::vector<Node *> ExpectedNodes, ActualNodes;
+    Build(Expected, ExpectedNodes);
+    Build(Actual, ActualNodes);
+
+    DenseSet<Node *> Sources;
+    for (unsigned I = 0; I < Size; ++I) {
+      if (Selected[I]) {
+        Node *N = ExpectedNodes[I];
+        while (N->hasSuccessors())
+          N->removeSuccessor(N->successors().begin());
+        Sources.insert(ActualNodes[I]);
+      }
+    }
+    Node::clearSuccessors(Sources);
+
+    revng_check(Snapshot(Expected) == Snapshot(Actual));
+  }
 }
