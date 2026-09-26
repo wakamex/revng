@@ -266,32 +266,39 @@ runAVI(const DataFlowGraph &DFG,
   SmallPtrSet<BasicBlock *, 4> DFGEntryPoints;
 
   // Collect in a set all the blocks of the target instructions
-  SmallVector<BasicBlock *> InstructionBlocks;
+  SmallPtrSet<BasicBlock *, 4> InstructionBlocks;
   for (Instruction *I : Targets)
-    InstructionBlocks.push_back(I->getParent());
+    InstructionBlocks.insert(I->getParent());
 
-  // Ensure we start from nodes dominating others
-  llvm::sort(InstructionBlocks, [&DT](BasicBlock *LHS, BasicBlock *RHS) {
-    if (LHS == RHS)
-      return false;
-    else if (DT.dominates(LHS, RHS))
-      return true;
-    else if (DT.dominates(RHS, LHS))
-      return false;
-    else
-      return LHS < RHS;
-  });
+  // Start from every block that no other target block dominates. Every
+  // execution reaching a dominated block has passed through its dominator,
+  // while blocks that do not dominate each other can each be reached without
+  // the other: the region between one of them and ContextBB covers only the
+  // executions passing through it.
+  auto IsDominated = [&](BasicBlock *BB) {
+    return any_of(InstructionBlocks, [&](BasicBlock *Other) {
+      return Other != BB and DT.dominates(Other, BB);
+    });
+  };
 
   SmallPtrSet<BasicBlock *, 16> NodeSet;
   for (BasicBlock *BB : InstructionBlocks) {
+    if (not IsDominated(BB)) {
+      DFGEntryPoints.insert(BB);
+      // Taint all the nodes to go from BB to ContextBB
+      insertNodesBetween(BB, ContextBB, NodeSet);
+    }
+  }
 
-    // Is the block of the current instruction already whitelisted?
-    if (NodeSet.contains(BB))
-      continue;
+  // A dominated block outside those regions is reached only through
+  // ContextBB: explore from it as well.
+  SmallVector<BasicBlock *, 4> Unreached;
+  for (BasicBlock *BB : InstructionBlocks)
+    if (IsDominated(BB) and not NodeSet.contains(BB))
+      Unreached.push_back(BB);
 
+  for (BasicBlock *BB : Unreached) {
     DFGEntryPoints.insert(BB);
-
-    // Taint all the nodes to go from BB to ContextBB
     insertNodesBetween(BB, ContextBB, NodeSet);
   }
 
