@@ -7,12 +7,31 @@
 
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/ADCE.h"
+#include "llvm/Transforms/Scalar/LoopPassManager.h"
+#include "llvm/Transforms/Scalar/LoopRotation.h"
+#include "llvm/Transforms/Scalar/SCCP.h"
+#include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/LCSSA.h"
+#include "llvm/Transforms/Utils/LoopSimplify.h"
+#include "llvm/Transforms/Utils/UnrollLoop.h"
 
 #include "revng/InlineHelpers/InlineHelpers.h"
 #include "revng/Support/CommandLine.h"
@@ -73,9 +92,182 @@ char InlineHelpersLegacyPass::ID = 0;
 using Register = RegisterPass<InlineHelpersLegacyPass>;
 static Register X("inline-helpers", "Inline Helpers Pass", true, true);
 
-class InlineHelpers {
+/// Loops in a specialized helper with a constant trip count up to this bound
+/// are unrolled completely, so that per-iteration CPU-state offsets become
+/// constants.
+static constexpr unsigned MaxUnrolledTripCount = 64;
+
+/// Copies of helpers specialized for the constant arguments at their call
+/// sites.
+///
+/// Helpers reach CPU-state variables through a switch over every byte offset
+/// relative to `@env`. The module defines `@env` and the critical arguments
+/// are constants, so each switch folds to one case once loops over bytes or
+/// lanes are unrolled. Inlining the original body instead copies every case
+/// into the caller: a single SSE shuffle helper can exceed 300,000
+/// instructions. Each specialization is built once and reused by every call
+/// with the same helper and constant arguments.
+class HelperSpecializations {
+private:
+  using Key = std::pair<Function *, std::vector<Constant *>>;
+  std::map<Key, Function *> Cache;
+
 public:
-  InlineHelpers() = default;
+  ~HelperSpecializations() {
+    for (auto &[Key, Specialized] : Cache)
+      if (Specialized != nullptr)
+        Specialized->eraseFromParent();
+  }
+
+  /// Replace \p Call with a call to its helper specialized for the call's
+  /// constant arguments.
+  CallInst *specialize(CallInst *Call);
+
+private:
+  static Function *build(Function *Helper, ArrayRef<Constant *> Arguments);
+};
+
+/// Run \p FPM on \p F with every analysis available, including the module
+/// proxies that alias analysis requires.
+static void runPasses(Function &F, FunctionPassManager &FPM) {
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
+  PassBuilder PB;
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+  FPM.run(F, FAM);
+}
+
+static void simplify(Function &F, bool UnrollLoops) {
+  FunctionPassManager FPM;
+  FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  if (UnrollLoops) {
+    // Rotation moves each loop's exit test to its latch, where scalar
+    // evolution computes the constant trip count
+    FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
+    FPM.addPass(LoopSimplifyPass());
+    FPM.addPass(LCSSAPass());
+  }
+  runPasses(F, FPM);
+}
+
+/// Unroll completely every innermost loop with a small constant trip count,
+/// simplifying after each, until none remains.
+static void unrollConstantLoops(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  while (true) {
+    simplify(F, true);
+
+    DominatorTree DT(F);
+    LoopInfo LI(DT);
+    AssumptionCache AC(F);
+    TargetLibraryInfoImpl TLII(Triple(F.getParent()->getTargetTriple()));
+    TargetLibraryInfo TLI(TLII, &F);
+    ScalarEvolution SE(F, TLI, AC, DT, LI);
+    TargetTransformInfo TTI(DL);
+    OptimizationRemarkEmitter ORE(&F);
+
+    Loop *ToUnroll = nullptr;
+    unsigned TripCount = 0;
+    for (Loop *L : LI.getLoopsInPreorder()) {
+      if (not L->isInnermost() or not L->isLoopSimplifyForm())
+        continue;
+      // A loop with an early exit has only a bound, which also allows a
+      // complete unroll that keeps each iteration's exit test
+      unsigned Count = SE.getSmallConstantTripCount(L);
+      if (Count == 0)
+        Count = SE.getSmallConstantMaxTripCount(L);
+      if (Count > 0 and Count <= MaxUnrolledTripCount) {
+        ToUnroll = L;
+        TripCount = Count;
+        break;
+      }
+    }
+    if (ToUnroll == nullptr)
+      return;
+
+    UnrollLoopOptions ULO;
+    ULO.Count = TripCount;
+    ULO.Force = true;
+    ULO.Runtime = false;
+    ULO.AllowExpensiveTripCount = false;
+    ULO.UnrollRemainder = false;
+    ULO.ForgetAllSCEV = true;
+    auto Result = UnrollLoop(ToUnroll, ULO, &LI, &SE, &DT, &AC, &TTI, &ORE, true);
+    if (Result != LoopUnrollResult::FullyUnrolled)
+      return;
+  }
+}
+
+Function *HelperSpecializations::build(Function *Helper,
+                                        ArrayRef<Constant *> Arguments) {
+  ValueToValueMapTy VMap;
+  for (auto [Argument, Value] : zip(Helper->args(), Arguments))
+    if (Value != nullptr)
+      VMap[&Argument] = Value;
+
+  // Arguments mapped to constants are dropped from the clone's signature
+  Function *Specialized = CloneFunction(Helper, VMap);
+  Specialized->setName(Helper->getName() + ".specialized");
+  Specialized->setLinkage(GlobalValue::InternalLinkage);
+  Specialized->setSection("");
+  Specialized->removeFnAttr(Attribute::NoInline);
+
+  unrollConstantLoops(*Specialized);
+
+  FunctionPassManager FPM;
+  FPM.addPass(SCCPPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.addPass(ADCEPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  runPasses(*Specialized, FPM);
+
+  revng_log(Log,
+            "specialized " << Helper->getName() << ": "
+                           << Helper->getInstructionCount() << " -> "
+                           << Specialized->getInstructionCount()
+                           << " instructions");
+  return Specialized;
+}
+
+CallInst *HelperSpecializations::specialize(CallInst *Call) {
+  Function *Helper = getCalledFunction(Call);
+  std::vector<Constant *> Arguments;
+  for (Value *Argument : Call->args())
+    Arguments.push_back(dyn_cast<Constant>(Argument));
+
+  auto [It, New] = Cache.try_emplace({ Helper, Arguments }, nullptr);
+  if (New)
+    It->second = build(Helper, Arguments);
+
+  SmallVector<Value *, 4> Remaining;
+  for (auto [Argument, Value] : zip(Call->args(), Arguments))
+    if (Value == nullptr)
+      Remaining.push_back(Argument);
+
+  auto *Specialized = CallInst::Create(It->second, Remaining, "", Call);
+  Specialized->setDebugLoc(Call->getDebugLoc());
+  Call->replaceAllUsesWith(Specialized);
+  Call->eraseFromParent();
+  return Specialized;
+}
+
+class InlineHelpers {
+private:
+  HelperSpecializations &Specializations;
+
+public:
+  InlineHelpers(HelperSpecializations &Specializations) :
+    Specializations(Specializations) {}
 
   void run(Function *F);
 
@@ -131,6 +323,7 @@ CallInst *InlineHelpers::getCallToInline(Instruction *I) const {
 }
 
 void InlineHelpers::doInline(CallInst *Call) const {
+  Call = Specializations.specialize(Call);
   InlineFunctionInfo IFI;
   auto Result = InlineFunction(*Call, IFI, false, nullptr, false);
   revng_assert(Result.isSuccess(), Result.getFailureReason());
@@ -196,10 +389,11 @@ void inlineHelpers(llvm::Module &M) {
     if (FunctionTags::Isolated.isTagOf(&F))
       Isolated.push_back(&F);
 
+  HelperSpecializations Specializations;
   llvm::Task T(Isolated.size(), "Inline helpers");
   for (Function *F : Isolated) {
     T.advance(F->getName());
-    InlineHelpers IH;
+    InlineHelpers IH(Specializations);
     IH.run(F);
   }
 }
