@@ -111,7 +111,7 @@ layoutToLLVMFunctionType(llvm::LLVMContext &Context,
     // We either have a return value that fits in a single register, or it's
     // CABIFunctionDefinition returning stuff through registers
     unsigned Bits = 0;
-    for (const Layout::ReturnValue &ReturnValue : Layout.ReturnValues)
+    for (const auto &ReturnValue : Layout.ReturnValues)
       Bits += ReturnValue.Type->size().value() * 8;
     ReturnType = IntegerType::getIntNTy(Context, Bits);
   } break;
@@ -120,7 +120,16 @@ layoutToLLVMFunctionType(llvm::LLVMContext &Context,
     // We have a RawFunctionDefinition returning things over multiple
     // registers
     revng_assert(Layout.returnValueRegisterCount() > 1);
-    auto Types = toLLVMTypes(Context, Layout.returnValueRegisters());
+    // Type each register by the portion its value occupies, as EnforceABI
+    // does, so that a narrower value in a multi-CSV register gets the same
+    // type in both
+    llvm::SmallVector<model::Register::Portion> Portions;
+    for (const auto &ReturnValue : Layout.ReturnValues) {
+      revng_assert(ReturnValue.Registers.size() == 1);
+      Portions.emplace_back(ReturnValue.Registers[0],
+                            *ReturnValue.Type->size());
+    }
+    auto Types = toLLVMTypes(Context, Portions);
     ReturnType = StructType::get(Context, Types, true);
   } break;
 

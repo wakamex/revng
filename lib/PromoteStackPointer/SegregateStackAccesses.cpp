@@ -1316,7 +1316,8 @@ void SegregateFunctionStack::lowerArguments(revng::IRBuilder &B) {
         Argument *OldArgument = ArgumentToRegister.at(Register);
         Type *OldArgumentType = OldArgument->getType();
         auto OldArgumentSize = OldArgumentType->getIntegerBitWidth() / 8;
-        revng_assert(model::Register::getSize(Register) == OldArgumentSize);
+        // The value can be narrower than a multi-CSV register
+        revng_assert(OldArgumentSize <= model::Register::getSize(Register));
 
         unsigned ShiftAmount = shiftAmount(OffsetInNewArgument,
                                            NewArgumentSize,
@@ -1355,7 +1356,8 @@ void SegregateFunctionStack::lowerArguments(revng::IRBuilder &B) {
 
         OldArgument->replaceAllUsesWith(ArgumentValue);
 
-        OffsetInNewArgument += model::Register::getSize(Register);
+        OffsetInNewArgument += OldArgument->getType()->getIntegerBitWidth()
+                               / 8;
       }
 
       if (ModelArgument.Stack)
@@ -1774,7 +1776,9 @@ SegregateFunctionStack::handleCallSite(llvm::CallInst *SSACSCall,
       unsigned OffsetInNewArgument = 0;
       for (auto &Register : ModelArgument.Registers) {
         Value *OldArgument = ArgumentToRegister.at(Register);
-        unsigned OldSize = model::Register::getSize(Register);
+        // The width of the value, which can be narrower than a multi-CSV
+        // register
+        unsigned OldSize = OldArgument->getType()->getIntegerBitWidth() / 8;
 
         Value *Extended = B.CreateZExtOrTrunc(OldArgument, LLVMType);
 
@@ -1859,7 +1863,9 @@ SegregateFunctionStack::handleCallSite(llvm::CallInst *SSACSCall,
       unsigned OffsetInNewArgument = 0;
       for (auto &Register : ModelArgument.Registers) {
         Value *OldArgument = ArgumentToRegister.at(Register);
-        unsigned OldSize = model::Register::getSize(Register);
+        // The width of the value, which can be narrower than a multi-CSV
+        // register
+        unsigned OldSize = OldArgument->getType()->getIntegerBitWidth() / 8;
 
         Value *Address = createAdd(B, StackArgsAddress, OffsetInNewArgument);
 
