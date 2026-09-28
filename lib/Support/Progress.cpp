@@ -111,7 +111,7 @@ public:
     llvm::sys::ScopedLock Lock(OutputMutex);
     if (T->stepIndex() != 0)
       emitEvent(PreviousStepName, "task", "E");
-    emitEvent(T->stepName(), "task", "B");
+    emitEvent(T->stepName(), "task", "B", T);
   }
 
 private:
@@ -125,11 +125,19 @@ private:
   template<bool EmitTrailingComma = true>
   void emitEvent(llvm::StringRef Name,
                  llvm::StringRef Category,
-                 llvm::StringRef Phase) {
+                 llvm::StringRef Phase,
+                 const llvm::Task *Step = nullptr) {
     Output << "{";
     Output << "\"name\": \"" << Name.str() << "\", ";
     Output << "\"cat\": \"" << Category.str() << "\", ";
     Output << "\"ph\": \"" << Phase.str() << "\", ";
+    if (Step != nullptr) {
+      // Position of the step starting within its task
+      Output << "\"args\": {\"step\": " << Step->stepIndex();
+      if (Step->totalSteps())
+        Output << ", \"steps\": " << *Step->totalSteps();
+      Output << "}, ";
+    }
     Output << "\"ts\": " << getTimestamp() << ", ";
     Output << "\"pid\": " << getpid() << ", ";
     Output << "\"tid\": " << getpid();
@@ -140,6 +148,10 @@ private:
 
     if (EmitTrailingComma)
       emitMemoryUsage();
+
+    // Long steps emit few events, so flush each one for readers following
+    // the trace while it is written
+    Output.flush();
   }
 
   void emitMemoryUsage() {
@@ -450,7 +462,13 @@ static void destroyTraceProgressListener(void *OpaqueListener) {
 
 static auto RegisterTraceProgressListener = [](const std::string &Value) {
   if (Value.size() > 0) {
-    llvm::ProgressReport->registerListener<TraceProgressListener>(Value);
+    // "%p" stands for the process ID, so that every process sharing the same
+    // options writes its own trace
+    std::string Path = Value;
+    for (size_t At = Path.find("%p"); At != std::string::npos;
+         At = Path.find("%p", At))
+      Path.replace(At, 2, std::to_string(getpid()));
+    llvm::ProgressReport->registerListener<TraceProgressListener>(Path);
   }
 };
 

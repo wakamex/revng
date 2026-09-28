@@ -7,6 +7,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/KnownBits.h"
+#include "llvm/Support/Progress.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include "revng/Support/Debug.h"
@@ -101,7 +102,19 @@ PreservedAnalyses ValueMaterializerPass::run(Function &F,
     return cast<ConstantInt>(Call->getArgOperand(Index))->getLimitedValue();
   };
 
+  // Report progress once per chunk of requests
+  constexpr uint64_t Chunk = 1024;
+  uint64_t Requests = 0;
+  for ([[maybe_unused]] CallBase *Call : callersIn(Marker, &F))
+    ++Requests;
+  Task T((Requests + Chunk - 1) / Chunk, "Value materialization requests");
+  uint64_t Request = 0;
+
   for (CallBase *Call : callersIn(Marker, &F)) {
+    if (Request % Chunk == 0)
+      T.advance(Twine(Request) + " of " + Twine(Requests));
+    ++Request;
+
     // Decode arguments
     revng_assert(Call->arg_size() >= 4);
     Value *ToTrack = Call->getArgOperand(0);

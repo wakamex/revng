@@ -19,6 +19,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRPrinter/IRPrintingPasses.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Support/Progress.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/JumpThreading.h"
@@ -750,7 +751,18 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     };
     FAM.registerPass(MAMFunactionProxyFactory);
 
-    PassBuilder PB;
+    // The pass manager reports each pass as a step; report each analysis run,
+    // such as bit liveness, as a subtask of the pass that requested it
+    std::vector<std::unique_ptr<Task>> Analyses;
+    PassInstrumentationCallbacks PIC;
+    PIC.registerBeforeAnalysisCallback([&Analyses](StringRef Name, Any) {
+      Analyses.push_back(std::make_unique<Task>(std::nullopt, Name));
+    });
+    PIC.registerAfterAnalysisCallback([&Analyses](StringRef, Any) {
+      Analyses.pop_back();
+    });
+
+    PassBuilder PB(nullptr, PipelineTuningOptions(), std::nullopt, &PIC);
     PB.registerFunctionAnalyses(FAM);
     PB.registerModuleAnalyses(MAM);
 
@@ -967,6 +979,9 @@ static MetaAddress::Features findCommonFeatures(Function *F) {
 }
 
 void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
+  Task T(7, "Harvest with value materialization");
+  T.advance("Identify function calls");
+
   // Re-run the identification of function calls
   RootFunction Root(*TheFunction->getParent());
   CSVGlobals Globals(*Model, *TheFunction->getParent());
@@ -974,12 +989,16 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   PM.add(new FunctionCallIdentification(Root, Globals, Model->Architecture()));
   PM.run(TheModule);
 
+  T.advance("Create temporary root");
+
   std::optional<ValueToValueMapTy> OldToNew(std::in_place);
   Function *OptimizedFunction = createTemporaryRoot(TheFunction, *OldToNew);
 
   MetaAddress::Features CommonFeatures = findCommonFeatures(OptimizedFunction);
 
   AnalysisRegistry AR(&TheModule);
+
+  T.advance("Register exit values");
 
   // Register for analysis the value written in the PC before each exit_tb call
   revng::IRBuilder Builder(TheModule.getContext());
@@ -996,6 +1015,8 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
                      ComposedIntegerPC,
                      TrackedInstructionType::WrittenInPC);
   }
+
+  T.advance("Prepare temporary root");
 
   // The map holds a tracking handle on every original and cloned value, which
   // makes each later deletion or replacement in the clone update it. Nothing
@@ -1016,17 +1037,23 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   for (CallBase *Call : ToErase)
     eraseFromParent(Call);
 
+  T.advance("Optimize temporary root");
+
   // Optimize the hell out of it and collect the possible values of indirect
   // branches.
   auto SCB = optimize(OptimizedFunction, CommonFeatures);
 
   revng::verify(OptimizedFunction);
 
+  T.advance("Collect materialized values");
+
   // Collect the results
   collectMaterializedValues(AR);
 
   // Collect pointer-sized values being stored in memory
   collectValuesStoredIntoMemory(OptimizedFunction, CommonFeatures);
+
+  T.advance("Destroy temporary root");
 
   // Drop the optimized function
   eraseFromParent(OptimizedFunction);
