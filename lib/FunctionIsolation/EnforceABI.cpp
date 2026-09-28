@@ -297,7 +297,9 @@ static Value *loadRegisterFromCSVs(revng::IRBuilder &Builder,
 /// Any register backed by a single CSV is always stored fully.
 ///
 /// A multi-CSV register is stored CSV by CSV. Each of them is extracted
-/// (shift + truncate) and stored separately.
+/// (shift + truncate) and stored separately. As in `loadRegisterFromCSVs`, the
+/// value may cover only a prefix of the register: the CSVs above it are left
+/// untouched.
 static void serializeRegisterInCSVs(revng::IRBuilder &Builder,
                                     model::Register::Values Register,
                                     Value *WideValue) {
@@ -311,7 +313,8 @@ static void serializeRegisterInCSVs(revng::IRBuilder &Builder,
   }
 
   for (const model::Register::CSV &CSV : model::Register::getCSVs(Register)) {
-    revng_assert(CSV.StartOffset <= SizeInBytes);
+    if (CSV.StartOffset >= SizeInBytes)
+      continue;
 
     auto *Variable = Builder.getModule()->getGlobalVariable(CSV.Name, true);
     if (Variable == nullptr)
