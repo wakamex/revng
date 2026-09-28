@@ -49,33 +49,50 @@ inline RunningStatistics AVISkippedRegionStatistics("avi-skipped-region-size");
 /// value. Such requests proceed without oracle constraints.
 static constexpr size_t MaxAnalyzedBlocks = 100'000;
 
+ExtensionCandidates::Set ExtensionCandidates::compute(Instruction *I) {
+  Set Result;
+  Result.insert(I);
+
+  // Steal constraints from trunc'd versions of this value and use the most
+  // accurate
+  for (User *U : I->users()) {
+    if (auto *Trunc = dyn_cast<TruncInst>(U)) {
+      Result.insert(Trunc);
+      for (User *U2 : Trunc->users()) {
+        if (auto *ZExt = dyn_cast<ZExtInst>(U2)) {
+          Result.insert(ZExt);
+        }
+      }
+    }
+  }
+
+  return Result;
+}
+
+const ExtensionCandidates::Set &ExtensionCandidates::get(Instruction *I) {
+  auto [It, New] = Cache.try_emplace(I);
+  if (New)
+    It->second = compute(I);
+  return It->second;
+}
+
 AdvancedValueInfoMFI::AdvancedValueInfoMFI(LazyValueInfo &LVI,
                                            DataFlowRangeAnalysis &DFRA,
                                            const DominatorTree &DT,
                                            Instruction *Context,
                                            InstructionsSet &Instructions,
-                                           bool ZeroExtendConstraints) :
+                                           bool ZeroExtendConstraints,
+                                           ExtensionCandidates *Extensions) :
   LVI(LVI), DFRA(DFRA), DT(DT), Context(Context), Instructions(Instructions) {
   // The IR is unchanged during this request. Discover candidates once and
   // retain their iteration order across all control-flow nodes and revisits.
   for (Instruction *I : Instructions) {
-    auto &InstructionCandidates = Candidates[I];
-    InstructionCandidates.insert(I);
-
-    if (ZeroExtendConstraints) {
-      // Steal constraints from trunc'd versions of this value and use the most
-      // accurate
-      for (User *U : I->users()) {
-        if (auto *Trunc = dyn_cast<TruncInst>(U)) {
-          InstructionCandidates.insert(Trunc);
-          for (User *U2 : Trunc->users()) {
-            if (auto *ZExt = dyn_cast<ZExtInst>(U2)) {
-              InstructionCandidates.insert(ZExt);
-            }
-          }
-        }
-      }
-    }
+    if (not ZeroExtendConstraints)
+      Candidates[I].insert(I);
+    else if (Extensions != nullptr)
+      Candidates[I] = Extensions->get(I);
+    else
+      Candidates[I] = ExtensionCandidates::compute(I);
   }
 }
 
@@ -225,7 +242,8 @@ runAVI(const DataFlowGraph &DFG,
        llvm::LazyValueInfo &LVI,
        DataFlowRangeAnalysis &DFRA,
        bool ZeroExtendConstraints,
-       ControlFlowGraphIndex *CFGIndex) {
+       ControlFlowGraphIndex *CFGIndex,
+       ExtensionCandidates *Extensions) {
   using namespace llvm;
 
   //
@@ -352,7 +370,8 @@ runAVI(const DataFlowGraph &DFG,
                               DT,
                               Context,
                               Targets,
-                              ZeroExtendConstraints);
+                              ZeroExtendConstraints,
+                              Extensions);
 
   AdvancedValueInfoMFI::LatticeElement ExtremalValue;
   for (Instruction *I : Targets)

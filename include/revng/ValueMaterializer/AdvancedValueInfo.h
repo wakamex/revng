@@ -6,6 +6,7 @@
 
 #include <map>
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 
 #include "revng/ADT/ConstantRangeSet.h"
@@ -23,6 +24,22 @@ class DominatorTree;
 
 class DataFlowGraph;
 
+/// The candidates whose constraints refine an instruction's own: the instruction,
+/// its truncations and their zero extensions. They depend only on the IR, so one
+/// cache serves every request while the IR is unchanged, such as across one
+/// pass's value requests.
+class ExtensionCandidates {
+public:
+  using Set = llvm::SmallSet<llvm::Instruction *, 4>;
+
+private:
+  llvm::DenseMap<llvm::Instruction *, Set> Cache;
+
+public:
+  static Set compute(llvm::Instruction *I);
+  const Set &get(llvm::Instruction *I);
+};
+
 class AdvancedValueInfoMFI {
 public:
   using LatticeElement = std::map<llvm::Instruction *, ConstantRangeSet>;
@@ -38,8 +55,7 @@ private:
   const llvm::DominatorTree &DT;
   llvm::Instruction *Context;
   llvm::SmallPtrSetImpl<llvm::Instruction *> &Instructions;
-  std::map<llvm::Instruction *, llvm::SmallSet<llvm::Instruction *, 4>>
-    Candidates;
+  std::map<llvm::Instruction *, ExtensionCandidates::Set> Candidates;
 
 public:
   AdvancedValueInfoMFI(llvm::LazyValueInfo &LVI,
@@ -47,7 +63,8 @@ public:
                        const llvm::DominatorTree &DT,
                        llvm::Instruction *Context,
                        InstructionsSet &Instructions,
-                       bool ZeroExtendConstraints);
+                       bool ZeroExtendConstraints,
+                       ExtensionCandidates *Extensions = nullptr);
 
 public:
   LatticeElement combineValues(const LatticeElement &LHS,
@@ -79,7 +96,8 @@ runAVI(const DataFlowGraph &DFG,
        llvm::LazyValueInfo &LVI,
        DataFlowRangeAnalysis &DFRA,
        bool ZeroExtendConstraints,
-       ControlFlowGraphIndex *CFGIndex = nullptr);
+       ControlFlowGraphIndex *CFGIndex = nullptr,
+       ExtensionCandidates *Extensions = nullptr);
 
 template<>
 void mfp::dump(llvm::raw_ostream &Stream,

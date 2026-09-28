@@ -52,6 +52,7 @@ private:
   DataFlowGraph::Limits TheLimits;
   Oracle::Values Oracle;
   ControlFlowGraphIndex *CFGIndex;
+  ExtensionCandidates *Extensions;
 
   //
   // Outputs
@@ -73,7 +74,8 @@ private:
                     const llvm::DominatorTree &DT,
                     DataFlowGraph::Limits TheLimits,
                     Oracle::Values Oracle,
-                    ControlFlowGraphIndex *CFGIndex) :
+                    ControlFlowGraphIndex *CFGIndex,
+                    ExtensionCandidates *Extensions) :
     Context(Context),
     V(V),
     MO(MO),
@@ -82,7 +84,8 @@ private:
     DT(DT),
     TheLimits(TheLimits),
     Oracle(Oracle),
-    CFGIndex(CFGIndex) {}
+    CFGIndex(CFGIndex),
+    Extensions(Extensions) {}
 
 public:
   static ValueMaterializer
@@ -94,9 +97,18 @@ public:
                const llvm::DominatorTree &DT,
                DataFlowGraph::Limits TheLimits,
                Oracle::Values Oracle,
-               ControlFlowGraphIndex *CFGIndex = nullptr) {
-    ValueMaterializer
-      Result(Context, V, MO, LVI, DFRA, DT, TheLimits, Oracle, CFGIndex);
+               ControlFlowGraphIndex *CFGIndex = nullptr,
+               ExtensionCandidates *Extensions = nullptr) {
+    ValueMaterializer Result(Context,
+                             V,
+                             MO,
+                             LVI,
+                             DFRA,
+                             DT,
+                             TheLimits,
+                             Oracle,
+                             CFGIndex,
+                             Extensions);
     Result.run();
     return Result;
   }

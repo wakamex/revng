@@ -65,7 +65,8 @@ void ValueMaterializer::computeOracleConstraints() {
                                                            LVI,
                                                            DFRA,
                                                            true,
-                                                           CFGIndex);
+                                                           CFGIndex,
+                                                           Extensions);
     break;
 
   default:
