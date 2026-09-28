@@ -120,7 +120,8 @@ public:
   }
 
   /// Replace \p Call with a call to its helper specialized for the call's
-  /// constant arguments.
+  /// constant arguments, unless specializing does not make the helper
+  /// smaller.
   CallInst *specialize(CallInst *Call);
 
 private:
@@ -231,11 +232,18 @@ Function *HelperSpecializations::build(Function *Helper,
   FPM.addPass(SimplifyCFGPass());
   runPasses(*Specialized, FPM);
 
+  unsigned Before = Helper->getInstructionCount();
+  unsigned After = Specialized->getInstructionCount();
   revng_log(Log,
-            "specialized " << Helper->getName() << ": "
-                           << Helper->getInstructionCount() << " -> "
-                           << Specialized->getInstructionCount()
-                           << " instructions");
+            "specialized " << Helper->getName() << ": " << Before << " -> "
+                           << After << " instructions");
+
+  // Unrolling can make a small helper larger: keep the original then
+  if (After > Before) {
+    Specialized->eraseFromParent();
+    return nullptr;
+  }
+
   return Specialized;
 }
 
@@ -248,6 +256,8 @@ CallInst *HelperSpecializations::specialize(CallInst *Call) {
   auto [It, New] = Cache.try_emplace({ Helper, Arguments }, nullptr);
   if (New)
     It->second = build(Helper, Arguments);
+  if (It->second == nullptr)
+    return Call;
 
   SmallVector<Value *, 4> Remaining;
   for (auto [Argument, Value] : zip(Call->args(), Arguments))
