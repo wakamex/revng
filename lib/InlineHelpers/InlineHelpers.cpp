@@ -217,6 +217,20 @@ Function *HelperSpecializations::materialize(const std::string &Bitcode,
     if (&Global == Original or Global.use_empty())
       continue;
     GlobalValue *Target = M.getNamedValue(Global.getName());
+
+    // Optimizing the specialization can introduce intrinsics that this module
+    // has not used yet: declare them here
+    auto *Intrinsic = dyn_cast<Function>(&Global);
+    if (Target == nullptr and Intrinsic != nullptr
+        and Intrinsic->isIntrinsic()) {
+      auto *Declaration = Function::Create(Intrinsic->getFunctionType(),
+                                           GlobalValue::ExternalLinkage,
+                                           Intrinsic->getName(),
+                                           M);
+      Declaration->copyAttributesFrom(Intrinsic);
+      Target = Declaration;
+    }
+
     if (Target == nullptr or Target->getValueType() != Global.getValueType()) {
       revng_log(CacheLog,
                 "cannot bind " << Global.getName() << " for "
