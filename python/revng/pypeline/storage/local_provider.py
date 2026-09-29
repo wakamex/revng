@@ -74,7 +74,7 @@ WHERE
   AND object_id IN ({id_list})"""
 
 GET_QUERY = """
-SELECT object_id, content FROM objects
+SELECT object_id, content, chunk_count FROM objects
 WHERE
   savepoint_id = ?
   AND container_id = ?
@@ -88,6 +88,47 @@ VALUES (?, ?, ?, ?, ?, ?)
 """
 
 PUT_DEPENDENCIES_QUERY = "REPLACE INTO dependencies VALUES (?, ?, ?, ?, ?, ?)"
+
+# SQLite cannot store a single value larger than about 2 GiB, and its default
+# per-value limit is about 0.93 GiB. Object content above this size is stored
+# across several rows of `object_chunks` instead of inline in `objects`, and
+# reassembled on read. 256 MiB stays well under the default limit.
+# REVNG_OBJECT_CHUNK_SIZE overrides it, so a small run can exercise the chunk
+# path with a low threshold.
+CHUNK_SIZE = int(os.environ.get("REVNG_OBJECT_CHUNK_SIZE", 256 * 1024 * 1024))
+
+PUT_CHUNKED_QUERY = """
+REPLACE INTO objects(savepoint_id, container_id, configuration_hash, object_id,
+ object_id_string, content, chunk_count)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+"""
+
+PUT_CHUNK_QUERY = """
+REPLACE INTO object_chunks(savepoint_id, container_id, configuration_hash,
+ object_id, chunk_index, content)
+VALUES (?, ?, ?, ?, ?, ?)
+"""
+
+DELETE_CHUNKS_FOR_KEY = """
+DELETE FROM object_chunks
+WHERE savepoint_id = ? AND container_id = ? AND configuration_hash = ?
+  AND object_id = ?
+"""
+
+GET_CHUNKS_QUERY = """
+SELECT content FROM object_chunks
+WHERE savepoint_id = ? AND container_id = ? AND configuration_hash = ?
+  AND object_id = ?
+ORDER BY chunk_index
+"""
+
+# Remove chunks whose owning object no longer exists (after any delete from
+# `objects`).
+DELETE_ORPHAN_CHUNKS = """
+DELETE FROM object_chunks
+WHERE (savepoint_id, container_id, configuration_hash, object_id) NOT IN
+  (SELECT savepoint_id, container_id, configuration_hash, object_id FROM objects)
+"""
 
 # Invalidation queries, these takes care, given populated tables `model_paths`
 # and `additional_objects`, to remove all the applicable entries from the DB.
@@ -474,8 +515,25 @@ class LocalStorageProvider(StorageProvider):
                 (location.savepoint_id, location.container_id, location.configuration_id),
             )
             result = cursor.fetchall()
-        obj_id_type: type[ObjectID] = get_singleton(ObjectID)  # type: ignore[type-abstract]
-        return {obj_id_type.from_bytes(x[0]): x[1] for x in result}
+            obj_id_type: type[ObjectID] = get_singleton(ObjectID)  # type: ignore[type-abstract]
+            out: dict[ObjectID, bytes] = {}
+            for object_id, content, chunk_count in result:
+                if chunk_count == 0:
+                    out[obj_id_type.from_bytes(object_id)] = content
+                else:
+                    cursor.execute(
+                        GET_CHUNKS_QUERY,
+                        (
+                            location.savepoint_id,
+                            location.container_id,
+                            location.configuration_id,
+                            object_id,
+                        ),
+                    )
+                    out[obj_id_type.from_bytes(object_id)] = b"".join(
+                        row[0] for row in cursor.fetchall()
+                    )
+            return out
 
     def add_objects(
         self,
@@ -517,17 +575,27 @@ class LocalStorageProvider(StorageProvider):
             # Save objects
             for location, objects_set in objects.items():
                 for object_id, content in objects_set.items():
-                    cursor.execute(
-                        PUT_QUERY,
-                        (
-                            location.savepoint_id,
-                            location.container_id,
-                            location.configuration_id,
-                            object_id.to_bytes(),
-                            object_id.serialize(),
-                            bytes(content),
-                        ),
+                    data = bytes(content)
+                    key = (
+                        location.savepoint_id,
+                        location.container_id,
+                        location.configuration_id,
+                        object_id.to_bytes(),
                     )
+                    # Drop any chunks from a previous, larger version of this
+                    # object; REPLACE on `objects` does not touch `object_chunks`
+                    cursor.execute(DELETE_CHUNKS_FOR_KEY, key)
+                    if len(data) <= CHUNK_SIZE:
+                        cursor.execute(PUT_QUERY, (*key, object_id.serialize(), data))
+                    else:
+                        count = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                        cursor.execute(
+                            PUT_CHUNKED_QUERY,
+                            (*key, object_id.serialize(), b"", count),
+                        )
+                        for index in range(count):
+                            piece = data[index * CHUNK_SIZE : (index + 1) * CHUNK_SIZE]
+                            cursor.execute(PUT_CHUNK_QUERY, (*key, index, piece))
 
             # Write metadata
             self._write_metadata(cursor, _MetadataUpdate.OBJECT_SAVE)
@@ -587,6 +655,8 @@ class LocalStorageProvider(StorageProvider):
                 )
                 invalidated[location].add(object_id_type.from_bytes(object_id))
 
+            # Remove chunks whose owning object was just invalidated
+            cursor.execute(DELETE_ORPHAN_CHUNKS)
             # DROP the temporary tables as they are no longer needed
             cursor.execute(f"DROP TABLE additional_objects_{table_uuid};")
             cursor.execute(f"DROP TABLE model_paths_{table_uuid};")
@@ -598,6 +668,7 @@ class LocalStorageProvider(StorageProvider):
     def prune_objects(self):
         with self._cursor() as cursor:
             cursor.execute("DELETE FROM objects")
+            cursor.execute("DELETE FROM object_chunks")
             cursor.execute("DELETE FROM dependencies")
             cursor.execute("DELETE FROM custom_dependencies")
             self._write_metadata(cursor, _MetadataUpdate.OBJECT_SAVE)
