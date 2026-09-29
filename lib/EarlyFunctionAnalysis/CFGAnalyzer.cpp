@@ -111,7 +111,17 @@ namespace efa {
 static efa::BasicBlock &
 blockFromIndirectBranchInfo(CallBase *CI, SortedVector<efa::BasicBlock> &CFG) {
   auto *BlockIDArgument = CI->getArgOperand(CallerBlockIDIndex);
-  return CFG.at(BasicBlockID::fromValue(BlockIDArgument));
+  auto ID = BasicBlockID::fromValue(BlockIDArgument);
+  auto It = CFG.find(ID);
+  if (It != CFG.end())
+    return *It;
+
+  // The argument is the address of the branch: find the block containing it
+  for (efa::BasicBlock &Block : CFG)
+    if (Block.contains(ID))
+      return Block;
+
+  revng_abort("No block contains the indirect branch");
 }
 
 static std::unique_ptr<llvm::raw_ostream>
@@ -500,9 +510,15 @@ void CFGAnalyzer::createIBIMarker(OutlinedFunction *Outlined) {
     SmallVector<Value *, 16> ArgValues;
     ArgValues.resize(FirstPreservedRegisterIndex);
 
-    // Record the MetaAddress of the caller
+    // Record the MetaAddress of the caller. Lifting can merge consecutive jump
+    // targets into one block, so prefer the address of the branch instruction
+    // itself: the branch belongs to the CFG block containing that address,
+    // which is not necessarily the jump target the merged block starts with.
     auto NewPCID = getBasicBlockID(getJumpTargetBlock(Term->getParent()));
     revng_assert(NewPCID.isValid());
+    auto &&[BranchPC, BranchSize] = getPC(Term);
+    if (BranchPC.isValid() and NewPCID.start() <= BranchPC)
+      NewPCID = BasicBlockID(BranchPC, NewPCID.inliningIndex());
     ArgValues[CallerBlockIDIndex] = NewPCID.toValue(getModule(Term));
 
     // Record the name of the symbol, if any
@@ -972,6 +988,11 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
   //
   for (const auto &[CI, Edge] : IBIResult) {
     efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG);
+    revng_log(Log,
+              "Committing the indirect branch of "
+                << BasicBlockID::fromValue(CI->getArgOperand(CallerBlockIDIndex))
+                     .toString()
+                << " to " << Block.ID().toString());
     Block.Successors().insert(std::move(Edge));
   }
 
@@ -1013,8 +1034,11 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     Attributes.insert(model::FunctionAttribute::NoReturn);
   }
 
-  for (efa::BasicBlock &Block : CFG)
+  for (efa::BasicBlock &Block : CFG) {
+    if (Block.Successors().size() == 0)
+      revng_log(Log, "Block without successors: " << Block.ID().toString());
     revng_assert(Block.Successors().size() > 0);
+  }
 
   revng_log(Log, "Final CFG:\n");
   if (Log.isEnabled()) {
