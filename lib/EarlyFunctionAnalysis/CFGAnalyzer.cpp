@@ -116,12 +116,23 @@ blockFromIndirectBranchInfo(CallBase *CI, SortedVector<efa::BasicBlock> &CFG) {
   if (It != CFG.end())
     return *It;
 
-  // The argument is the address of the branch: find the block containing it
-  for (efa::BasicBlock &Block : CFG)
-    if (Block.contains(ID))
+  // The argument is the address of the branch: find the block containing it.
+  // An overlapping decoding that starts inside an earlier instruction can
+  // also cover that address; it falls through or branches, so it already has
+  // successors. The block ending in the indirect branch gets its only edges
+  // from here, so prefer a containing block that has none yet.
+  efa::BasicBlock *Result = nullptr;
+  for (efa::BasicBlock &Block : CFG) {
+    if (not Block.contains(ID))
+      continue;
+    if (Block.Successors().empty())
       return Block;
+    if (Result == nullptr)
+      Result = &Block;
+  }
 
-  revng_abort("No block contains the indirect branch");
+  revng_assert(Result != nullptr, "No block contains the indirect branch");
+  return *Result;
 }
 
 static std::unique_ptr<llvm::raw_ostream>
