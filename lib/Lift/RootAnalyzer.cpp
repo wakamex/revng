@@ -4,6 +4,7 @@
 
 #include <compare>
 #include <optional>
+#include <string>
 
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SmallVector.h"
@@ -1014,7 +1015,19 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
 
   AnalysisRegistry AR(&TheModule);
 
-  T.advance("Register exit values");
+  // The temporary root holds only the part of the root reaching new code, so
+  // its size bounds the work of the rest of the round. Report it in each
+  // remaining step name so progress monitors can tell a marginal round.
+  size_t Blocks = OptimizedFunction->size();
+  size_t Exits = 0;
+  auto Size = [&]() {
+    std::string Result = " (" + std::to_string(Blocks) + " blocks";
+    if (Exits != 0)
+      Result += ", " + std::to_string(Exits) + " exits";
+    return Result + ")";
+  };
+
+  T.advance("Register exit values" + Size());
 
   // Register for analysis the value written in the PC before each exit_tb call
   revng::IRBuilder Builder(TheModule.getContext());
@@ -1030,9 +1043,10 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
                      Call,
                      ComposedIntegerPC,
                      TrackedInstructionType::WrittenInPC);
+    ++Exits;
   }
 
-  T.advance("Prepare temporary root");
+  T.advance("Prepare temporary root" + Size());
 
   // The map holds a tracking handle on every original and cloned value, which
   // makes each later deletion or replacement in the clone update it. Nothing
@@ -1053,7 +1067,7 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   for (CallBase *Call : ToErase)
     eraseFromParent(Call);
 
-  T.advance("Optimize temporary root");
+  T.advance("Optimize temporary root" + Size());
 
   // Optimize the hell out of it and collect the possible values of indirect
   // branches.
@@ -1061,7 +1075,7 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
 
   revng::verify(OptimizedFunction);
 
-  T.advance("Collect materialized values");
+  T.advance("Collect materialized values" + Size());
 
   // Collect the results
   collectMaterializedValues(AR);
@@ -1069,7 +1083,7 @@ void RootAnalyzer::cloneOptimizeAndHarvest(Function *TheFunction) {
   // Collect pointer-sized values being stored in memory
   collectValuesStoredIntoMemory(OptimizedFunction, CommonFeatures);
 
-  T.advance("Destroy temporary root");
+  T.advance("Destroy temporary root" + Size());
 
   // Drop the optimized function
   eraseFromParent(OptimizedFunction);
