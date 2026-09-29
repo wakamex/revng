@@ -217,6 +217,9 @@ ArgumentDistributor::nonPositionBased(bool IsScalar,
       //       registers are used together.
       DistributedValue Result;
       Result.Registers.emplace_back(RegisterList[(*RegisterCounter)++]);
+      // Record the value's size; without it the portion is zero-sized and
+      // downstream typing builds a zero-width integer.
+      Result.Size = Size;
       return { Result };
     } else {
       // If there are no free registers left, explicitly set the limit to 0,
