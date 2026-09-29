@@ -10,7 +10,7 @@ revng_add_analyses_library_internal(
   revngInlineHelpers DeleteHelperBodies.cpp InlineHelpers.cpp
   LinkHelpersToInline.cpp PostInlineHelpersVerifyPass.cpp)
 
-llvm_map_components_to_libnames(LLVM_LIBRARIES TransformUtils)
+llvm_map_components_to_libnames(LLVM_LIBRARIES TransformUtils BitReader BitWriter)
 
 target_link_libraries(revngInlineHelpers revngBasicAnalyses revngModel
                       revngSupport ${LLVM_LIBRARIES})

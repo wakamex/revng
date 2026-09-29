@@ -3,6 +3,9 @@
 //
 
 #include <iterator>
+#include <map>
+#include <optional>
+#include <string>
 #include <system_error>
 
 #include "llvm/ADT/BitVector.h"
@@ -13,6 +16,8 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
@@ -28,6 +33,7 @@
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/LCSSA.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
@@ -42,6 +48,7 @@
 using namespace llvm;
 
 static Logger Log("inline-helpers");
+static Logger CacheLog("helper-specialization-cache");
 
 static cl::opt<std::string> DumpBeforeDir("inline-helpers-dump-before-dir",
                                           cl::desc("Directory in which to "
@@ -107,10 +114,22 @@ static constexpr unsigned MaxUnrolledTripCount = 64;
 /// into the caller: a single SSE shuffle helper can exceed 300,000
 /// instructions. Each specialization is built once and reused by every call
 /// with the same helper and constant arguments.
+///
+/// Every function of a binary gets its own module with its own copy of the
+/// helpers, so the per-module cache alone rebuilds the same specializations
+/// once per function. Built specializations are therefore also kept for the
+/// whole process, as bitcode keyed by a description of the helper, the
+/// module's `@env` and the constant arguments, and are cloned into later
+/// modules instead of being rebuilt.
 class HelperSpecializations {
 private:
   using Key = std::pair<Function *, std::vector<Constant *>>;
   std::map<Key, Function *> Cache;
+
+  /// Specializations built in earlier modules: bitcode of a module whose one
+  /// definition is the specialization, or no value when specializing did not
+  /// make the helper smaller
+  static std::map<std::string, std::optional<std::string>> Shared;
 
 public:
   ~HelperSpecializations() {
@@ -126,7 +145,101 @@ public:
 
 private:
   static Function *build(Function *Helper, ArrayRef<Constant *> Arguments);
+  static std::string sharedKey(Function *Helper,
+                               ArrayRef<Constant *> Arguments);
+  static std::string serialize(Function *Specialized);
+  static Function *materialize(const std::string &Bitcode,
+                               Function *Helper);
 };
+
+std::map<std::string, std::optional<std::string>>
+  HelperSpecializations::Shared;
+
+/// Describe everything a specialization depends on that can differ between
+/// modules: the helper, the `@env` offset it folds against, the data layout
+/// and the constant arguments
+std::string HelperSpecializations::sharedKey(Function *Helper,
+                                             ArrayRef<Constant *> Arguments) {
+  Module *M = Helper->getParent();
+  std::string Result;
+  raw_string_ostream OS(Result);
+  OS << Helper->getName() << "|" << *Helper->getFunctionType() << "|"
+     << Helper->getInstructionCount() << "|" << M->getDataLayoutStr() << "|";
+  if (auto *Env = M->getNamedGlobal("env"); Env and Env->hasInitializer())
+    Env->getInitializer()->printAsOperand(OS, true, M);
+  for (Constant *Argument : Arguments) {
+    OS << "|";
+    if (Argument == nullptr)
+      OS << "_";
+    else
+      Argument->printAsOperand(OS, true, M);
+  }
+  return OS.str();
+}
+
+/// Bitcode of a module holding \p Specialized and declarations of what it
+/// references
+std::string HelperSpecializations::serialize(Function *Specialized) {
+  ValueToValueMapTy VMap;
+  auto Copy = CloneModule(*Specialized->getParent(),
+                          VMap,
+                          [Specialized](const GlobalValue *GV) {
+                            return GV == Specialized;
+                          });
+  std::string Result;
+  raw_string_ostream OS(Result);
+  WriteBitcodeToFile(*Copy, OS);
+  return OS.str();
+}
+
+/// Clone the specialization in \p Bitcode into the module of \p Helper,
+/// binding each global it references to the same-named global of that
+/// module. The bitcode also declares every other global of the module it was
+/// built in; only those the specialization uses are bound. Return nullptr, so
+/// the caller builds the specialization itself, if a used global is missing
+/// or has a different type.
+Function *HelperSpecializations::materialize(const std::string &Bitcode,
+                                             Function *Helper) {
+  Module &M = *Helper->getParent();
+  auto Parsed = parseBitcodeFile(MemoryBufferRef(Bitcode, "specialization"),
+                                 M.getContext());
+  revng_assert(Parsed, "cannot parse a cached helper specialization");
+  Module &Source = **Parsed;
+
+  Function *Original = nullptr;
+  for (Function &F : Source)
+    if (not F.isDeclaration())
+      Original = &F;
+  revng_assert(Original != nullptr);
+
+  ValueToValueMapTy VMap;
+  for (GlobalValue &Global : Source.global_values()) {
+    if (&Global == Original or Global.use_empty())
+      continue;
+    GlobalValue *Target = M.getNamedValue(Global.getName());
+    if (Target == nullptr or Target->getValueType() != Global.getValueType()) {
+      revng_log(CacheLog,
+                "cannot bind " << Global.getName() << " for "
+                               << Helper->getName());
+      return nullptr;
+    }
+    VMap[&Global] = Target;
+  }
+
+  Function *Result = Function::Create(Original->getFunctionType(),
+                                      GlobalValue::InternalLinkage,
+                                      Helper->getName() + ".specialized",
+                                      M);
+  for (auto [From, To] : zip(Original->args(), Result->args()))
+    VMap[&From] = &To;
+  SmallVector<ReturnInst *, 4> Returns;
+  CloneFunctionInto(Result,
+                    Original,
+                    VMap,
+                    CloneFunctionChangeType::DifferentModule,
+                    Returns);
+  return Result;
+}
 
 /// Run \p FPM on \p F with every analysis available, including the module
 /// proxies that alias analysis requires.
@@ -254,8 +367,24 @@ CallInst *HelperSpecializations::specialize(CallInst *Call) {
     Arguments.push_back(dyn_cast<Constant>(Argument));
 
   auto [It, New] = Cache.try_emplace({ Helper, Arguments }, nullptr);
-  if (New)
-    It->second = build(Helper, Arguments);
+  if (New) {
+    std::string Key = sharedKey(Helper, Arguments);
+    auto SharedIt = Shared.find(Key);
+    revng_log(CacheLog,
+              (SharedIt == Shared.end() ? "miss " : "hit ") << Key);
+    if (SharedIt == Shared.end()) {
+      It->second = build(Helper, Arguments);
+      Shared[Key] = It->second == nullptr ?
+                      std::nullopt :
+                      std::optional(serialize(It->second));
+    } else if (SharedIt->second.has_value()) {
+      It->second = materialize(*SharedIt->second, Helper);
+      if (It->second == nullptr) {
+        revng_log(Log, "rebuilding " << Helper->getName() << " locally");
+        It->second = build(Helper, Arguments);
+      }
+    }
+  }
   if (It->second == nullptr)
     return Call;
 
