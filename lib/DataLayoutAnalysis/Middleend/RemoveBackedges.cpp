@@ -159,21 +159,39 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
   T.advance("Remove Backedges");
   using MixedNodeT = MixedNodeT<SCC>;
 
-  for (const auto &Root : llvm::nodes(&TS)) {
+  // Visit the nodes twice. The first pass starts from SCCNodeView roots.
+  // Merging nodes can also create loops that no SCCNodeView root reaches, for
+  // example a loop whose only entries are pointer edges. The second pass starts
+  // from every node no search has reached yet, sharing one visited set, so it
+  // breaks those loops too while visiting each node once.
+  auto Nodes = llvm::to_vector(llvm::nodes(&TS));
+  llvm::SmallPtrSet<const LTSN *, 16> Explored;
+  for (size_t Index = 0; Index < 2 * Nodes.size(); ++Index) {
+    LTSN *Root = Nodes[Index % Nodes.size()];
     revng_assert(Root != nullptr);
-    // We start from SCCNodeView roots and look if we find an SCC with mixed
-    // edges.
-    if (hasNoSCCEdge<SCC>(Root))
-      continue;
+    bool SecondPass = Index >= Nodes.size();
+    if (Index == 0 or Index == Nodes.size())
+      revng_log(Log, (SecondPass ? "## Second pass" : "## First pass"));
 
-    if (not isSCCRoot<SCC>(Root))
-      continue;
+    if (SecondPass) {
+      if (Explored.contains(Root))
+        continue;
+    } else {
+      // We start from SCCNodeView roots and look if we find an SCC with mixed
+      // edges.
+      if (hasNoSCCEdge<SCC>(Root))
+        continue;
+
+      if (not isSCCRoot<SCC>(Root))
+        continue;
+    }
 
     revng_log(Log, "# Looking for mixed loops from: " << Root->ID);
 
     using StackEntry = StackEntry<SCC>;
 
-    llvm::SmallPtrSet<const LTSN *, 16> Visited;
+    llvm::SmallPtrSet<const LTSN *, 16> RootVisited;
+    auto &Visited = SecondPass ? Explored : RootVisited;
     llvm::SmallPtrSet<const LTSN *, 16> InStack;
     llvm::SmallVector<EdgeInfo> BackedgesOnStack;
     llvm::SmallVector<StackEntry> VisitStack;
@@ -299,9 +317,12 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
 
     llvm::SmallSet<EdgeInfo, 8> ToRemove;
 
-    revng_assert(Components.findValue(Root) != Components.end());
+    bool HasComponent = Components.findValue(Root) != Components.end();
+    revng_assert(SecondPass or HasComponent);
     StackEntry Init = { .Node = Root,
-                        .ComponentLeader = Components.getLeaderValue(Root),
+                        .ComponentLeader = HasComponent ?
+                                             Components.getLeaderValue(Root) :
+                                             Root,
                         .NextToVisitIt = MixedNodeT::child_edge_begin(Root) };
     VisitStack.push_back(std::move(Init));
     InStack.insert(Root);
@@ -373,6 +394,9 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
       revng_assert(Erased);
       Changed = true;
     }
+
+    if (not SecondPass)
+      Explored.insert(RootVisited.begin(), RootVisited.end());
   }
 
   if (VerifyLog.isEnabled()) {
