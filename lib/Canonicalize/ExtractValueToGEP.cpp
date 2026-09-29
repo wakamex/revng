@@ -44,7 +44,9 @@ static auto getStructValuedInstructions(llvm::Function &F) {
     } else if (auto *
                  OpaqueEV = getCallToTagged(&I,
                                             FunctionTags::OpaqueExtractValue)) {
-      Struct = cast<Instruction>(OpaqueEV->getArgOperand(0));
+      // The aggregate can be a function argument or a constant, not only an
+      // instruction; skip those, as the ExtractValueInst branch above does.
+      Struct = dyn_cast<Instruction>(OpaqueEV->getArgOperand(0));
     }
 
     if (Struct)
