@@ -71,9 +71,23 @@ public:
         continue;
       }
 
+      // A call through this address uses the call-site prototype. Turning it
+      // into a direct call is only valid if that matches the function's own
+      // prototype: the rest of the pipeline takes a direct call's arguments
+      // and return values from the callee.
+      FunctionType &FT = functionTypeFor(M, *Function);
+      auto *Call = dyn_cast<CallBase>(Use->getUser());
+      if (Call != nullptr and Call->isCallee(Use)
+          and Call->getFunctionType() != &FT) {
+        revng_log(Log,
+                  "Called with a different prototype than the function's, "
+                  "bailing out");
+        continue;
+      }
+
       // OK, this is a pointer to a function entry, let's get the LLVM
       // function
-      llvm::Function &LLVMFunction = getOrCreateFunctionFor(M, *Function);
+      llvm::Function &LLVMFunction = getOrCreateFunctionFor(M, *Function, FT);
 
       // And let's emit a reference to it
       B.SetInsertPoint(cast<Instruction>(Use->getUser()));
@@ -92,14 +106,18 @@ public:
   }
 
 private:
-  llvm::Function &
-  getOrCreateFunctionFor(llvm::Module &M,
-                         const model::Function &ModelFunction) const {
+  FunctionType &functionTypeFor(llvm::Module &M,
+                                const model::Function &ModelFunction) const {
     auto *Prototype = Binary.prototypeOrDefault(ModelFunction.prototype());
     auto TheLayout = abi::FunctionType::Layout::make(notNull(Prototype));
-    auto &FT = layoutToLLVMFunctionType<false>(M.getContext(),
-                                               Binary.Architecture(),
-                                               TheLayout);
+    return layoutToLLVMFunctionType<false>(M.getContext(),
+                                           Binary.Architecture(),
+                                           TheLayout);
+  }
+
+  llvm::Function &getOrCreateFunctionFor(llvm::Module &M,
+                                         const model::Function &ModelFunction,
+                                         FunctionType &FT) const {
     std::string LLVMName = llvmName(ModelFunction);
     llvm::Function *Result = M.getFunction(LLVMName);
 
