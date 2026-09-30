@@ -829,8 +829,11 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     FPM.addPass(JumpThreadingPass());
     TypeShrinkingScaling Scaling;
     FPM.addPass(MeasureLazyValueInfoPass(Scaling));
-    // Type shrinking does not use LVI. Drop its per-value deletion callbacks
-    // before rewriting instructions, rather than retaining them until EarlyCSE.
+    // No other pass after JumpThreading depends or uses LVI.
+    // LazyValueAnalysis registers deletion callbacks that get called by
+    // following modifications of the IR. The cost of calling these callbacks
+    // can get very high, and nobody will use the results anyway.
+    // So let's invalidate LazyValueAnalysis straight after JT.
     FPM.addPass(InvalidateAnalysisPass<LazyValueAnalysis>());
 
     // Shrink instructions
@@ -841,11 +844,7 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     FPM.addPass(TypeShrinking::TypeShrinkingPass());
     FPM.addPass(CountTypeShrinkingRemovalsPass(Scaling));
 
-    // It is important to run EarlyCSE *after* JumpThreading. This has the
-    // side effect of invalidating LazyValueInfo (which would otherwise be
-    // shared between JumpThreadingPass and ValueMaterializerPass).
-    // If we don't run it we get failures on ARM.
-    // It is also important to run EarlyCSE after TypeShrinking to factor trunc
+    // It is important to run EarlyCSE after TypeShrinking to factor trunc
     // instructions and have more accurate constraints.
     FPM.addPass(EarlyCSEPass(true));
 
