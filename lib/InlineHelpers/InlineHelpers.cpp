@@ -9,6 +9,7 @@
 #include <system_error>
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -19,8 +20,10 @@
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -38,6 +41,7 @@
 #include "llvm/Transforms/Utils/LCSSA.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Transforms/Utils/UnrollLoop.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include "revng/InlineHelpers/InlineHelpers.h"
 #include "revng/Support/CommandLine.h"
@@ -177,17 +181,126 @@ std::string HelperSpecializations::sharedKey(Function *Helper,
   return OS.str();
 }
 
-/// Bitcode of a module holding \p Specialized and declarations of what it
-/// references
+/// Collect the globals \p F references, other than itself, through its
+/// operands and the constants they are built from
+static SmallPtrSet<GlobalValue *, 32> referencedGlobals(Function &F) {
+  SmallPtrSet<GlobalValue *, 32> Result;
+  SmallPtrSet<Constant *, 32> Visited;
+  SmallVector<Constant *, 32> Worklist;
+  auto Visit = [&](Value *V) {
+    if (auto *Global = dyn_cast<GlobalValue>(V)) {
+      if (Global != &F)
+        Result.insert(Global);
+    } else if (auto *C = dyn_cast<Constant>(V); C and Visited.insert(C).second) {
+      Worklist.push_back(C);
+    }
+  };
+
+  for (Instruction &I : instructions(F))
+    for (Value *Operand : I.operands())
+      Visit(Operand);
+  if (F.hasPersonalityFn())
+    Visit(F.getPersonalityFn());
+  if (F.hasPrefixData())
+    Visit(F.getPrefixData());
+  if (F.hasPrologueData())
+    Visit(F.getPrologueData());
+
+  while (not Worklist.empty())
+    for (Value *Operand : Worklist.pop_back_val()->operands())
+      Visit(Operand);
+
+  return Result;
+}
+
+/// Bitcode of a module holding \p Specialized and declarations of the globals
+/// it references
+///
+/// The module it was built in can be a whole lifted binary, as in
+/// `detect-abi`, so copying the declarations of everything in it would make
+/// each cached entry as large as the module's symbol table. The declarations
+/// keep the order of the module they come from, as a whole-module copy did,
+/// since `materialize` declares missing intrinsics in that order. If the
+/// result does not verify, for example because a global is reached through
+/// metadata, fall back to the whole-module copy.
 std::string HelperSpecializations::serialize(Function *Specialized) {
+  Module &Source = *Specialized->getParent();
+  SmallPtrSet<GlobalValue *, 32> Used = referencedGlobals(*Specialized);
+
+  auto Copy = std::make_unique<Module>(Source.getModuleIdentifier(),
+                                       Source.getContext());
+  Copy->setSourceFileName(Source.getSourceFileName());
+  Copy->setDataLayout(Source.getDataLayout());
+  Copy->setTargetTriple(Source.getTargetTriple());
+
   ValueToValueMapTy VMap;
-  auto Copy = CloneModule(*Specialized->getParent(),
-                          VMap,
-                          [Specialized](const GlobalValue *GV) {
-                            return GV == Specialized;
-                          });
+  unsigned Declared = 0;
+  for (GlobalVariable &Global : Source.globals()) {
+    if (not Used.contains(&Global))
+      continue;
+    auto *New = new GlobalVariable(*Copy,
+                                   Global.getValueType(),
+                                   Global.isConstant(),
+                                   GlobalValue::ExternalLinkage,
+                                   nullptr,
+                                   Global.getName(),
+                                   nullptr,
+                                   Global.getThreadLocalMode(),
+                                   Global.getType()->getAddressSpace());
+    New->copyAttributesFrom(&Global);
+    New->setLinkage(GlobalValue::ExternalLinkage);
+    VMap[&Global] = New;
+    ++Declared;
+  }
+
+  Function *Clone = nullptr;
+  for (Function &F : Source) {
+    if (&F != Specialized and not Used.contains(&F))
+      continue;
+    auto *New = Function::Create(cast<FunctionType>(F.getValueType()),
+                                 F.getLinkage(),
+                                 F.getAddressSpace(),
+                                 F.getName(),
+                                 Copy.get());
+    New->copyAttributesFrom(&F);
+    VMap[&F] = New;
+    if (&F == Specialized) {
+      Clone = New;
+    } else {
+      New->setLinkage(GlobalValue::ExternalLinkage);
+      New->setPersonalityFn(nullptr);
+      ++Declared;
+    }
+  }
+
   std::string Result;
   raw_string_ostream OS(Result);
+  bool Complete = Declared == Used.size();
+  if (Complete) {
+    for (auto [From, To] : zip(Specialized->args(), Clone->args())) {
+      To.setName(From.getName());
+      VMap[&From] = &To;
+    }
+    SmallVector<ReturnInst *, 8> Returns;
+    CloneFunctionInto(Clone,
+                      Specialized,
+                      VMap,
+                      CloneFunctionChangeType::DifferentModule,
+                      Returns);
+    if (Specialized->hasPersonalityFn())
+      Clone->setPersonalityFn(MapValue(Specialized->getPersonalityFn(), VMap));
+    Complete = not verifyModule(*Copy, nullptr);
+  }
+
+  if (not Complete) {
+    revng_log(CacheLog,
+              "whole-module copy for " << Specialized->getName());
+    VMap.clear();
+    Copy = CloneModule(Source, VMap, [Specialized](const GlobalValue *GV) {
+      return GV == Specialized;
+    });
+  }
+
   WriteBitcodeToFile(*Copy, OS);
   return OS.str();
 }
