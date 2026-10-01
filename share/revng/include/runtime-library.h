@@ -171,3 +171,40 @@ int rr_ucmp_impl(const void *lhs, const void *rhs, size_t size);
 #define rr_ule(x, y) (rr_operator_cmp(ucmp, x, y) <= 0)
 #define rr_sge(x, y) (rr_operator_cmp(scmp, x, y) >= 0)
 #define rr_uge(x, y) (rr_operator_cmp(ucmp, x, y) >= 0)
+
+//
+// Overflow helpers
+//
+
+// SplitOverflowIntrinsicsPass replaces each llvm.*.with.overflow intrinsic with
+// a plain operation for the result and a call to a helper named
+// <operation>_overflow_<u|s><bits> for the overflow bit, which the helper
+// header declares. These are their definitions. The helper header's
+// declaration follows a static definition and so keeps internal linkage: no
+// object has to supply them.
+#define rr_overflow_helper(operation, sign, bits, type)               \
+  static inline generic8_t                                            \
+    operation##_overflow_##sign##bits(generic##bits##_t a,            \
+                                      generic##bits##_t b) {          \
+    type rr_r;                                                        \
+    return __builtin_##operation##_overflow((type) a, (type) b, &rr_r); \
+  }
+
+#define rr_overflow_helpers(bits)                  \
+  rr_overflow_helper(add, u, bits, uint##bits##_t) \
+  rr_overflow_helper(sub, u, bits, uint##bits##_t) \
+  rr_overflow_helper(mul, u, bits, uint##bits##_t) \
+  rr_overflow_helper(add, s, bits, int##bits##_t)  \
+  rr_overflow_helper(sub, s, bits, int##bits##_t)  \
+  rr_overflow_helper(mul, s, bits, int##bits##_t)
+
+rr_overflow_helpers(8)
+rr_overflow_helpers(16)
+rr_overflow_helpers(32)
+rr_overflow_helpers(64)
+#ifdef __SIZEOF_INT128__
+rr_overflow_helpers(128)
+#endif
+
+#undef rr_overflow_helpers
+#undef rr_overflow_helper
