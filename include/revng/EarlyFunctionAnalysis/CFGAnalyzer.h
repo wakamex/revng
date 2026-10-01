@@ -5,6 +5,8 @@
 //
 
 #include <memory>
+#include <set>
+#include <utility>
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -64,6 +66,9 @@ public:
                           llvm::Value *SymbolNamePointer) final;
 };
 
+/// The instructions each CFG block decodes, as (block, instruction) pairs
+using DecodedInstructions = std::set<std::pair<BasicBlockID, BasicBlockID>>;
+
 /// This class, given an Oracle, analyzes a function returning its CFG, the set
 /// of callee saved registers, whether it's noreturn or not and its final stack
 /// offset
@@ -117,7 +122,8 @@ private:
   std::optional<UpcastablePointer<efa::FunctionEdgeBase>>
   handleCall(llvm::CallInst *PreCallHookCall);
 
-  SortedVector<efa::BasicBlock> collectDirectCFG(OutlinedFunction *F);
+  SortedVector<efa::BasicBlock> collectDirectCFG(OutlinedFunction *F,
+                                                 DecodedInstructions &Decoded);
 
   void createIBIMarker(OutlinedFunction *F);
 
@@ -128,7 +134,8 @@ private:
   void runOptimizationPipeline(llvm::Function *F);
 
   FunctionSummary milkInfo(OutlinedFunction *F,
-                           SortedVector<efa::BasicBlock> &&CFG);
+                           SortedVector<efa::BasicBlock> &&CFG,
+                           const DecodedInstructions &Decoded);
 
   struct State {
     llvm::Value *StackPointer;

@@ -109,21 +109,24 @@ makeIndirectEdge(efa::FunctionEdgeType::Values Type) {
 namespace efa {
 
 static efa::BasicBlock &
-blockFromIndirectBranchInfo(CallBase *CI, SortedVector<efa::BasicBlock> &CFG) {
+blockFromIndirectBranchInfo(CallBase *CI,
+                            SortedVector<efa::BasicBlock> &CFG,
+                            const DecodedInstructions &Decoded) {
   auto *BlockIDArgument = CI->getArgOperand(CallerBlockIDIndex);
   auto ID = BasicBlockID::fromValue(BlockIDArgument);
   auto It = CFG.find(ID);
   if (It != CFG.end())
     return *It;
 
-  // The argument is the address of the branch: find the block containing it.
-  // An overlapping decoding that starts inside an earlier instruction can
-  // also cover that address; it falls through or branches, so it already has
-  // successors. The block ending in the indirect branch gets its only edges
-  // from here, so prefer a containing block that has none yet.
+  // The argument is the address of the branch: find the block that decodes
+  // an instruction there. Address ranges alone are ambiguous: an overlapping
+  // decoding that starts inside an instruction of another block lies within
+  // that block's range without being part of it. Among the blocks that
+  // decode the branch, the one ending in it gets its only edges from here,
+  // so prefer one that has none yet.
   efa::BasicBlock *Result = nullptr;
   for (efa::BasicBlock &Block : CFG) {
-    if (not Block.contains(ID))
+    if (not Block.contains(ID) or not Decoded.contains({ Block.ID(), ID }))
       continue;
     if (Block.Successors().empty())
       return Block;
@@ -131,7 +134,7 @@ blockFromIndirectBranchInfo(CallBase *CI, SortedVector<efa::BasicBlock> &CFG) {
       Result = &Block;
   }
 
-  revng_assert(Result != nullptr, "No block contains the indirect branch");
+  revng_assert(Result != nullptr, "No block decodes the indirect branch");
   return *Result;
 }
 
@@ -290,7 +293,8 @@ CFGAnalyzer::handleCall(llvm::CallInst *PreCallHookCall) {
 }
 
 SortedVector<efa::BasicBlock>
-CFGAnalyzer::collectDirectCFG(OutlinedFunction *OF) {
+CFGAnalyzer::collectDirectCFG(OutlinedFunction *OF,
+                              DecodedInstructions &Decoded) {
   using namespace llvm;
   using llvm::BasicBlock;
   revng_log(Log, "collectDirectCFG(" << OF->Function->getName().str() << ")");
@@ -325,6 +329,11 @@ CFGAnalyzer::collectDirectCFG(OutlinedFunction *OF) {
       while (!Queue.empty()) {
         BasicBlock *Current = Queue.pop();
         revng_log(Log, "Analyzing block " << getName(Current));
+
+        // Record the instructions this block decodes
+        for (Instruction &I : *Current)
+          if (std::optional NewPCCall = NewPCHelper.getCall(&I))
+            Decoded.insert({ ID, blockIDFromNewPC(*NewPCCall) });
 
         // If this block belongs to a single `newpc`, record its address
         MetaAddress CurrentBlockEnd = getFinalAddressOfBasicBlock(Current);
@@ -759,7 +768,8 @@ static bool isNoReturn(const model::Binary &Binary,
 }
 
 FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
-                                      SortedVector<efa::BasicBlock> &&CFG) {
+                                      SortedVector<efa::BasicBlock> &&CFG,
+                                      const DecodedInstructions &Decoded) {
   using namespace llvm;
   using namespace efa::FunctionEdgeType;
   using namespace model::Architecture;
@@ -803,7 +813,9 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
         JumpsToReturnAddress = ConstantOffset->getSExtValue() == 0;
     }
 
-    const efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG);
+    const efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI,
+                                                               CFG,
+                                                               Decoded);
 
     // Is this a tail call? If so, we are very interested in the FSO since
     // it's useful to determine the FSO of the caller
@@ -905,7 +917,7 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
         // We found a tail call that leads to a FSO that's not coherent with
         // the elected one. Purge it turning it into a LongJmp.
         Different = true;
-        efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG);
+        efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG, Decoded);
         revng_assert(Block.Successors().size() == 1);
         auto OldEdge = cast<efa::CallEdge>(Block.Successors().begin()->get());
         revng_assert(OldEdge->IsTailCall());
@@ -998,7 +1010,7 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
   // Commit  IBIResults to the CFG
   //
   for (const auto &[CI, Edge] : IBIResult) {
-    efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG);
+    efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG, Decoded);
     revng_log(Log,
               "Committing the indirect branch of "
                 << BasicBlockID::fromValue(CI->getArgOperand(CallerBlockIDIndex))
@@ -1085,7 +1097,9 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry) {
   OutlinedFunction OutlinedFunction = outline(Entry);
 
   // Recover the control-flow graph of the function
-  SortedVector<efa::BasicBlock> CFG = collectDirectCFG(&OutlinedFunction);
+  DecodedInstructions Decoded;
+  SortedVector<efa::BasicBlock> CFG = collectDirectCFG(&OutlinedFunction,
+                                                       Decoded);
 
   BasicBlock &FirstBlock = OutlinedFunction.Function->getEntryBlock();
   if (CFG.size() == 0) {
@@ -1136,7 +1150,7 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry) {
   runOptimizationPipeline(F);
 
   // Squeeze out the results obtained from the optimization passes
-  auto FunctionInfo = milkInfo(&OutlinedFunction, std::move(CFG));
+  auto FunctionInfo = milkInfo(&OutlinedFunction, std::move(CFG), Decoded);
 
   return FunctionInfo;
 }
