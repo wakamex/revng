@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Generator, Optional, TypeVar, Union
@@ -16,6 +17,7 @@ from pipebox import GeneratorPipeWithInvalidation, InPlacePipe, MyKind, MyObject
 from pipebox import PurgeAllAnalysis, PurgeOneAnalysis, RootDictContainer, SameKindPipe
 from pipebox import ToHigherKindPipe, ToLowerKindPipe
 
+from revng.pypeline import __version__ as pypeline_version
 from revng.pypeline import initialize_pypeline
 from revng.pypeline.container import ContainerDeclaration
 from revng.pypeline.model import ReadOnlyModel
@@ -25,7 +27,8 @@ from revng.pypeline.pipeline_node import PipelineConfiguration, PipelineNode
 from revng.pypeline.pipeline_parser import load_pipeline_yaml_file
 from revng.pypeline.runner_context import RunnerContext
 from revng.pypeline.schedule.scheduled_task import SavepointScheduledTask
-from revng.pypeline.storage.local_provider import LocalStorageProvider
+from revng.pypeline.storage import local_provider
+from revng.pypeline.storage.local_provider import LocalStorageProvider, Migrator
 from revng.pypeline.storage.memory import InMemoryStorageProvider
 from revng.pypeline.storage.storage_provider import ContainerLocation, PipeDependencies
 from revng.pypeline.storage.storage_provider import SavePointsRange, StorageProvider
@@ -877,3 +880,129 @@ def test_custom_invalidation(model, storage_provider: StorageProvider):
     location = ContainerLocation(1, root_decl.name, begin_configuration_id)
     assert {location} == set(invalidated.keys())
     assert invalidated[location] == {MyObjectID.root()}
+
+
+def test_local_provider_chunking(monkeypatch):
+    monkeypatch.setattr(local_provider, "CHUNK_SIZE", 4)
+    container_id = "a"
+    configuration_id = ""
+    location = ContainerLocation(0, container_id, configuration_id)
+    root = MyObjectID(MyKind.ROOT)
+    function1 = MyObjectID(MyKind.CHILD, "func1")
+    function2 = MyObjectID(MyKind.CHILD, "func2")
+    function3 = MyObjectID(MyKind.CHILD, "func3")
+
+    with NamedTemporaryFile() as f, TemporaryDirectory() as d:
+        provider = LocalStorageProvider(":memory:", Path(f.name), Path(d), "")
+        provider.set_model(DictModel(), set(), [])
+        db = provider._connection
+
+        def put(object_id, content: bytes, path: str):
+            provider.add_objects(
+                [
+                    PipeDependencies(
+                        0,
+                        SavePointsRange(0, 0),
+                        configuration_id,
+                        [(container_id, object_id, path)],
+                        [],
+                    )
+                ],
+                {location: {object_id: content}},
+            )
+
+        def chunks(object_id) -> list[tuple[int, bytes]]:
+            return db.execute(
+                "SELECT chunk_index, content FROM object_chunks WHERE object_id = ?"
+                " ORDER BY chunk_index",
+                (object_id.to_bytes(),),
+            ).fetchall()
+
+        def chunk_count(object_id) -> int:
+            return db.execute(
+                "SELECT chunk_count FROM objects WHERE object_id = ?", (object_id.to_bytes(),)
+            ).fetchone()[0]
+
+        def count(query: str) -> int:
+            return db.execute(query).fetchone()[0]
+
+        # Content above CHUNK_SIZE round-trips byte-exactly through chunk rows
+        data = bytes(range(250, 256)) + bytes(range(4))
+        put(root, data, "/root")
+        assert provider.get(location, [root]) == {root: data}
+        assert chunks(root) == [(0, data[0:4]), (1, data[4:8]), (2, data[8:10])]
+        assert chunk_count(root) == 3
+
+        # Shrinking to inline drops every chunk row
+        put(root, b"xy", "/root")
+        assert provider.get(location, [root]) == {root: b"xy"}
+        assert chunks(root) == []
+        assert chunk_count(root) == 0
+
+        # Growing then shrinking leaves exactly the rows of the last version
+        put(root, b"g" * 13, "/root")
+        assert len(chunks(root)) == 4
+        put(root, b"s" * 6, "/root")
+        assert provider.get(location, [root]) == {root: b"s" * 6}
+        assert chunks(root) == [(0, b"ssss"), (1, b"ss")]
+        assert chunk_count(root) == 2
+
+        # An object of exactly CHUNK_SIZE stays inline
+        put(function2, b"abcd", "/function2")
+        assert provider.get(location, [function2]) == {function2: b"abcd"}
+        assert chunks(function2) == []
+        assert chunk_count(function2) == 0
+
+        # Invalidation removes the chunks of the invalidated objects (function1
+        # and, upward, root) and keeps those of the untouched sibling function3
+        put(function1, b"f" * 9, "/function1")
+        put(function3, b"t" * 5, "/function3")
+        result = provider.set_model(provider.get_model()[0], {"/function1"}, [])
+        assert result.invalidated_objects == {location: {root, function1}}
+        assert chunks(root) == []
+        assert chunks(function1) == []
+        assert chunks(function3) == [(0, b"tttt"), (1, b"t")]
+        assert provider.get(location, [function3]) == {function3: b"t" * 5}
+        assert count(local_provider.DELETE_ORPHAN_CHUNKS.replace("DELETE", "SELECT COUNT(*)")) == 0
+
+        # Prune empties the chunk table
+        provider.prune_objects()
+        assert count("SELECT COUNT(*) FROM object_chunks") == 0
+        assert count("SELECT COUNT(*) FROM objects") == 0
+
+
+def test_local_provider_v3_migration_keeps_inline_objects():
+    container_id = "a"
+    configuration_id = ""
+    root = MyObjectID(MyKind.ROOT)
+
+    with (
+        NamedTemporaryFile(suffix=".sqlite") as db_file,
+        NamedTemporaryFile() as f,
+        TemporaryDirectory() as d,
+    ):
+        # Build a v3 database holding one inline object
+        connection = sqlite3.connect(db_file.name, autocommit=False)
+        cursor = connection.cursor()
+        migrator = Migrator(cursor)
+        migrator._create_tables_if_missing()
+        for migration in (1, 2, 3):
+            migrator._apply_migration(migration, migrator._migrations[migration].read_text())
+        cursor.execute(
+            "UPDATE project SET version = ?, pipeline_hash = ? WHERE id is 0",
+            (pypeline_version, ""),
+        )
+        cursor.execute(
+            "INSERT INTO objects VALUES (?, ?, ?, ?, ?, ?)",
+            (0, container_id, configuration_id, root.to_bytes(), b"inline", root.serialize()),
+        )
+        connection.commit()
+        connection.close()
+
+        provider = LocalStorageProvider(db_file.name, Path(f.name), Path(d), "")
+        db = provider._connection
+        assert db.execute("SELECT version FROM migrations").fetchone()[0] == 4
+        location = ContainerLocation(0, container_id, configuration_id)
+        assert provider.get(location, [root]) == {root: b"inline"}
+        assert db.execute("SELECT chunk_count FROM objects").fetchall() == [(0,)]
+        assert db.execute("SELECT COUNT(*) FROM object_chunks").fetchone()[0] == 0

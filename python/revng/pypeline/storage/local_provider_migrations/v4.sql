@@ -5,12 +5,9 @@
 -- Store object content larger than one SQLite value (about 2 GiB hard cap,
 -- about 0.93 GiB by default) across several rows of `object_chunks`, keyed by
 -- the owning object plus a chunk index, reassembled in order on read. Inline
--- objects keep chunk_count 0 and their content in `objects`. The caches are
--- cleared because existing rows predate the chunk_count column.
-
-DELETE FROM objects;
-DELETE FROM dependencies;
-DELETE FROM custom_dependencies;
+-- objects keep chunk_count 0 and their content in `objects`. Existing rows
+-- are all inline, so the column default of 0 marks them correctly and the
+-- caches are kept.
 
 ALTER TABLE objects ADD COLUMN chunk_count INT NOT NULL DEFAULT 0;
 
