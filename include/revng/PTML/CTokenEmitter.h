@@ -314,6 +314,10 @@ public:
                             IncludeMode Mode);
   void emitPragmaOnceDirective();
 
+  /// Emit `#define` followed by a space; the caller emits the macro name, its
+  /// replacement list and the terminating newline.
+  void emitDefineDirective();
+
   enum class ScopeKind : uint8_t {
     None,
     EnumDefinition,

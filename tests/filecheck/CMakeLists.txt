@@ -39,6 +39,7 @@ set(FILECHECK_TESTS
     clift/backend/global.mlir
     clift/backend/goto.mlir
     clift/backend/if.mlir
+    clift/backend/image-resident-segment.mlir
     clift/backend/immediate.mlir
     clift/backend/intrinsic.mlir
     clift/backend/label.mlir

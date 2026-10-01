@@ -674,6 +674,14 @@ public:
       Op->setAttr("clift.comment",
                   mlir::StringAttr::get(Op->getContext(), Segment->Comment()));
 
+      // The header emitter refers to an image-resident segment inside the
+      // loaded original image instead of declaring storage for it.
+      if (Segment->IsImageResident())
+        Op->setAttr("clift.image_resident",
+                    mlir::UnitAttr::get(Op->getContext()));
+      else
+        Op->removeAttr("clift.image_resident");
+
       return mlir::success();
     }
 

@@ -7,6 +7,24 @@
 #include "primitive-types.h"
 
 //
+// Image-resident segments
+//
+
+// The emitted code of an image-resident segment refers to it inside the loaded
+// original image, at its original address plus the image's load bias: the
+// difference between the address at which the environment mapped the image and
+// the addresses the model records. The environment that maps the image provides
+// this variable and sets it before running emitted code.
+extern uintptr_t rr_image_load_bias;
+
+// The header declares each image-resident segment `extern` without defining it
+// and redefines its name as `rr_image_resident(name, address)`. Inside the
+// expansion `name` is not expanded again, so it names the declaration and only
+// supplies the segment's type.
+#define rr_image_resident(name, address) \
+  (*(__typeof__(name) *) ((uintptr_t) (address) + rr_image_load_bias))
+
+//
 // Runtime library ABI
 //
 

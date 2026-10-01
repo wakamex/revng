@@ -758,6 +758,16 @@ definitions:
         doc: Is this segment executable?
         type: bool
 
+      - name: IsImageResident
+        doc: |-
+          Does this segment reside in the original image at run time?
+
+          Recompiled code that runs alongside the loaded original image refers to
+          an image-resident segment at its original address plus the image's load
+          bias, instead of defining its own storage for the segment. Its contents,
+          including writes performed by the original code, are the image's.
+        type: bool
+
       - name: Name
         doc: The name of the segment.
         type: string

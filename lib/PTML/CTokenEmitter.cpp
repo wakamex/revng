@@ -767,6 +767,14 @@ void ptml::CTokenEmitter::emitPragmaOnceDirective() {
   emitNewline();
 }
 
+void ptml::CTokenEmitter::emitDefineDirective() {
+  revng_assert(not IsEmittingComment,
+               "Cannot emit tokens while an open CommentEmitter exists.");
+
+  emitDirectiveIdentifier(PTML, "define");
+  emitSpace();
+}
+
 CTokenEmitter::Scope::Scope(CTokenEmitter &Emitter,
                             ScopeKind Kind,
                             CTokenEmitter::Delimiter Delimiter) :

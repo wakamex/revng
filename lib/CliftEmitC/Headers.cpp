@@ -136,6 +136,44 @@ public:
                       "Imported Dynamic Functions");
   }
 
+private:
+  /// Emit `#define name rr_image_resident(name, address)`. The macro expands to
+  /// an lvalue of the segment's type located at its original address plus the
+  /// load bias of the original image (see runtime-library.h), so every use of
+  /// the segment in emitted code, including taking its address, reaches the
+  /// image.
+  template<typename LocationT>
+  void emitImageResidentMacro(clift::GlobalVariableOp Segment,
+                              const LocationT &Location) {
+    using EntityKind = ptml::CTokenEmitter::EntityKind;
+    using IdentifierKind = ptml::CTokenEmitter::IdentifierKind;
+    using Punctuator = ptml::CTokenEmitter::Punctuator;
+
+    const auto &[StartAddress] = Location.at(revng::ranks::Segment);
+    revng_assert(StartAddress.isValid());
+
+    auto EmitName = [&]() {
+      Tokens.emitIdentifier(Segment.getName(),
+                            Segment.getHandle(),
+                            EntityKind::GlobalVariable,
+                            IdentifierKind::Reference);
+    };
+
+    Tokens.emitDefineDirective();
+    EmitName();
+    Tokens.emitSpace();
+    Tokens.emitMacro("rr_image_resident");
+    Tokens.emitPunctuator(Punctuator::LeftParenthesis);
+    EmitName();
+    Tokens.emitPunctuator(Punctuator::Comma);
+    Tokens.emitSpace();
+    Tokens.emitIntegerLiteral(llvm::APInt(64, StartAddress.address()),
+                              std::nullopt,
+                              16);
+    Tokens.emitPunctuator(Punctuator::RightParenthesis);
+    Tokens.emitNewline();
+  }
+
 public:
   void emitSegments(mlir::ModuleOp Module) {
     bool CommentEmitted = false;
@@ -156,6 +194,15 @@ public:
 
         emitGlobalDoxygenComment(Segment);
 
+        // An image-resident segment is declared but never defined: the name
+        // becomes a macro for the object at the segment's original address in
+        // the loaded image, and the declaration only supplies its type.
+        bool IsImageResident = Segment->hasAttr("clift.image_resident");
+        if (IsImageResident) {
+          Tokens.emitKeyword(ptml::CTokenEmitter::Keyword::Extern);
+          Tokens.emitSpace();
+        }
+
         using EntityKind = ptml::CTokenEmitter::EntityKind;
         emitDeclaration(Segment.getType(),
                         CEmitter::DeclaratorInfo{
@@ -167,6 +214,9 @@ public:
 
         Tokens.emitPunctuator(ptml::CTokenEmitter::Punctuator::Semicolon);
         Tokens.emitNewline();
+
+        if (IsImageResident)
+          emitImageResidentMacro(Segment, *MaybeLocation);
       }
 
       Tokens.emitNewline();
