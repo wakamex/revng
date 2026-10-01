@@ -58,3 +58,30 @@ define void @struct_from_load(ptr %p) {
   store i32 %f1, ptr null
   ret void
 }
+
+; Constant folding can replace an aggregate whose extractions are already
+; opaque, such as a with.overflow call whose operands became constant. Each
+; opaque extraction of a constant aggregate becomes the element it selects, so
+; no OpaqueExtractValue with a constant operand reaches the C backend.
+;
+; CHECK-LABEL: define void @opaque_from_constant
+; CHECK-NOT: call {{.*}}@OpaqueExtractvalue
+; CHECK: store i1 false, ptr null
+; CHECK: store i64 0, ptr null
+; CHECK: store i32 7, ptr null
+; CHECK: ret void
+declare !revng.tags !0 i1 @OpaqueExtractvalue.1({ i64, i1 }, i64)
+declare !revng.tags !0 i64 @OpaqueExtractvalue.2({ i64, i1 }, i64)
+declare !revng.tags !0 i32 @OpaqueExtractvalue.3({ i32, i32 }, i64)
+
+define void @opaque_from_constant() {
+  %overflow = call i1 @OpaqueExtractvalue.1({ i64, i1 } zeroinitializer, i64 1)
+  %result = call i64 @OpaqueExtractvalue.2({ i64, i1 } zeroinitializer, i64 0)
+  %field = call i32 @OpaqueExtractvalue.3({ i32, i32 } { i32 3, i32 7 }, i64 1)
+  store i1 %overflow, ptr null
+  store i64 %result, ptr null
+  store i32 %field, ptr null
+  ret void
+}
+
+!0 = !{!"opaque-extract-value", !"uniqued-by-prototype"}

@@ -4,6 +4,7 @@
 
 #include <limits>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -44,8 +45,9 @@ static auto getStructValuedInstructions(llvm::Function &F) {
     } else if (auto *
                  OpaqueEV = getCallToTagged(&I,
                                             FunctionTags::OpaqueExtractValue)) {
-      // The aggregate can be a function argument or a constant, not only an
-      // instruction; skip those, as the ExtractValueInst branch above does.
+      // The aggregate can be a function argument, not only an instruction;
+      // skip it, as the ExtractValueInst branch above does. Constant
+      // aggregates were folded by foldConstantAggregates.
       Struct = dyn_cast<Instruction>(OpaqueEV->getArgOperand(0));
     }
 
@@ -56,10 +58,45 @@ static auto getStructValuedInstructions(llvm::Function &F) {
   return StructValues.takeVector();
 }
 
+// Constant folding can replace an aggregate with a constant after its
+// extractions were made opaque: a with.overflow call whose operands became
+// constant turns into a constant { result, overflow } pair. Neither the
+// lowering below nor the C backend handles a constant aggregate operand, so
+// replace each such extraction with the element it selects.
+static bool foldConstantAggregates(llvm::Function &F) {
+  bool Changed = false;
+  for (Instruction &I : llvm::make_early_inc_range(llvm::instructions(F))) {
+    auto *OpaqueEV = getCallToTagged(&I, FunctionTags::OpaqueExtractValue);
+    if (not OpaqueEV)
+      continue;
+
+    auto *Aggregate = dyn_cast<Constant>(OpaqueEV->getArgOperand(0));
+    if (not Aggregate)
+      continue;
+
+    auto *Index = cast<ConstantInt>(OpaqueEV->getArgOperand(1));
+    if (Index->uge(Aggregate->getType()->getStructNumElements()))
+      continue;
+
+    Constant *Element = Aggregate->getAggregateElement(Index->getZExtValue());
+    if (not Element)
+      continue;
+
+    revng_assert(Element->getType() == OpaqueEV->getType());
+    OpaqueEV->replaceAllUsesWith(Element);
+    OpaqueEV->eraseFromParent();
+    Changed = true;
+  }
+
+  return Changed;
+}
+
 bool ExtractValueToGEPPass::runOnFunction(llvm::Function &F) {
+  bool Folded = foldConstantAggregates(F);
+
   SmallVector<Instruction *> StructValues = getStructValuedInstructions(F);
   if (StructValues.empty())
-    return false;
+    return Folded;
 
   LLVMContext &Context = F.getContext();
   const DataLayout &DL = F.getParent()->getDataLayout();
