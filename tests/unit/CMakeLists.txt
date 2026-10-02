@@ -581,3 +581,19 @@ target_link_libraries(
   test_type_refinement revngCliftTransforms revngUnitTestHelpers
   Boost::unit_test_framework ${LLVM_LIBRARIES})
 add_test(NAME test_type_refinement COMMAND test_type_refinement)
+
+#
+# test_deterministic_order
+#
+
+revng_add_test_executable(test_deterministic_order
+                          "${SRC}/DeterministicOrder.cpp")
+target_compile_definitions(test_deterministic_order
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_deterministic_order
+                           PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_deterministic_order revngSupport
+                      revngUnitTestHelpers Boost::unit_test_framework
+                      ${LLVM_LIBRARIES})
+revng_add_test(NAME test_deterministic_order COMMAND test_deterministic_order)
+set_tests_properties(test_deterministic_order PROPERTIES LABELS "unit")
