@@ -224,6 +224,17 @@ private:
                              OpaqueRegisterUser &Clobberer);
   void applyABIDeductions();
 
+  /// \return the registers any of \p CSVs belongs to
+  abi::Definition::RegisterSet registersOf(const CSVSet &CSVs) const;
+
+  /// \return the CSVs that compose \p Registers
+  CSVSet csvsOf(const abi::Definition::RegisterSet &Registers) const;
+
+  /// \return the arguments or the return values that the raw \p Registers
+  ///         become once `applyABIDeductions` has run
+  CSVSet deducedArguments(const CSVSet &Registers) const;
+  CSVSet deducedReturnValues(const CSVSet &Registers) const;
+
   /// Finish the population of the model by building the prototype
   void finalizeModel();
 
@@ -729,6 +740,67 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
   return Changes;
 }
 
+abi::Definition::RegisterSet
+DetectABI::registersOf(const CSVSet &CSVs) const {
+  abi::Definition::RegisterSet Result;
+  model::Architecture::Values Architecture = Binary->Architecture();
+  for (const auto &Register : model::Architecture::registers(Architecture)) {
+    for (const model::Register::CSV &RegisterCSV :
+         model::Register::getCSVs(Register)) {
+      // A register is an argument or a return value if any of its CSVs is.
+      llvm::GlobalVariable *CSV = M.getGlobalVariable(RegisterCSV.Name, true);
+      if (CSV != nullptr and CSVs.contains(CSV))
+        Result.emplace(Register);
+    }
+  }
+
+  return Result;
+}
+
+CSVSet DetectABI::csvsOf(const abi::Definition::RegisterSet &Registers) const {
+  CSVSet Result;
+  for (const auto &Register : Registers) {
+    for (const model::Register::CSV &RegisterCSV :
+         model::Register::getCSVs(Register)) {
+      llvm::GlobalVariable *CSV = M.getGlobalVariable(RegisterCSV.Name, true);
+      if (CSV != nullptr)
+        Result.insert(CSV);
+    }
+  }
+
+  return Result;
+}
+
+CSVSet DetectABI::deducedArguments(const CSVSet &Registers) const {
+  if (ABIEnforcement == NoABIEnforcement)
+    return Registers;
+
+  auto ABI = abi::Definition::get(Binary->DefaultABI());
+  auto Set = registersOf(Registers);
+  if (ABIEnforcement == FullABIEnforcement)
+    return csvsOf(ABI.enforceArgumentRegisterState(std::move(Set)));
+
+  if (auto R = ABI.tryDeducingArgumentRegisterState(std::move(Set)))
+    return csvsOf(*R);
+
+  return Registers;
+}
+
+CSVSet DetectABI::deducedReturnValues(const CSVSet &Registers) const {
+  if (ABIEnforcement == NoABIEnforcement)
+    return Registers;
+
+  auto ABI = abi::Definition::get(Binary->DefaultABI());
+  auto Set = registersOf(Registers);
+  if (ABIEnforcement == FullABIEnforcement)
+    return csvsOf(ABI.enforceReturnValueRegisterState(std::move(Set)));
+
+  if (auto R = ABI.tryDeducingReturnValueRegisterState(std::move(Set)))
+    return csvsOf(*R);
+
+  return Registers;
+}
+
 // TODO: drop this.
 // Since function type conversion is capable of handling the holes
 // internally, there's not much reason to push such invasive changes
@@ -741,24 +813,8 @@ void DetectABI::applyABIDeductions() {
   for (const model::Function &Function : Binary->Functions()) {
     auto &Summary = Oracle.getLocalFunction(Function.Entry());
 
-    abi::Definition::RegisterSet Arguments;
-    abi::Definition::RegisterSet RValues;
-    model::Architecture::Values Architecture = Binary->Architecture();
-    for (const auto &Register : model::Architecture::registers(Architecture)) {
-      for (const model::Register::CSV &RegisterCSV :
-           model::Register::getCSVs(Register)) {
-        llvm::GlobalVariable *CSV = M.getGlobalVariable(RegisterCSV.Name, true);
-        if (CSV == nullptr)
-          continue;
-
-        // A register is an argument or a return value if any of its CSVs is.
-        if (Summary.ABIResults.ArgumentsRegisters.contains(CSV))
-          Arguments.emplace(Register);
-
-        if (Summary.ABIResults.ReturnValuesRegisters.contains(CSV))
-          RValues.emplace(Register);
-      }
-    }
+    auto Arguments = registersOf(Summary.ABIResults.ArgumentsRegisters);
+    auto RValues = registersOf(Summary.ABIResults.ReturnValuesRegisters);
 
     if (ABIEnforcement == FullABIEnforcement) {
       Arguments = ABI.enforceArgumentRegisterState(std::move(Arguments));
@@ -775,21 +831,8 @@ void DetectABI::applyABIDeductions() {
         continue; // Register deduction failed.
     }
 
-    efa::CSVSet ResultingArguments;
-    efa::CSVSet ResultingReturnValues;
-    for (const auto &Register : model::Architecture::registers(Architecture)) {
-      for (const model::Register::CSV &RegisterCSV :
-           model::Register::getCSVs(Register)) {
-        llvm::GlobalVariable *CSV = M.getGlobalVariable(RegisterCSV.Name, true);
-        if (CSV == nullptr)
-          continue;
-
-        if (Arguments.contains(Register))
-          ResultingArguments.insert(CSV);
-        if (RValues.contains(Register))
-          ResultingReturnValues.insert(CSV);
-      }
-    }
+    efa::CSVSet ResultingArguments = csvsOf(Arguments);
+    efa::CSVSet ResultingReturnValues = csvsOf(RValues);
 
     for (auto &Block : Summary.CFG) {
       for (auto &Edge : Block.Successors()) {
@@ -1069,8 +1112,13 @@ DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
     revng_assert(!Found);
     Found = true;
 
-    recordRegisters(CallSites.ArgumentsRegisters,
-                    Prototype.Arguments().batch_insert());
+    // Add the arguments the ABI implies, as for function prototypes: passing
+    // a register argument implies passing those before it. Keep every
+    // register the analysis observed.
+    CSVSet Arguments = deducedArguments(CallSites.ArgumentsRegisters);
+    for (auto *CSV : CallSites.ArgumentsRegisters)
+      Arguments.insert(CSV);
+    recordRegisters(Arguments, Prototype.Arguments().batch_insert());
     recordRegisters(CallSites.ReturnValuesRegisters,
                     Prototype.ReturnValues().batch_insert());
   }
@@ -1233,16 +1281,24 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // refine the final results.
   auto WrittenRegisters = findWrittenRegisters(OutlinedFunction.Function.get());
 
-  // Run ABI-independent data-flow analyses
+  // Run ABI-independent data-flow analyses. The callers of this function read
+  // the return values it keeps after ABI deduction and that some caller reads
+  // after calling it.
+  FunctionSummary &Summary = Oracle.getLocalFunction(EntryAddress);
+  const RUAResults &Known = Summary.ABIResults;
+  CSVSet ReadReturnValues;
+  for (auto *CSV : deducedReturnValues(Known.ReturnValuesRegisters))
+    if (Known.ReadReturnValuesRegisters.contains(CSV))
+      ReadReturnValues.insert(CSV);
   ABIResults = analyzeRegisterUsage(OutlinedFunction.Function.get(),
                                     Binary->Architecture(),
                                     Analyzer.preCallHook(),
                                     Analyzer.postCallHook(),
-                                    Analyzer.retHook());
+                                    Analyzer.retHook(),
+                                    ReadReturnValues);
 
   // We say that a register is callee-saved when, besides being preserved by
   // the callee, there is at least a write onto this register.
-  FunctionSummary &Summary = Oracle.getLocalFunction(EntryAddress);
   auto CalleeSavedRegs = computePreservedCSVs(Summary.ClobberedRegisters);
   auto ActualCalleeSavedRegs = llvm::set_intersection(CalleeSavedRegs,
                                                       WrittenRegisters);
@@ -1250,6 +1306,21 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // Refine ABI analyses results by suppressing callee-saved and stack
   // pointer registers.
   suppressCalleeSaved(ABIResults, ActualCalleeSavedRegs);
+
+  // A call whose callee is unknown passes on the arguments of this function
+  // that still hold the value it received, which only holds before the first
+  // call: nothing tells which of them the callee reads. Calls to known callees get their arguments from the callee.
+  // Only registers the function reads count, among those the ABI allows as
+  // arguments.
+  CSVSet Arguments = Summary.ABIResults.ArgumentsRegisters;
+  for (auto *CSV : ABIResults.ArgumentsRegisters)
+    Arguments.insert(CSV);
+  CSVSet ABIArguments = deducedArguments(Arguments);
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites)
+    if (not CallSite.CalleeAddress.isValid())
+      for (auto *CSV : CallSite.IncomingRegisters)
+        if (Arguments.contains(CSV) and ABIArguments.contains(CSV))
+          CallSite.ArgumentsRegisters.insert(CSV);
 
   // Commit ABI analysis results to the oracle
   auto Old = Summary.ABIResults;
@@ -1286,8 +1357,11 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
       for (auto *CSV : CallSite.ArgumentsRegisters)
         Changed = Changed or ToAdjust.ArgumentsRegisters.insert(CSV).second;
 
-      for (auto *CSV : CallSite.ReturnValuesRegisters)
+      for (auto *CSV : CallSite.ReturnValuesRegisters) {
         Changed = Changed or ToAdjust.ReturnValuesRegisters.insert(CSV).second;
+        if (ToAdjust.ReadReturnValuesRegisters.insert(CSV).second)
+          Changed = true;
+      }
 
       if (Changed and Callee.isValid())
         Changes.Callees.insert(Callee);

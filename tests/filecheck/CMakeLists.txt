@@ -435,6 +435,7 @@ set(FILECHECK_TESTS
     clift/types/struct-with-recursion.mlir
     clift/types/union-with-large-tree.mlir
     clift/types/union-with-pointer-recursion.mlir
+    detect-abi/indirect-call-site-prototype.S
     detect-abi/overlapping-indirect-branch.S
     detect-abi/trace-progress.S
     detect-abi/trap-fallthrough.S

@@ -18,6 +18,7 @@
 #include "revng/Model/Binary.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/Register.h"
+#include "revng/RegisterUsageAnalyses/IncomingValues.h"
 #include "revng/RegisterUsageAnalyses/Liveness.h"
 #include "revng/RegisterUsageAnalyses/ReachingDefinitions.h"
 #include "revng/Support/Assert.h"
@@ -231,6 +232,39 @@ fromLLVMFunction(llvm::Function &F,
   return Result;
 }
 
+/// \return the registers of \p Function alive after each node, given the
+///         registers in \p AliveAtReturn alive at the return node
+static auto computeLiveness(const FunctionToAnalyze &Function,
+                            const CSVSet &AliveAtReturn) {
+  rua::Liveness Liveness(Function.Function);
+
+  auto DefaultValue = Liveness.defaultValue();
+  auto ReturnValue = DefaultValue;
+  unsigned CSVCount = std::min<unsigned>(ReturnValue.size(),
+                                         Function.Function.csvCount());
+  for (unsigned Index = 0; Index < CSVCount; ++Index)
+    if (AliveAtReturn.contains(Function.Function.csvByIndex(Index)))
+      ReturnValue.set(Index);
+
+  std::vector<const rua::BlockNode *> ExtremalLabels{ Function.ReturnNode };
+  // Backward analysis: `getEntryNode(Inverse<...>)` is unreliable (returns
+  // the forward entry), and seeding only from the return node would skip
+  // no-return blocks (e.g., calls to non-returning functions). Use `All` to
+  // seed RPOT from every node.
+  mfp::MFPConfiguration<rua::Liveness> Configuration{
+    .Instance = &Liveness,
+    .Flow = &Function.Function,
+    .Bottom = &DefaultValue,
+    .ExtremalValue = &ReturnValue,
+    .ExtremalLabels = &ExtremalLabels,
+    .EntryLabels = mfp::All{}
+  };
+
+  using namespace mfp;
+  using InverseGT = llvm::GraphTraits<llvm::Inverse<const rua::Function *>>;
+  return getMaximalFixedPoint<rua::Liveness, InverseGT>(Configuration);
+}
+
 // Run the ABI analyses on the outlined function F. This function must have all
 // the original function calls replaced with a basic block starting with a call
 // to `precall_hook` followed by a summary of the side effects of the function
@@ -240,7 +274,8 @@ RUAResults analyzeRegisterUsage(Function *F,
                                 model::Architecture::Values Architecture,
                                 Function *PreCallSiteHook,
                                 Function *PostCallSiteHook,
-                                Function *RetHook) {
+                                Function *RetHook,
+                                const CSVSet &ReturnValues) {
   RUAResults FinalResults;
 
   // TODO: can we avoid recreating this each time?
@@ -259,27 +294,10 @@ RUAResults analyzeRegisterUsage(Function *F,
   {
     // Run the liveness analysis
     revng_log(Log, "Running Liveness");
-    rua::Liveness Liveness(Function.Function);
 
-    auto DefaultValue = Liveness.defaultValue();
-    std::vector<const rua::BlockNode *> ExtremalLabels{ Function.ReturnNode };
-    // Backward analysis: `getEntryNode(Inverse<...>)` is unreliable (returns
-    // the forward entry), and seeding only from the return node would skip
-    // no-return blocks (e.g., calls to non-returning functions). Use `All` to
-    // seed RPOT from every node.
-    mfp::MFPConfiguration<rua::Liveness> Configuration{
-      .Instance = &Liveness,
-      .Flow = &Function.Function,
-      .Bottom = &DefaultValue,
-      .ExtremalValue = &DefaultValue,
-      .ExtremalLabels = &ExtremalLabels,
-      .EntryLabels = mfp::All{}
-    };
-
-    using namespace mfp;
-    using InverseGT = llvm::GraphTraits<llvm::Inverse<const rua::Function *>>;
-    auto GetMaximalFixedPoint = getMaximalFixedPoint<rua::Liveness, InverseGT>;
-    auto AnalysisResult = GetMaximalFixedPoint(Configuration);
+    // Nothing is alive at the return node here: a return value the function
+    // passes on from a callee must not become one of its arguments.
+    auto AnalysisResult = computeLiveness(Function, {});
 
     // Collect registers alive at the entry
     revng_log(Log, "Registers alive at the entry of the function:");
@@ -291,6 +309,12 @@ RUAResults analyzeRegisterUsage(Function *F,
       revng_log(Log, "  " << CSV->getName());
       FinalResults.ArgumentsRegisters.insert(CSV);
     }
+
+    // The caller of this function reads its return values, so they are alive
+    // at the return node. That makes a call whose result the function returns
+    // unchanged return it too.
+    if (not ReturnValues.empty() and not Function.CallSites.empty())
+      AnalysisResult = computeLiveness(Function, ReturnValues);
 
     for (const auto &[PC, CallSite] : Function.CallSites) {
       auto &ResultsCallSite = FinalResults.CallSites[PC];
@@ -378,6 +402,40 @@ RUAResults analyzeRegisterUsage(Function *F,
 
         ResultsCallSite.ArgumentsRegisters.insert(CSV);
       }
+    }
+  }
+
+  {
+    // Find the registers that hold, at each call, the value they had at the
+    // entry of the function on every path, with no call in between
+    revng_log(Log, "Running IncomingValues");
+    llvm::SmallPtrSet<const rua::BlockNode *, 16> Calls;
+    for (const auto &[PC, CallSite] : Function.CallSites)
+      Calls.insert(CallSite.Block);
+    rua::IncomingValues IncomingValues(Function.Function, Calls);
+    auto DefaultValue = IncomingValues.defaultValue();
+    auto EntryValue = DefaultValue;
+
+    auto *EntryNode = Function.Function.getEntryNode();
+    std::vector ExtremalLabels{ EntryNode };
+    mfp::MFPConfiguration<rua::IncomingValues> Configuration{
+      .Instance = &IncomingValues,
+      .Flow = &Function.Function,
+      .Bottom = &DefaultValue,
+      .ExtremalValue = &EntryValue,
+      .ExtremalLabels = &ExtremalLabels,
+      .EntryLabels = mfp::All{}
+    };
+
+    using namespace mfp;
+    auto GetMaximalFixedPoint = getMaximalFixedPoint<rua::IncomingValues>;
+    auto AnalysisResult = GetMaximalFixedPoint(Configuration);
+
+    for (const auto &[PC, CallSite] : Function.CallSites) {
+      const BitVector &AtCall = AnalysisResult.at(CallSite.Block).InValue;
+      auto &Incoming = FinalResults.CallSites[PC].IncomingRegisters;
+      for (auto *CSV : Function.Function.csvsInSet(AtCall))
+        Incoming.insert(CSV);
     }
   }
 

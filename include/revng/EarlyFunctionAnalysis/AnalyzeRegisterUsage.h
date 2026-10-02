@@ -56,6 +56,11 @@ public:
     CSVSet ArgumentsRegisters;
     CSVSet ReturnValuesRegisters;
 
+    /// Registers that hold, at the call, the value they had at the entry of the
+    /// caller on every path, with no other call in between. Only the analysis
+    /// of the caller produces it, so `combine` does not carry it over.
+    CSVSet IncomingRegisters;
+
     bool operator==(const CallSiteResults &Other) const = default;
   };
 
@@ -63,6 +68,9 @@ public:
   // Per function analysis
   CSVSet ArgumentsRegisters;
   CSVSet ReturnValuesRegisters;
+
+  /// The return values of this function that a caller reads after a call to it
+  CSVSet ReadReturnValuesRegisters;
 
   // Per call site analysis
   std::map<BasicBlockID, CallSiteResults> CallSites;
@@ -79,6 +87,7 @@ public:
 
     HandleMap(ArgumentsRegisters, Other.ArgumentsRegisters);
     HandleMap(ReturnValuesRegisters, Other.ReturnValuesRegisters);
+    HandleMap(ReadReturnValuesRegisters, Other.ReadReturnValuesRegisters);
 
     for (auto &[OtherBlockID, OtherResults] : Other.CallSites) {
       HandleMap(CallSites[OtherBlockID].ArgumentsRegisters,
@@ -98,10 +107,12 @@ public:
 
 extern template void RUAResults::dump<Logger>(Logger &, const char *) const;
 
+/// \param ReturnValues the registers the callers of \p F read after it returns
 RUAResults analyzeRegisterUsage(llvm::Function *F,
                                 model::Architecture::Values Architecture,
                                 llvm::Function *,
                                 llvm::Function *,
-                                llvm::Function *);
+                                llvm::Function *,
+                                const CSVSet &ReturnValues);
 
 } // namespace efa
