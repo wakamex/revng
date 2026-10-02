@@ -1543,6 +1543,18 @@ cloneFiltered(llvm::Module &Module,
 std::unique_ptr<llvm::Module>
 cloneFiltered(llvm::Module &Module, std::set<const llvm::Function *> &ToClone);
 
+/// Like cloneFiltered, but only the global values in \p Selection are
+/// considered, and all the others are omitted. \p Selection must list the
+/// global values of each kind in module order. The result is the same as
+/// cloneFiltered with an action that omits the global values not in
+/// \p Selection, in time proportional to the selection rather than to the
+/// module.
+std::unique_ptr<llvm::Module>
+cloneSelected(llvm::Module &Module,
+              llvm::ArrayRef<const llvm::GlobalValue *> Selection,
+              llvm::function_ref<llvm::CloneAction(const llvm::GlobalValue *)>
+                Action);
+
 /// Serialize a module to bitcode, this is preferable over
 /// llvm::WriteBitcodeToFile as it does not create a redundant temporary buffer
 void writeBitcode(const llvm::Module &Module,

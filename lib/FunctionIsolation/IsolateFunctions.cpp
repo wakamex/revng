@@ -438,6 +438,13 @@ private:
 
   std::set<const llvm::GlobalVariable *> IgnorableGVs;
 
+  /// The position of each global value among those of its kind
+  llvm::DenseMap<const llvm::GlobalValue *, size_t> Positions;
+
+  /// The global values that every cloned module clones: the defined global
+  /// variables that are not ignorable, the aliases and the ifuncs
+  std::vector<const llvm::GlobalValue *> AlwaysCloned;
+
 public:
   MinimalModuleCloner(const model::Binary &Binary, llvm::Module &Module) :
     Module(Module) {
@@ -471,6 +478,18 @@ public:
           or (FunctionTags::CSV.isTagOf(&GV) and not IsRegister(GV)))
         IgnorableGVs.insert(&GV);
     }
+
+    size_t Position = 0;
+    for (llvm::GlobalValue &Value : Module.global_values())
+      Positions[&Value] = Position++;
+
+    for (llvm::GlobalVariable &GV : Module.globals())
+      if (not IgnorableGVs.contains(&GV) and not GV.isDeclaration())
+        AlwaysCloned.push_back(&GV);
+    for (llvm::GlobalAlias &Alias : Module.aliases())
+      AlwaysCloned.push_back(&Alias);
+    for (llvm::GlobalIFunc &IFunc : Module.ifuncs())
+      AlwaysCloned.push_back(&IFunc);
   }
 
   std::unique_ptr<llvm::Module> cloneModule(llvm::Function &Function) {
@@ -528,7 +547,20 @@ public:
         return CloneAction::Clone;
       };
 
-    auto New = cloneFiltered(Module, ActionFunction);
+    // Every other global value is omitted: clone only these, in module order,
+    // rather than asking about each global value of the module
+    std::vector<const GlobalValue *> Selection = AlwaysCloned;
+    llvm::append_range(Selection, UsedGVs);
+    llvm::append_range(Selection, Visited);
+    llvm::append_range(Selection, CalledFunctions);
+    auto ByPosition = [this](const GlobalValue *LHS, const GlobalValue *RHS) {
+      return Positions.lookup(LHS) < Positions.lookup(RHS);
+    };
+    llvm::sort(Selection, ByPosition);
+    Selection.erase(std::unique(Selection.begin(), Selection.end()),
+                    Selection.end());
+
+    auto New = cloneSelected(Module, Selection, ActionFunction);
     revng::verify(New.get());
     return New;
   }

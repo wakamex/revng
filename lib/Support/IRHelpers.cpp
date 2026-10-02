@@ -714,6 +714,12 @@ struct FunctionsMetadata {
   }
 
   static void backup(llvm::Module &M) {
+    backup(M, llvm::make_pointer_range(M));
+  }
+
+  /// Back up the metadata of \p Functions, functions of \p M in module order
+  template<typename FunctionRange>
+  static void backup(llvm::Module &M, FunctionRange &&Functions) {
     using namespace llvm;
 
     LLVMContext &Context = M.getContext();
@@ -726,7 +732,9 @@ struct FunctionsMetadata {
     SmallVector<StringRef> MDKindNames;
     M.getMDKindNames(MDKindNames);
 
-    for (Function &F : M) {
+    for (const Function *Pointer : Functions) {
+      const Function &F = *Pointer;
+
       // Ignore unnamed functions
       if (F.getName().empty())
         continue;
@@ -823,6 +831,259 @@ cloneFiltered(llvm::Module &Module,
 
   revng::verify(&Module);
   auto Cloned = llvm::CloneModule(Module, Map, Action);
+
+  FunctionsMetadata::restore(*Cloned.get());
+  FunctionsMetadata::dropBackup(Module);
+  FunctionsMetadata::dropBackup(*Cloned.get());
+
+  return Cloned;
+}
+
+static void copyComdat(llvm::GlobalObject *Destination,
+                       const llvm::GlobalObject *Source) {
+  const llvm::Comdat *SourceComdat = Source->getComdat();
+  if (SourceComdat == nullptr)
+    return;
+
+  llvm::Module *Parent = Destination->getParent();
+  llvm::Comdat *NewComdat = Parent->getOrInsertComdat(SourceComdat->getName());
+  NewComdat->setSelectionKind(SourceComdat->getSelectionKind());
+  Destination->setComdat(NewComdat);
+}
+
+/// llvm::CloneModule with an action per global value, restricted to the
+/// global values listed in each argument, which are in module order: the
+/// global values that are not listed are omitted. The body follows the one of
+/// llvm::CloneModule statement by statement.
+static std::unique_ptr<llvm::Module>
+cloneModuleSubset(const llvm::Module &M,
+                  llvm::ValueToValueMapTy &VMap,
+                  llvm::ArrayRef<const llvm::GlobalVariable *> Variables,
+                  llvm::ArrayRef<const llvm::Function *> Functions,
+                  llvm::ArrayRef<const llvm::GlobalAlias *> Aliases,
+                  llvm::ArrayRef<const llvm::GlobalIFunc *> IFuncs,
+                  llvm::function_ref<CloneAction(const llvm::GlobalValue *)>
+                    Action) {
+  using namespace llvm;
+
+  std::unique_ptr<Module> New = std::make_unique<Module>(M.getModuleIdentifier(),
+                                                         M.getContext());
+  New->setSourceFileName(M.getSourceFileName());
+  New->setDataLayout(M.getDataLayout());
+  New->setTargetTriple(M.getTargetTriple());
+  New->setModuleInlineAsm(M.getModuleInlineAsm());
+
+  DenseMap<const GlobalValue *, CloneAction> Actions;
+
+  for (const GlobalVariable *I : Variables) {
+    Actions[I] = Action(I);
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    GlobalVariable *NewGV = new GlobalVariable(*New,
+                                               I->getValueType(),
+                                               I->isConstant(),
+                                               I->getLinkage(),
+                                               (Constant *) nullptr,
+                                               I->getName(),
+                                               (GlobalVariable *) nullptr,
+                                               I->getThreadLocalMode(),
+                                               I->getType()
+                                                 ->getAddressSpace());
+    NewGV->copyAttributesFrom(I);
+    VMap[I] = NewGV;
+  }
+
+  for (const Function *I : Functions) {
+    Actions[I] = Action(I);
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    Function *NF = Function::Create(cast<FunctionType>(I->getValueType()),
+                                    I->getLinkage(),
+                                    I->getAddressSpace(),
+                                    I->getName(),
+                                    New.get());
+    NF->copyAttributesFrom(I);
+    VMap[I] = NF;
+  }
+
+  for (const GlobalAlias *I : Aliases) {
+    Actions[I] = Action(I);
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    if (Actions[I] == CloneAction::MakeDeclaration) {
+      GlobalValue *GV;
+      if (I->getValueType()->isFunctionTy())
+        GV = Function::Create(cast<FunctionType>(I->getValueType()),
+                              GlobalValue::ExternalLinkage,
+                              I->getAddressSpace(),
+                              I->getName(),
+                              New.get());
+      else
+        GV = new GlobalVariable(*New,
+                                I->getValueType(),
+                                false,
+                                GlobalValue::ExternalLinkage,
+                                nullptr,
+                                I->getName(),
+                                nullptr,
+                                I->getThreadLocalMode(),
+                                I->getType()->getAddressSpace());
+      VMap[I] = GV;
+      continue;
+    }
+
+    auto *GA = GlobalAlias::create(I->getValueType(),
+                                   I->getType()->getPointerAddressSpace(),
+                                   I->getLinkage(),
+                                   I->getName(),
+                                   New.get());
+    GA->copyAttributesFrom(I);
+    VMap[I] = GA;
+  }
+
+  for (const GlobalIFunc *I : IFuncs) {
+    Actions[I] = Action(I);
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    auto *GI = GlobalIFunc::create(I->getValueType(),
+                                   I->getAddressSpace(),
+                                   I->getLinkage(),
+                                   I->getName(),
+                                   nullptr,
+                                   New.get());
+    GI->copyAttributesFrom(I);
+    VMap[I] = GI;
+  }
+
+  for (const GlobalVariable *G : Variables) {
+    if (Actions[G] == CloneAction::Omit)
+      continue;
+
+    GlobalVariable *GV = cast<GlobalVariable>(VMap[G]);
+
+    SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
+    G->getAllMetadata(MDs);
+    for (auto MD : MDs)
+      GV->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
+
+    if (G->isDeclaration())
+      continue;
+
+    if (Actions[G] == CloneAction::MakeDeclaration) {
+      GV->setLinkage(GlobalValue::ExternalLinkage);
+      continue;
+    }
+
+    if (G->hasInitializer())
+      GV->setInitializer(MapValue(G->getInitializer(), VMap));
+
+    copyComdat(GV, G);
+  }
+
+  for (const Function *I : Functions) {
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    Function *F = cast<Function>(VMap[I]);
+
+    if (I->isDeclaration()) {
+      SmallVector<std::pair<unsigned, MDNode *>, 1> MDs;
+      I->getAllMetadata(MDs);
+      for (auto MD : MDs)
+        F->addMetadata(MD.first, *MapMetadata(MD.second, VMap));
+      continue;
+    }
+
+    if (Actions[I] == CloneAction::MakeDeclaration) {
+      F->setLinkage(GlobalValue::ExternalLinkage);
+      F->setPersonalityFn(nullptr);
+      continue;
+    }
+
+    Function::arg_iterator DestI = F->arg_begin();
+    for (const Argument &J : I->args()) {
+      DestI->setName(J.getName());
+      VMap[&J] = &*DestI++;
+    }
+
+    SmallVector<ReturnInst *, 8> Returns;
+    CloneFunctionInto(F,
+                      I,
+                      VMap,
+                      CloneFunctionChangeType::ClonedModule,
+                      Returns);
+
+    if (I->hasPersonalityFn())
+      F->setPersonalityFn(MapValue(I->getPersonalityFn(), VMap));
+
+    copyComdat(F, I);
+  }
+
+  for (const GlobalAlias *I : Aliases) {
+    if (Actions[I] != CloneAction::Clone)
+      continue;
+
+    GlobalAlias *GA = cast<GlobalAlias>(VMap[I]);
+    if (const Constant *C = I->getAliasee())
+      GA->setAliasee(MapValue(C, VMap));
+  }
+
+  for (const GlobalIFunc *I : IFuncs) {
+    if (Actions[I] == CloneAction::Omit)
+      continue;
+
+    GlobalIFunc *GI = cast<GlobalIFunc>(VMap[I]);
+    if (const Constant *Resolver = I->getResolver())
+      GI->setResolver(MapValue(Resolver, VMap));
+  }
+
+  for (const NamedMDNode &NMD : M.named_metadata()) {
+    NamedMDNode *NewNMD = New->getOrInsertNamedMetadata(NMD.getName());
+    for (unsigned I = 0, E = NMD.getNumOperands(); I != E; ++I)
+      NewNMD->addOperand(MapMetadata(NMD.getOperand(I), VMap));
+  }
+
+  return New;
+}
+
+std::unique_ptr<llvm::Module>
+cloneSelected(llvm::Module &Module,
+              llvm::ArrayRef<const llvm::GlobalValue *> Selection,
+              llvm::function_ref<llvm::CloneAction(const llvm::GlobalValue *)>
+                Action) {
+  using namespace llvm;
+  SmallVector<const GlobalVariable *> Variables;
+  SmallVector<const Function *> Functions;
+  SmallVector<const GlobalAlias *> Aliases;
+  SmallVector<const GlobalIFunc *> IFuncs;
+  for (const GlobalValue *Value : Selection) {
+    if (auto *Variable = dyn_cast<GlobalVariable>(Value))
+      Variables.push_back(Variable);
+    else if (auto *F = dyn_cast<Function>(Value))
+      Functions.push_back(F);
+    else if (auto *Alias = dyn_cast<GlobalAlias>(Value))
+      Aliases.push_back(Alias);
+    else
+      IFuncs.push_back(cast<GlobalIFunc>(Value));
+  }
+
+  // The backup of the metadata of the functions that are not cloned is not
+  // restored on anything, so only the cloned ones need one
+  FunctionsMetadata::backup(Module, Functions);
+
+  revng::verify(&Module);
+  ValueToValueMapTy Map;
+  auto Cloned = cloneModuleSubset(Module,
+                                  Map,
+                                  Variables,
+                                  Functions,
+                                  Aliases,
+                                  IFuncs,
+                                  Action);
 
   FunctionsMetadata::restore(*Cloned.get());
   FunctionsMetadata::dropBackup(Module);
