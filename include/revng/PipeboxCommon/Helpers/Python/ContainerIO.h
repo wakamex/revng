@@ -4,7 +4,11 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <string>
+
 #include "nanobind/nanobind.h"
+
+#include "llvm/Support/Progress.h"
 
 #include "revng/PipeboxCommon/Common.h"
 #include "revng/PipeboxCommon/Concepts.h"
@@ -60,6 +64,14 @@ struct ContainerIO {
       Input[First] = llvm::ArrayRef<char>(DataPtr, Buffer->len);
     }
 
+    // Loading a large container can take hours, so name it in the trace
+    size_t Bytes = 0;
+    for (const auto &[_, Buffer] : Input)
+      Bytes += Buffer.size();
+    llvm::Task Task(1, "Deserialize " + T::Name);
+    Task.advance(std::to_string(Input.size()) + " objects, "
+                 + std::to_string(Bytes) + " bytes");
+
     Handle.deserialize(Input);
     return llvm::Error::success();
   }
@@ -75,7 +87,10 @@ struct ContainerIO {
     for (const auto &Object : Objects)
       CppObjects.push_back(nanobind::cast<ObjectID *>(Object));
 
+    llvm::Task Task(1, "Serialize " + T::Name);
+    Task.advance(std::to_string(CppObjects.size()) + " objects");
     std::map<ObjectID, Buffer> Result = Handle.serialize(CppObjects);
+    Task.complete();
     // Manually convert the map above to a Python dict
     nanobind::dict Return;
     for (auto &Entry : Result) {
