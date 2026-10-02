@@ -93,7 +93,15 @@ class DetectStackSize {
 private:
   TupleTree<model::Binary> &Binary;
   std::vector<FunctionStackInfo> FunctionsStackInfo;
-  std::map<RawFunctionDefinition *, UpperBoundCollector>
+  /// Order prototypes by ID: electing a stack arguments size creates a type,
+  /// so the iteration order decides the IDs of the new types
+  struct ByID {
+    bool operator()(const RawFunctionDefinition *LHS,
+                    const RawFunctionDefinition *RHS) const {
+      return LHS->ID() < RHS->ID();
+    }
+  };
+  std::map<RawFunctionDefinition *, UpperBoundCollector, ByID>
     FunctionTypeStackArguments;
   const size_t CallInstructionPushSize = 0;
   /// Helper for fast model::TypeDefinition size computation
