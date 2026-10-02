@@ -74,10 +74,12 @@ public:
     if (Attributes.contains(NoReturn) && !Other.Attributes.contains(NoReturn))
       return false;
 
+    // Both sets are sorted by their own comparator, so compare with it
     return std::includes(Other.ClobberedRegisters.begin(),
                          Other.ClobberedRegisters.end(),
                          ClobberedRegisters.begin(),
-                         ClobberedRegisters.end());
+                         ClobberedRegisters.end(),
+                         ClobberedRegisters.value_comp());
   }
 
   void dump() const debug_function { dump(dbg); }
