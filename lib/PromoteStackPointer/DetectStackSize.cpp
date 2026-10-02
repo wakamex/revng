@@ -3,8 +3,10 @@
 //
 
 #include <optional>
+#include <string>
 
 #include "llvm/IR/Constants.h"
+#include "llvm/Support/Progress.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
 #include "revng/Model/FunctionTags.h"
@@ -115,47 +117,68 @@ public:
 public:
   void run(Module &M) {
     // Collect information about the stack of each function
-    for (llvm::Function &F : FunctionTags::Isolated.functions(&M))
-      collectStackBounds(F);
+    auto Functions = FunctionTags::Isolated.functions(&M);
+    llvm::Task T(3, "Detect stack size");
+    T.advance("Collect stack bounds", true);
+    {
+      llvm::Task Collect(std::distance(Functions.begin(), Functions.end()),
+                         "Collect stack bounds");
+      for (llvm::Function &F : Functions) {
+        Collect.advance(F.getName(), true);
+        collectStackBounds(F);
+      }
+    }
 
-    // At this point we have populated two data structures:
-    //
-    // * FunctionTypeStackArguments: we can use it to elect stack arguments size
-    // * FunctionsStackInfo: we can use it to elect stack frame size
-
-    // Elect stack arguments size for prototypes
-    for (auto &&[Prototype, UpperBound] : FunctionTypeStackArguments)
-      electStackArgumentsSize(*Prototype, UpperBound);
-
-    // Now all prototypes have a definitive stack arguments size, we can elect
-    // stack frame size
-    for (FunctionStackInfo &FSI : FunctionsStackInfo)
-      electFunctionStackFrameSize(FSI);
+    elect(T);
   }
 
   void run(llvm::ArrayRef<const ObjectID *> Objects,
            revng::pypeline::LLVMFunctionContainer &Modules) {
     // Collect information about the stack of each function
-    for (const ObjectID *Object : Objects) {
-      llvm::Module &Module = Modules.getModule(*Object);
-      MetaAddress Address = std::get<MetaAddress>(Object->key());
-      llvm::Function &F = getUniqueIsolatedFunction(Module, Address);
-      collectStackBounds(F);
+    llvm::Task T(3, "Detect stack size");
+    T.advance("Collect stack bounds", true);
+    {
+      llvm::Task Collect(Objects.size(), "Collect stack bounds");
+      for (const ObjectID *Object : Objects) {
+        MetaAddress Address = std::get<MetaAddress>(Object->key());
+        Collect.advance(Address.toString(), true);
+        llvm::Module &Module = Modules.getModule(*Object);
+        llvm::Function &F = getUniqueIsolatedFunction(Module, Address);
+        collectStackBounds(F);
+      }
     }
 
+    elect(T);
+  }
+
+private:
+  /// Elect the stack arguments size of each prototype, then the stack frame
+  /// size of each function, as the last two steps of \p T
+  void elect(llvm::Task &T) {
     // At this point we have populated two data structures:
     //
     // * FunctionTypeStackArguments: we can use it to elect stack arguments size
     // * FunctionsStackInfo: we can use it to elect stack frame size
 
     // Elect stack arguments size for prototypes
-    for (auto &&[Prototype, UpperBound] : FunctionTypeStackArguments)
-      electStackArgumentsSize(*Prototype, UpperBound);
+    T.advance("Elect stack arguments sizes", true);
+    {
+      llvm::Task Elect(FunctionTypeStackArguments.size(),
+                       "Elect stack arguments sizes");
+      for (auto &&[Prototype, UpperBound] : FunctionTypeStackArguments) {
+        Elect.advance(std::to_string(Prototype->ID()), true);
+        electStackArgumentsSize(*Prototype, UpperBound);
+      }
+    }
 
     // Now all prototypes have a definitive stack arguments size, we can elect
     // stack frame size
-    for (FunctionStackInfo &FSI : FunctionsStackInfo)
+    T.advance("Elect stack frame sizes", true);
+    llvm::Task Elect(FunctionsStackInfo.size(), "Elect stack frame sizes");
+    for (FunctionStackInfo &FSI : FunctionsStackInfo) {
+      Elect.advance(FSI.Function.Entry().toString(), true);
       electFunctionStackFrameSize(FSI);
+    }
   }
 
 private:
