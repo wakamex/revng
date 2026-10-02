@@ -22,6 +22,7 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_os_ostream.h"
+#include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
@@ -1078,6 +1079,55 @@ void linkFunctionModules(std::unique_ptr<llvm::Module> &&Source,
   pruneDICompileUnits(*Destination);
 
   revng::verify(&*Destination);
+}
+
+bool stripDeadDebugInfoInOrder(Module &M) {
+  // Rank the compile units: first those already listed, in list order
+  DenseMap<const MDNode *, unsigned> Rank;
+  if (NamedMDNode *Units = M.getNamedMetadata("llvm.dbg.cu"))
+    for (const MDNode *Unit : Units->operands())
+      Rank.try_emplace(Unit, Rank.size());
+
+  // Then the others, in the order the module's functions reach them
+  auto Reach = [&Rank](const DISubprogram *Subprogram) {
+    if (Subprogram != nullptr and Subprogram->getUnit() != nullptr)
+      Rank.try_emplace(Subprogram->getUnit(), Rank.size());
+  };
+  for (Function &F : M) {
+    Reach(F.getSubprogram());
+    for (Instruction &I : instructions(F))
+      for (const DILocation *Location = I.getDebugLoc().get();
+           Location != nullptr;
+           Location = Location->getInlinedAt())
+        Reach(Location->getScope()->getSubprogram());
+  }
+
+  std::unique_ptr<ModulePass> Strip(createStripDeadDebugInfoPass());
+  bool Changed = Strip->runOnModule(M);
+
+  NamedMDNode *Units = M.getNamedMetadata("llvm.dbg.cu");
+  if (Units == nullptr)
+    return Changed;
+
+  // Units the module only reaches through global variables were listed, so
+  // every unit has a rank
+  auto RankOf = [&Rank](const MDNode *Unit) {
+    auto It = Rank.find(Unit);
+    revng_assert(It != Rank.end());
+    return It->second;
+  };
+  SmallVector<MDNode *, 4> Sorted(Units->operands());
+  llvm::stable_sort(Sorted, [&RankOf](const MDNode *LHS, const MDNode *RHS) {
+    return RankOf(LHS) < RankOf(RHS);
+  });
+
+  if (llvm::equal(Sorted, Units->operands()))
+    return Changed;
+
+  Units->clearOperands();
+  for (MDNode *Unit : Sorted)
+    Units->addOperand(Unit);
+  return true;
 }
 
 template<bool IgnoreInitializrMismatch>

@@ -2,8 +2,6 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include "llvm/Transforms/IPO/StripSymbols.h"
-
 #include "revng/Lift/JumpTargetReason.h"
 #include "revng/Lift/LibTcg.h"
 #include "revng/Lift/Lift.h"
@@ -12,7 +10,6 @@
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/NewPC.h"
 #include "revng/Support/ResourceFinder.h"
-#include "revng/Support/SimplePassManager.h"
 
 #include "CodeGenerator.h"
 #include "PostLiftVerifyPass.h"
@@ -226,9 +223,7 @@ CustomInvalidationData Lift::run() {
   // TODO: convert this from a pass to a free-standing function
   PostLiftVerifyPass{}.runOnModule(Module);
 
-  SimplePassManager PM;
-  PM.addPass(llvm::StripDeadDebugInfoPass());
-  PM.run(Module);
+  stripDeadDebugInfoInOrder(Module);
 
   // Compute invalidation data
   Buffer SerializedInvalidation;

@@ -8,6 +8,8 @@
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 
+#include "revng/Support/IRHelpers.h"
+
 using namespace llvm;
 
 //
@@ -117,3 +119,23 @@ char InstCombineNoArrays::ID;
 
 using RegisterInstCombine = RegisterPass<InstCombineNoArrays>;
 static RegisterInstCombine RIC("instcombine-noarrays", "", false, false);
+
+//
+// StripDeadDebugInfo that keeps the order of llvm.dbg.cu deterministic.
+//
+
+class StripDeadDebugInfoInOrderPass : public ModulePass {
+public:
+  static char ID;
+  StripDeadDebugInfoInOrderPass() : ModulePass(ID) {}
+
+  bool runOnModule(Module &M) override { return stripDeadDebugInfoInOrder(M); }
+};
+
+char StripDeadDebugInfoInOrderPass::ID;
+
+static RegisterPass<StripDeadDebugInfoInOrderPass>
+  StripInOrder("strip-dead-debug-info-in-order",
+               "Strip dead debug info, keeping the compile units in order",
+               false,
+               false);

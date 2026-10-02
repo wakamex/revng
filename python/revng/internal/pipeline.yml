@@ -245,7 +245,7 @@ branches:
         configuration:
           passes:
             - remove-exceptional-functions
-            - strip-dead-debug-info
+            - strip-dead-debug-info-in-order
       - savepoint: enforce-abi
         containers: [llvm-functions]
         artifacts:
