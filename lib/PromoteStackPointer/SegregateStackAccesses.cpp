@@ -6,6 +6,7 @@
 #include <set>
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
@@ -470,7 +471,9 @@ CallSite CallSite::make(CallInst *SSACSCall,
   return Result;
 }
 
-using CallSiteMap = std::map<CallInst *, CallSite>;
+// Call sites are lowered in iteration order, which decides the order of the
+// allocas and function declarations the lowering creates: keep program order
+using CallSiteMap = llvm::MapVector<CallInst *, CallSite>;
 
 /// Given an instruction, returns what parts of the stack clobbers/writes
 ///
