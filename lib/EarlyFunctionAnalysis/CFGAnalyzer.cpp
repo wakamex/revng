@@ -3,6 +3,7 @@
 //
 
 #include <fstream>
+#include <string>
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -13,6 +14,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Progress.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/GVN.h"
@@ -1087,14 +1089,36 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
   return Result;
 }
 
+/// Describe the size of \p F for a step name: progress traces then tell a
+/// large function from a slow one.
+static std::string describeSize(const llvm::Function &F) {
+  size_t Instructions = 0;
+  size_t Calls = 0;
+  for (const llvm::BasicBlock &BB : F) {
+    for (const llvm::Instruction &I : BB) {
+      ++Instructions;
+      if (isa<llvm::CallBase>(I))
+        ++Calls;
+    }
+  }
+
+  return " (" + std::to_string(Instructions) + " instructions, "
+         + std::to_string(Calls) + " calls, " + std::to_string(F.size())
+         + " blocks)";
+}
+
 FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry) {
   using namespace llvm;
   using llvm::BasicBlock;
 
   revng::IRBuilder Builder(M.getContext());
 
+  llvm::Task T(4, "Analyze function");
+
   // Detect function boundaries
+  T.advance("Outline");
   OutlinedFunction OutlinedFunction = outline(Entry);
+  T.advance("Prepare" + describeSize(*OutlinedFunction.Function));
 
   // Recover the control-flow graph of the function
   DecodedInstructions Decoded;
@@ -1147,9 +1171,11 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry) {
   materializePCValues(F, Builder);
 
   // Execute the optimization pipeline over the outlined function
+  T.advance("Optimize" + describeSize(*F));
   runOptimizationPipeline(F);
 
   // Squeeze out the results obtained from the optimization passes
+  T.advance("Collect results" + describeSize(*F));
   auto FunctionInfo = milkInfo(&OutlinedFunction, std::move(CFG), Decoded);
 
   return FunctionInfo;

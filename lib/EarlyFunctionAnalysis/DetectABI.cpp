@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <string>
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -17,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/Progress.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
@@ -126,6 +128,21 @@ static bool isWritingToMemory(llvm::Instruction &I) {
 }
 
 using BasicBlockQueue = UniquedQueue<const BasicBlockNode *>;
+
+/// A task with one step per element of a worklist, whose total follows the
+/// worklist as it grows.
+class WorklistTask : public llvm::Task {
+public:
+  WorklistTask(size_t Size, const llvm::Twine &Name) : Task(Size, Name) {}
+
+public:
+  /// Start the step of the element just taken from a worklist that still
+  /// holds \p Remaining elements.
+  void advance(size_t Remaining, const llvm::Twine &StepName) {
+    TotalSteps = StepIndex + 2 + Remaining;
+    Task::advance(StepName);
+  }
+};
 
 class DetectABI {
 private:
@@ -340,9 +357,11 @@ void DetectABI::preliminaryFunctionAnalysis() {
   // Process the queue
   //
 
+  WorklistTask Task(EntrypointsQueue.size(), "Analyze functions");
   while (!EntrypointsQueue.empty()) {
     const BasicBlockNode *EntryNode = EntrypointsQueue.pop();
     MetaAddress EntryPointAddress = EntryNode->Address;
+    Task.advance(EntrypointsQueue.size(), EntryPointAddress.toString());
     revng_log(Log, "Analyzing " << EntryPointAddress.toString());
     LoggerIndent Indent(Log);
 
@@ -558,12 +577,15 @@ void DetectABI::analyzeABI() {
 
   // Create all temporary functions
   Task.advance("Create temporary functions");
+  llvm::Task OutlineTask(Binary->Functions().size(), "Outline functions");
   for (model::Function &Function : Binary->Functions()) {
     const MetaAddress &Entry = Function.Entry();
+    OutlineTask.advance(Entry.toString());
     auto NewFunction = std::make_unique<OutlinedFunction>(Analyzer
                                                             .outline(Entry));
     Functions[Function.Entry()] = std::move(NewFunction);
   }
+  OutlineTask.complete();
 
   // `InlineHelpersPass` only inlines into `Isolated` functions, so we tag the
   // outlined stubs as such. These stubs are temporary and are discarded with
@@ -1132,6 +1154,9 @@ static Logger FunctionFromCalleesLog("functions-from-callees-collection");
 static void collectFunctionsFromCallees(Module &M, model::Binary &Binary) {
   Function &Root = *M.getFunction("root");
 
+  llvm::Task Task(1, "Collect functions from callees");
+  Task.advance("Scan " + std::to_string(Root.size()) + " blocks of root");
+
   // Static symbols have already been registered during lifting phase. Now
   // register all the other candidate entry points.
   for (llvm::BasicBlock &BB : Root) {
@@ -1270,8 +1295,12 @@ static void runDetectABI(Module &M,
                          ControlFlowGraphCache &FMC,
                          TupleTree<model::Binary> &Binary) {
   using FSOracle = FunctionSummaryOracle;
+  llvm::Task Task(2, "Prepare the ABI detection");
+  Task.advance("Import prototypes");
   FSOracle Oracle = FSOracle::importFullPrototypes(M, Globals, *Binary);
+  Task.advance("Create the CFG analyzer");
   CFGAnalyzer Analyzer(M, Root, Globals, Binary, Oracle);
+  Task.complete();
   DetectABI ABIDetector(M, Root, Globals, FMC, Binary, Oracle, Analyzer);
   ABIDetector.run();
 }
@@ -1302,7 +1331,10 @@ llvm::Error DetectABI::run(Model &Model,
 
   efa::collectFunctionsFromCallees(Module, Binary);
   efa::runDetectABI(Module, Root, Globals, FMC, TupleModel);
-  collectFunctionsFromUnusedAddresses(Module, Root, Binary, FMC);
+  {
+    llvm::Task Task(1, "Collect functions from unused addresses");
+    collectFunctionsFromUnusedAddresses(Module, Root, Binary, FMC);
+  }
   efa::runDetectABI(Module, Root, Globals, FMC, TupleModel);
 
   return llvm::Error::success();
