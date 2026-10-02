@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Object/ObjectFile.h"
@@ -141,6 +142,62 @@ ArrayRef<uint8_t> FilePortion::extractData() const {
 
 static bool shouldIgnoreSymbol(StringRef Name) {
   return Name == "$a" or Name == "$d";
+}
+
+/// Whether the standard defining the function a binary imports as \p Name,
+/// the C or POSIX library, glibc, the Itanium C++ ABI or its unwinding ABI,
+/// specifies that it never returns. Debug information or a prototype database
+/// can say the same, but the binary's dependencies rarely come with either.
+static bool isStandardNoReturn(StringRef Name) {
+  static const llvm::StringSet<> Names = {
+    // C and POSIX
+    "abort",
+    "exit",
+    "_exit",
+    "_Exit",
+    "quick_exit",
+    "thrd_exit",
+    "pthread_exit",
+    "longjmp",
+    "_longjmp",
+    "siglongjmp",
+    // glibc
+    "__libc_start_main",
+    "__longjmp_chk",
+    "__stack_chk_fail",
+    "__chk_fail",
+    "__fortify_fail",
+    "__assert_fail",
+    "__assert_perror_fail",
+    "err",
+    "errx",
+    "verr",
+    "verrx",
+    // Itanium C++ ABI
+    "__cxa_throw",
+    "__cxa_rethrow",
+    "__cxa_bad_cast",
+    "__cxa_bad_typeid",
+    "__cxa_throw_bad_array_new_length",
+    "__cxa_pure_virtual",
+    "__cxa_deleted_virtual",
+    "__cxa_call_unexpected",
+    "__cxa_call_terminate",
+    "_Unwind_Resume",
+    // std::terminate and std::unexpected
+    "_ZSt9terminatev",
+    "_ZSt10unexpectedv",
+  };
+
+  if (Names.contains(Name))
+    return true;
+
+  // libstdc++ declares every std::__throw_* helper noreturn: _ZSt, the length
+  // of the name, then the name
+  if (not Name.consume_front("_ZSt"))
+    return false;
+  Name = Name.drop_while([](char C) { return C >= '0' and C <= '9'; });
+  return Name.starts_with("__throw_");
 }
 
 static bool endsWith(StringRef String, char Last) {
@@ -952,7 +1009,9 @@ void ELFImporter<T, HasAddend>::parseDynamicSymbol(Elf_Sym_Impl<T> &Symbol,
     revng_log(ELFImporterLog, "This is an imported symbol");
     if (IsCode) {
       // Create dynamic function symbol
-      Model->ImportedDynamicFunctions()[Name.str()];
+      auto &Function = Model->ImportedDynamicFunctions()[Name.str()];
+      if (isStandardNoReturn(Name))
+        Function.Attributes().insert(model::FunctionAttribute::NoReturn);
     } else {
       // TODO: create dynamic global variable
       revng_log(ELFImporterLog, "Ignoring non-code");
