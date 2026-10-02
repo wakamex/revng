@@ -91,10 +91,11 @@ private:
   bool pinMaterializedValues(llvm::Function &F);
 
   /// Introduces a fallthrough branch if there's no store to PC before the last
-  /// call to an helper
+  /// call to an helper, or ends the block with the `unreachable` following
+  /// \p Call if that helper never returns
   ///
   /// \return true if the \p Call has been handled (i.e. a fallthrough jump has
-  ///         been inserted.
+  ///         been inserted or the block ends there).
   bool forceFallthroughAfterHelper(llvm::CallInst *Call);
 
   void pinExitTB(llvm::CallInst *ExitTBCall,
@@ -411,6 +412,9 @@ public:
   MaterializedValue readFromPointer(MetaAddress LoadAddress,
                                     unsigned LoadSize,
                                     bool IsLittleEndian);
+
+  /// Return the raw bytes of the binary being lifted
+  const RawBinaryView &binaryView() const { return BinaryView; }
 
   /// Increment the counter of emitted branches since the last reset
   void recordNewBranches(llvm::BasicBlock *Source, size_t Count) {

@@ -284,13 +284,68 @@ bool TDBP::pinConstantStore(Function &F) {
   return true;
 }
 
-static bool isPossiblyReturningHelper(ProgramCounterHandler *PCH,
-                                      const MetaAddress &PC,
-                                      llvm::Instruction *I) {
-  if (not PCH->isPCAffectingHelper(I))
+/// Whether the x86 instruction \p Bytes, for which QEMU raises \p Exception,
+/// faults on the real machine as well.
+///
+/// QEMU raises #UD for the undefined opcodes but also for valid instructions it
+/// does not implement, and #GP for every privileged instruction, so the
+/// exception alone does not tell. Only the opcodes defined to fault qualify:
+/// ud0, ud1 and ud2, which raise #UD, and hlt, which raises #GP outside ring 0.
+static bool isFaultingX86Instruction(ArrayRef<uint8_t> Bytes,
+                                     uint64_t Exception,
+                                     bool Is64Bit) {
+  constexpr uint64_t InvalidOpcode = 6;
+  constexpr uint64_t GeneralProtection = 13;
+
+  // Skip the legacy prefixes and, in 64-bit mode, a REX prefix
+  auto IsLegacyPrefix = [](uint8_t Byte) {
+    switch (Byte) {
+    case 0x26:
+    case 0x2e:
+    case 0x36:
+    case 0x3e:
+    case 0x64:
+    case 0x65:
+    case 0x66:
+    case 0x67:
+    case 0xf0:
+    case 0xf2:
+    case 0xf3:
+      return true;
+    default:
+      return false;
+    }
+  };
+  while (not Bytes.empty() and IsLegacyPrefix(Bytes.front()))
+    Bytes = Bytes.drop_front();
+  if (Is64Bit and not Bytes.empty() and (Bytes.front() & 0xf0) == 0x40)
+    Bytes = Bytes.drop_front();
+
+  if (Bytes.empty())
     return false;
 
-  auto *Call = cast<CallInst>(I);
+  if (Exception == GeneralProtection)
+    return Bytes.front() == 0xf4;
+
+  if (Exception == InvalidOpcode and Bytes.size() >= 2 and Bytes[0] == 0x0f) {
+    switch (Bytes[1]) {
+    case 0x0b:
+    case 0xb9:
+    case 0xff:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/// Whether execution can continue after \p Call, a call to a helper that
+/// affects the PC, for instance by raising an exception
+static bool isPossiblyReturningHelper(const JumpTargetManager &JTM,
+                                      llvm::CallInst *Call) {
+  const auto &[PC, Size] = JTM.getPC(Call);
 
   // Obtain the name of the helper
   StringRef CalleeName;
@@ -318,6 +373,24 @@ static bool isPossiblyReturningHelper(ProgramCounterHandler *PCH,
       return false;
     }
     break;
+
+  case MetaAddressType::Code_x86:
+  case MetaAddressType::Code_x86_64: {
+    // int3 and `int 3` raise the breakpoint exception. A debugger can resume
+    // after it, the program itself cannot.
+    if (CalleeName == "helper_raise_interrupt"
+        and GetArgument(1).value_or(0) == 3) {
+      return false;
+    }
+
+    std::optional<uint64_t> Exception = GetArgument(1);
+    if (CalleeName == "helper_raise_exception" and Exception.has_value()) {
+      auto Bytes = JTM.binaryView().getByAddress(PC, Size);
+      bool Is64Bit = PC.type() == MetaAddressType::Code_x86_64;
+      if (Bytes and isFaultingX86Instruction(*Bytes, *Exception, Is64Bit))
+        return false;
+    }
+  } break;
 
   default:
     // TODO: add more
@@ -348,7 +421,18 @@ bool TDBP::forceFallthroughAfterHelper(CallInst *Call) {
           // We found a PC-store, give up
           return false;
         }
-      } else if (isPossiblyReturningHelper(PCH, PC, I)) {
+      } else if (PCH->isPCAffectingHelper(I)) {
+        if (not isPossiblyReturningHelper(*JTM, cast<CallInst>(I))) {
+          // The helper raises an exception execution cannot continue after:
+          // nothing follows it, the block ends with the `unreachable` after
+          // the exit
+          if (not isa<UnreachableInst>(Call->getParent()->getTerminator()))
+            return false;
+
+          eraseFromParent(Call);
+          return true;
+        }
+
         // We found a call to an helper
         ForceFallthrough = true;
         break;
