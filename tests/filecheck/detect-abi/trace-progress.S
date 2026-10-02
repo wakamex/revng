@@ -14,7 +14,8 @@
 # RUN: FileCheck %s --check-prefix=MODEL < %t.yml
 #
 # TRACE: "name": "Collect functions from callees", "cat": "task", "ph": "B"
-# TRACE: "name": "Scan {{[0-9]+}} blocks of root", "cat": "task", "ph": "B", "args": {"step": 0, "steps": 1}
+# TRACE: "name": "Scan {{[0-9]+}} blocks of root", "cat": "task", "ph": "B", "args": {"step": 0, "steps": 2}
+# TRACE: "name": "Create 2 functions", "cat": "task", "ph": "B", "args": {"step": 1, "steps": 2}
 # TRACE: "name": "Prepare the ABI detection", "cat": "task", "ph": "B"
 # TRACE: "name": "preliminaryFunctionAnalysis", "cat": "task", "ph": "B"
 # TRACE: "name": "Analyze functions", "cat": "task", "ph": "B"

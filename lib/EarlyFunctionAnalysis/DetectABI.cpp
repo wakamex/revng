@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <set>
 #include <string>
 
 #include "llvm/ADT/DenseSet.h"
@@ -1154,11 +1155,12 @@ static Logger FunctionFromCalleesLog("functions-from-callees-collection");
 static void collectFunctionsFromCallees(Module &M, model::Binary &Binary) {
   Function &Root = *M.getFunction("root");
 
-  llvm::Task Task(1, "Collect functions from callees");
+  llvm::Task Task(2, "Collect functions from callees");
   Task.advance("Scan " + std::to_string(Root.size()) + " blocks of root");
 
   // Static symbols have already been registered during lifting phase. Now
   // register all the other candidate entry points.
+  std::set<MetaAddress> Entries;
   for (llvm::BasicBlock &BB : Root) {
     if (getType(&BB) != BlockType::JumpTargetBlock)
       continue;
@@ -1170,13 +1172,19 @@ static void collectFunctionsFromCallees(Module &M, model::Binary &Binary) {
     uint32_t Reasons = JumpTargetReason::getReasons(&BB);
     bool IsCallee = hasReason(Reasons, JumpTargetReason::Callee);
 
-    if (IsCallee) {
-      // Create the function
-      Binary.Functions()[Entry];
+    if (IsCallee and Entries.insert(Entry).second) {
       revng_log(FunctionFromCalleesLog,
                 "Found function from callee: " << BB.getName().str());
     }
   }
+
+  // Create the functions in one batch. Inserting each one into the sorted
+  // vector on its own would shift the functions after it every time, which is
+  // quadratic in the number of functions.
+  Task.advance("Create " + std::to_string(Entries.size()) + " functions");
+  auto Inserter = Binary.Functions().batch_insert();
+  for (const MetaAddress &Entry : Entries)
+    Inserter.emplace(Entry);
 }
 
 static void suppressCalleeSaved(RUAResults &ABIResults,
