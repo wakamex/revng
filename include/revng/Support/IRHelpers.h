@@ -1424,6 +1424,13 @@ llvm::Function *changeFunctionType(llvm::Function &OldFunction,
 
 void pruneDICompileUnits(llvm::Module &M);
 
+/// Run LLVM's StripDeadDebugInfo and keep the compile units it leaves in
+/// llvm.dbg.cu in a deterministic order: the order they were listed in, then,
+/// for units the list did not have, the order in which the module's functions
+/// reach them. StripDeadDebugInfo rebuilds the list from a set ordered by
+/// address.
+bool stripDeadDebugInfoInOrder(llvm::Module &M);
+
 llvm::SmallSet<llvm::Value *, 2> findPhiTreeLeaves(llvm::Value *Root);
 
 namespace revng {

@@ -150,3 +150,67 @@ BOOST_AUTO_TEST_CASE(PrunedCompileUnitsKeepModuleOrder) {
   BOOST_TEST(Units->getOperand(0) == High);
   BOOST_TEST(Units->getOperand(1) == Low);
 }
+
+BOOST_AUTO_TEST_CASE(StripDeadDebugInfoKeepsListOrder) {
+  LLVMContext Context;
+  Module M("m", Context);
+  auto *Type = FunctionType::get(Type::getVoidTy(Context), false);
+
+  DIBuilder FirstBuilder(M);
+  DIBuilder SecondBuilder(M);
+  DIBuilder DeadBuilder(M);
+  auto MakeUnit = [](DIBuilder &Builder, StringRef Name) {
+    return Builder.createCompileUnit(dwarf::DW_LANG_C,
+                                     Builder.createFile(Name, "/"),
+                                     "test",
+                                     false,
+                                     "",
+                                     0);
+  };
+  DICompileUnit *Low = MakeUnit(FirstBuilder, "low.c");
+  DICompileUnit *High = MakeUnit(SecondBuilder, "high.c");
+  DICompileUnit *Dead = MakeUnit(DeadBuilder, "dead.c");
+  if (High < Low)
+    std::swap(Low, High);
+
+  auto AddFunction = [&](StringRef Name, DICompileUnit *Unit) {
+    auto *F = Function::Create(Type, GlobalValue::ExternalLinkage, Name, &M);
+    BasicBlock::Create(Context, "", F);
+    ReturnInst::Create(Context, &F->getEntryBlock());
+    DIBuilder Builder(M, false, Unit);
+    auto *SubroutineType = Builder
+                             .createSubroutineType(Builder
+                                                     .getOrCreateTypeArray({}));
+    auto *Subprogram = Builder.createFunction(Unit,
+                                              Name,
+                                              Name,
+                                              Unit->getFile(),
+                                              1,
+                                              SubroutineType,
+                                              1,
+                                              DINode::FlagZero,
+                                              DISubprogram::SPFlagDefinition);
+    F->setSubprogram(Subprogram);
+    Builder.finalize();
+  };
+  AddFunction("first", High);
+  AddFunction("second", Low);
+  FirstBuilder.finalize();
+  SecondBuilder.finalize();
+  DeadBuilder.finalize();
+
+  // List the units against their address order; the dead one makes the pass
+  // rebuild the list
+  NamedMDNode *Units = M.getOrInsertNamedMetadata("llvm.dbg.cu");
+  Units->clearOperands();
+  Units->addOperand(High);
+  Units->addOperand(Low);
+  Units->addOperand(Dead);
+
+  BOOST_TEST(stripDeadDebugInfoInOrder(M));
+
+  Units = M.getNamedMetadata("llvm.dbg.cu");
+  BOOST_TEST_REQUIRE(Units->getNumOperands() == 2U);
+  BOOST_TEST(Units->getOperand(0) == High);
+  BOOST_TEST(Units->getOperand(1) == Low);
+}
