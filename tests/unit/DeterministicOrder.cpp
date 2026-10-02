@@ -9,13 +9,18 @@ bool init_unit_test();
 
 #include "boost/test/unit_test.hpp"
 
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DIBuilder.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
 #include "revng/EarlyFunctionAnalysis/AnalyzeRegisterUsage.h"
+#include "revng/Support/IRHelpers.h"
 #include "revng/Support/Tag.h"
 
 using namespace llvm;
@@ -89,4 +94,59 @@ BOOST_AUTO_TEST_CASE(CSVSetIsOrderedByName) {
 
   // Looking up a register that has no CSV must work
   BOOST_TEST(Set.count(nullptr) == 1U);
+}
+
+BOOST_AUTO_TEST_CASE(PrunedCompileUnitsKeepModuleOrder) {
+  LLVMContext Context;
+  Module M("m", Context);
+  auto *Type = FunctionType::get(Type::getVoidTy(Context), false);
+
+  // One compile unit per DIBuilder
+  DIBuilder FirstBuilder(M);
+  DIBuilder SecondBuilder(M);
+  auto MakeUnit = [](DIBuilder &Builder, StringRef Name) {
+    return Builder.createCompileUnit(dwarf::DW_LANG_C,
+                                     Builder.createFile(Name, "/"),
+                                     "test",
+                                     false,
+                                     "",
+                                     0);
+  };
+  DICompileUnit *Low = MakeUnit(FirstBuilder, "low.c");
+  DICompileUnit *High = MakeUnit(SecondBuilder, "high.c");
+  if (High < Low)
+    std::swap(Low, High);
+
+  // The first function belongs to the unit with the higher address
+  auto AddFunction = [&](StringRef Name, DICompileUnit *Unit) {
+    auto *F = Function::Create(Type, GlobalValue::ExternalLinkage, Name, &M);
+    BasicBlock::Create(Context, "", F);
+    ReturnInst::Create(Context, &F->getEntryBlock());
+    DIBuilder Builder(M, false, Unit);
+    auto *SubroutineType = Builder
+                             .createSubroutineType(Builder
+                                                     .getOrCreateTypeArray({}));
+    auto *Subprogram = Builder.createFunction(Unit,
+                                              Name,
+                                              Name,
+                                              Unit->getFile(),
+                                              1,
+                                              SubroutineType,
+                                              1,
+                                              DINode::FlagZero,
+                                              DISubprogram::SPFlagDefinition);
+    F->setSubprogram(Subprogram);
+    Builder.finalize();
+  };
+  AddFunction("first", High);
+  AddFunction("second", Low);
+  FirstBuilder.finalize();
+  SecondBuilder.finalize();
+
+  pruneDICompileUnits(M);
+
+  NamedMDNode *Units = M.getNamedMetadata("llvm.dbg.cu");
+  BOOST_TEST_REQUIRE(Units->getNumOperands() == 2U);
+  BOOST_TEST(Units->getOperand(0) == High);
+  BOOST_TEST(Units->getOperand(1) == Low);
 }
