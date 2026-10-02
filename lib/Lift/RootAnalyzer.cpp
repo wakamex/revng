@@ -783,7 +783,23 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
   struct Entry {
     StringRef SymbolName;
     ConstantInt *Value = nullptr;
-    std::strong_ordering operator<=>(const Entry &Other) const = default;
+
+    bool operator==(const Entry &Other) const = default;
+
+    // Order by value, not by the address of the uniqued constant: the order
+    // decides the order in which new jump targets, and their blocks, are
+    // created
+    bool operator<(const Entry &Other) const {
+      if (SymbolName != Other.SymbolName)
+        return SymbolName < Other.SymbolName;
+
+      const APInt &LHS = Value->getValue();
+      const APInt &RHS = Other.Value->getValue();
+      if (LHS.getBitWidth() != RHS.getBitWidth())
+        return LHS.getBitWidth() < RHS.getBitWidth();
+
+      return LHS.ult(RHS);
+    }
   };
   std::map<uint32_t, SmallVector<Entry>> MaterializedValuesById;
 
