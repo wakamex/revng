@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
 #include <set>
 
 #include "llvm/ADT/STLExtras.h"
@@ -41,14 +42,26 @@ class TagsSet {
 private:
   static constexpr const char *TagsMetadataName = "revng.tags";
 
+  /// Order tags by name: tags live in several libraries, so their addresses,
+  /// and an order based on them, change with where the libraries are loaded
+  struct ByName {
+    bool operator()(const Tag *LHS, const Tag *RHS) const;
+  };
+
 private:
-  std::set<const Tag *> Tags;
+  std::set<const Tag *, ByName> Tags;
 
 public:
   TagsSet() {}
   TagsSet(std::initializer_list<const Tag *> I) : Tags{ I } {}
 
-  bool operator<(const TagsSet &Other) const { return this->Tags < Other.Tags; }
+  bool operator<(const TagsSet &Other) const {
+    return std::lexicographical_compare(Tags.begin(),
+                                        Tags.end(),
+                                        Other.Tags.begin(),
+                                        Other.Tags.end(),
+                                        ByName());
+  }
   bool operator==(const TagsSet &Other) const = default;
 
 public:
@@ -176,6 +189,10 @@ public:
     return Result;
   }
 };
+
+inline bool TagsSet::ByName::operator()(const Tag *LHS, const Tag *RHS) const {
+  return LHS->name() < RHS->name();
+}
 
 inline bool TagsSet::containsExactly(const Tag &Target) const {
   // if the input is not inside me, return false
