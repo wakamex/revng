@@ -60,6 +60,7 @@ RunningStatistics LoadAddressStatistics("load-address");
 
 Logger NewEdgesLog("new-edges");
 static Logger Log("root-analyzer");
+static Logger JumpTableExtentLog("jump-table-extent");
 
 // NOTE: Setting this to 1 gives us performance improvement. We have tested and
 // realized that there is an impact on performance if setting it to 2.
@@ -904,8 +905,13 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
   struct Entry {
     StringRef SymbolName;
     ConstantInt *Value = nullptr;
+    /// The lowest address of a table entry the value was read from, if every
+    /// time it was read by a single load
+    std::optional<uint64_t> TableEntry;
 
-    bool operator==(const Entry &Other) const = default;
+    bool operator==(const Entry &Other) const {
+      return SymbolName == Other.SymbolName and Value == Other.Value;
+    }
 
     // Order by value, not by the address of the uniqued constant: the order
     // decides the order in which new jump targets, and their blocks, are
@@ -945,24 +951,88 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
       auto *Tuple = QMD.extract<MDTuple *>(Operand.get());
       auto SymbolName = QMD.extract<StringRef>(Tuple->getOperand(0).get());
       auto *Value = QMD.extract<ConstantInt *>(Tuple->getOperand(1).get());
-      Operands.push_back({ SymbolName, Value });
+      std::optional<uint64_t> TableEntry;
+      if (Tuple->getNumOperands() > 2) {
+        auto *Entry = QMD.extract<ConstantInt *>(Tuple->getOperand(2).get());
+        TableEntry = getLimitedValue(Entry);
+      }
+      Operands.push_back({ SymbolName, Value, TableEntry });
     }
   }
+
+  // A table indexed by a value whose range the program does not check, such as
+  // a byte, makes value materialization read past its end: the entries that
+  // follow belong to other tables and point into other functions. When each
+  // destination of the indirect jump at Jump was read from a table entry,
+  // keep the destinations of the entries before the first one that does not
+  // point to an instruction of the jump's function. If not even the first one
+  // does, the table is not one of this function's (for instance, a table of
+  // functions) and all of them are kept.
+  auto BoundJumpTable = [this](MetaAddress Jump, SmallVector<Entry> &Operands) {
+    if (Operands.empty())
+      return;
+
+    for (const Entry &Operand : Operands)
+      if (Operand.SymbolName.size() != 0 or not Operand.TableEntry)
+        return;
+
+    SmallVector<const Entry *> ByTableEntry;
+    for (const Entry &Operand : Operands)
+      ByTableEntry.push_back(&Operand);
+    llvm::sort(ByTableEntry, [](const Entry *LHS, const Entry *RHS) {
+      return *LHS->TableEntry < *RHS->TableEntry;
+    });
+
+    SmallVector<MetaAddress> Targets;
+    for (const Entry *Operand : ByTableEntry)
+      Targets.push_back(MetaAddress::decomposeIntegerPC(Operand->Value));
+
+    auto Extent = JTM.unwindRanges().tableExtent(Jump, Targets);
+    if (not Extent or *Extent == 0 or *Extent == Targets.size())
+      return;
+
+    revng_log(JumpTableExtentLog,
+              "Jump at " << Jump.toString() << ": keeping " << *Extent
+                         << " of " << Targets.size()
+                         << " destinations, first dropped "
+                         << Targets[*Extent].toString());
+
+    uint64_t FirstDropped = *ByTableEntry[*Extent]->TableEntry;
+    llvm::erase_if(Operands, [FirstDropped](const Entry &Operand) {
+      return *Operand.TableEntry >= FirstDropped;
+    });
+  };
 
   for (auto &[ValueMaterializerID, Operands] : MaterializedValuesById) {
     revng_log(Log, "Parsing ID " << ValueMaterializerID);
     LoggerIndent Indent(Log);
 
-    // Remove duplicates
+    // Remove duplicates, keeping the lowest table entry each value was read
+    // from
     llvm::sort(Operands);
-    Operands.erase(std::unique(Operands.begin(), Operands.end()),
-                   Operands.end());
+    SmallVector<Entry> UniqueOperands;
+    for (const Entry &Operand : Operands) {
+      if (UniqueOperands.empty() or not(UniqueOperands.back() == Operand)) {
+        UniqueOperands.push_back(Operand);
+        continue;
+      }
+
+      std::optional<uint64_t> &Kept = UniqueOperands.back().TableEntry;
+      if (Kept and Operand.TableEntry)
+        Kept = std::min(*Kept, *Operand.TableEntry);
+      else
+        Kept = std::nullopt;
+    }
+    Operands = std::move(UniqueOperands);
 
     auto TV = AR.rootInstructionById(ValueMaterializerID);
     auto TIT = TV.Type;
     Instruction *I = TV.I;
 
     revng_log(Log, TrackedInstructionType::getName(TIT));
+
+    if (TIT == TrackedInstructionType::WrittenInPC)
+      BoundJumpTable(TV.Address, Operands);
 
     // Is this a direct write to PC?
     bool IsComposedIntegerPC = (TIT == TrackedInstructionType::WrittenInPC);
@@ -974,7 +1044,7 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
     SmallVector<MetaAddress, 16> Targets;
 
     // Iterate over all the generated values
-    for (const auto &[SymbolName, Value] : Operands) {
+    for (const auto &[SymbolName, Value, TableEntry] : Operands) {
       bool HasDynamicSymbol = SymbolName.size() != 0;
       if (not HasDynamicSymbol) {
         // Deserialize value into a MetaAddress, depending on the tracked
@@ -1063,7 +1133,7 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
 
       // Compose the metadata for revng.targets
       SmallVector<Metadata *> NewOperands;
-      for (const auto &[SymbolName, Value] : Operands)
+      for (const auto &[SymbolName, Value, TableEntry] : Operands)
         NewOperands.push_back(QMD.tuple({ QMD.get(SymbolName),
                                           QMD.get(Value) }));
 

@@ -33,6 +33,8 @@
 #include "revng/Support/MetaAddress/MetaAddressRange.h"
 #include "revng/Support/NewPC.h"
 
+#include "UnwindFunctionRanges.h"
+
 // Forward declarations
 namespace llvm {
 class BasicBlock;
@@ -416,6 +418,15 @@ public:
   /// Return the raw bytes of the binary being lifted
   const RawBinaryView &binaryView() const { return BinaryView; }
 
+  /// Return the function ranges described by the binary's unwind information
+  UnwindFunctionRanges &unwindRanges() {
+    if (not Unwind)
+      Unwind = std::make_unique<UnwindFunctionRanges>(BinaryView,
+                                                      BinaryView.data(),
+                                                      Model->Architecture());
+    return *Unwind;
+  }
+
   /// Increment the counter of emitted branches since the last reset
   void recordNewBranches(llvm::BasicBlock *Source, size_t Count) {
     ValueMaterializerPCWhiteList.insert(getPC(Source->getTerminator()).first);
@@ -608,6 +619,7 @@ private:
   std::set<MetaAddress> DetachedFallthroughs;
   const TupleTree<model::Binary> &Model;
   const RawBinaryView &BinaryView;
+  std::unique_ptr<UnwindFunctionRanges> Unwind;
   bool AftedAddingFunctionEntries = false;
 };
 

@@ -407,7 +407,7 @@ DataFlowGraph::materializeImpl(DataFlowGraph::Node *N,
   // Deduplicate results
   //
   uint64_t PreDeduplicationSize = Result.size();
-  sort(Result);
+  sort(Result, MaterializedValue::lessWithOrigin);
   auto LastIt = std::unique(Result.begin(), Result.end());
   Result.erase(LastIt, Result.end());
 

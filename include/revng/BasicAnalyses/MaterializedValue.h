@@ -4,6 +4,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
+#include <tuple>
+
 #include "revng/Support/Debug.h"
 #include "revng/Support/MetaAddress.h"
 
@@ -18,6 +21,11 @@ public:
   public:
     MetaAddress Address;
     unsigned Size = 0;
+
+    bool operator==(const MemoryRange &Other) const = default;
+    bool operator<(const MemoryRange &Other) const {
+      return std::tie(Address, Size) < std::tie(Other.Address, Other.Size);
+    }
   };
 
 private:
@@ -70,7 +78,13 @@ public:
     if (hasSymbol() or not IsValid)
       return MaterializedValue::invalid();
 
-    return MemoryOracle.load(Value.getLimitedValue(), Size);
+    // The result also depends on the memory this address was loaded from
+    MaterializedValue Result = MemoryOracle.load(Value.getLimitedValue(), Size);
+    if (Result.isValid())
+      Result.AffectedBy.insert(Result.AffectedBy.begin(),
+                               AffectedBy.begin(),
+                               AffectedBy.end());
+    return Result;
   }
 
   MaterializedValue byteSwap() const {
@@ -104,6 +118,25 @@ public:
   const llvm::APInt &value() const {
     revng_assert(isValid());
     return Value;
+  }
+
+  /// The memory ranges this value was read from, outermost load last
+  llvm::ArrayRef<MemoryRange> affectedBy() const { return AffectedBy; }
+
+  void addAffectedBy(MemoryRange Range) { AffectedBy.push_back(Range); }
+
+  /// Order values as operator< does, and equal values by the memory they were
+  /// read from, so that deduplication keeps the same one in every run
+  static bool lessWithOrigin(const MaterializedValue &LHS,
+                             const MaterializedValue &RHS) {
+    if (LHS < RHS)
+      return true;
+    if (RHS < LHS)
+      return false;
+    return std::lexicographical_compare(LHS.AffectedBy.begin(),
+                                        LHS.AffectedBy.end(),
+                                        RHS.AffectedBy.begin(),
+                                        RHS.AffectedBy.end());
   }
 
   bool isMutable() const { return IsMutable; }

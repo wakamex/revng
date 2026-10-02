@@ -42,7 +42,12 @@ SDMO::StaticDataMemoryOracle(const DataLayout &DL,
 MaterializedValue StaticDataMemoryOracle::load(uint64_t LoadAddress,
                                                unsigned LoadSize) {
   auto Address = MetaAddress::fromGeneric(LoadAddress, Features);
-  return JTM.readFromPointer(Address, LoadSize, IsLittleEndian);
+  MaterializedValue Result = JTM.readFromPointer(Address,
+                                                 LoadSize,
+                                                 IsLittleEndian);
+  if (Result.isValid())
+    Result.addAffectedBy({ Address, LoadSize });
+  return Result;
 }
 
 static void demoteOrToAdd(Function &F) {
@@ -175,7 +180,14 @@ PreservedAnalyses ValueMaterializerPass::run(Function &F,
       if (V.hasSymbol())
         SymbolName = V.symbolName();
 
-      ValuesMD.push_back(QMD.tuple({ QMD.get(SymbolName), QMD.get(Offset) }));
+      // When the value was read from memory by a single load, record where:
+      // the entry of a jump table that holds it
+      SmallVector<Metadata *, 3> Tuple = { QMD.get(SymbolName),
+                                           QMD.get(Offset) };
+      if (V.affectedBy().size() == 1)
+        Tuple.push_back(QMD.get(V.affectedBy().front().Address.address()));
+
+      ValuesMD.push_back(QMD.tuple(Tuple));
     }
 
     Call->setMetadata("revng.avi", QMD.tuple(ValuesMD));
