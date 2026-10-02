@@ -150,7 +150,16 @@ static bool runTypeShrinking(Function &F,
 
   revng::IRBuilder B(F.getParent()->getContext());
   const std::array<uint32_t, 4> Ranks = { 8, 16, 32, 64 };
-  for (auto &[I, Result] : FixedPoints) {
+
+  // Rewrite in program order: `FixedPoints` is ordered by address, and the
+  // order of the rewrites decides the order of the new instructions in the
+  // use-lists of their operands, which later passes walk
+  SmallVector<std::pair<Instruction *, InstructionResults>, 0> Analyzed;
+  for (Instruction &I : instructions(F))
+    if (auto It = FixedPoints.find(&I); It != FixedPoints.end())
+      Analyzed.emplace_back(&I, It->second);
+
+  for (auto &[I, Result] : Analyzed) {
     // Find the closest rank that contains all the alive bits.
     // If there is a known rank and this is an instruction that behaves like add
     // (the least significant bits of the result depend only on the least
