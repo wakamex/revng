@@ -2,9 +2,11 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <chrono>
 #include <compare>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SmallVector.h"
@@ -166,6 +168,121 @@ public:
       }
     }
     return PreservedAnalyses::none();
+  }
+};
+
+// LLVM with the fork's LazyValueInfo patch (lvi-cache-contents) defines these;
+// stock LLVM does not, and the type shrinking counters then omit the cache.
+namespace llvm {
+__attribute__((weak)) size_t
+getLazyValueInfoCacheContents(const LazyValueInfo &LVI,
+                              SmallVectorImpl<Value *> &TrackedValues);
+__attribute__((weak)) void eraseLazyValueInfoValue(LazyValueInfo &LVI,
+                                                    Value *V);
+} // namespace llvm
+
+/// What a harvest round's type shrinking would cost if JumpThreading's
+/// LazyValueInfo cache were kept: each tracked value that type shrinking
+/// deletes or replaces makes the cache visit every cached block. The cache is
+/// dropped before type shrinking, so these counters measure the work it avoids
+/// and how it grows with the temporary root, and report it in the trace.
+struct TypeShrinkingScaling {
+  /// Counts the first deletion or replacement of its value, the event on which
+  /// LazyValueInfo would erase that value
+  class RemovalCounter final : public CallbackVH {
+  private:
+    size_t *Count;
+
+  public:
+    RemovalCounter(Value *V, size_t &Count) : CallbackVH(V), Count(&Count) {}
+
+    void deleted() override {
+      ++*Count;
+      setValPtr(nullptr);
+    }
+
+    void allUsesReplacedWith(Value *) override { deleted(); }
+  };
+
+  std::vector<RemovalCounter> Counters;
+  size_t Removed = 0;
+  bool Measured = false;
+};
+
+/// Erases this many tracked values from the cache, evenly spaced over them, to
+/// time one erasure. The cache is dropped right after, so only entries about
+/// to be discarded go.
+static constexpr size_t SampledErasures = 16;
+
+/// Reports the temporary root's size and the LazyValueInfo cache that
+/// JumpThreading leaves, and starts counting the tracked values that type
+/// shrinking removes. It changes nothing but the cache, which the next pass
+/// drops.
+class MeasureLazyValueInfoPass
+  : public PassInfoMixin<MeasureLazyValueInfoPass> {
+private:
+  TypeShrinkingScaling &Scaling;
+
+public:
+  MeasureLazyValueInfoPass(TypeShrinkingScaling &Scaling) : Scaling(Scaling) {}
+
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+    Task T(1, "Lazy value info before type shrinking");
+    std::string Description = std::to_string(F.size()) + " blocks, "
+                              + std::to_string(F.getInstructionCount())
+                              + " instructions";
+
+    auto *LVI = FAM.getCachedResult<LazyValueAnalysis>(F);
+    bool Available = getLazyValueInfoCacheContents != nullptr
+                     and eraseLazyValueInfoValue != nullptr;
+    if (LVI != nullptr and Available) {
+      SmallVector<Value *, 0> Tracked;
+      size_t CachedBlocks = getLazyValueInfoCacheContents(*LVI, Tracked);
+
+      Scaling.Measured = true;
+      Scaling.Counters.reserve(Tracked.size());
+      for (Value *V : Tracked)
+        Scaling.Counters.emplace_back(V, Scaling.Removed);
+
+      size_t Sampled = std::min(SampledErasures, Tracked.size());
+      using Clock = std::chrono::steady_clock;
+      auto Start = Clock::now();
+      for (size_t I = 0; I < Sampled; ++I)
+        eraseLazyValueInfoValue(*LVI, Tracked[I * Tracked.size() / Sampled]);
+      auto Elapsed = Clock::now() - Start;
+      auto Nanoseconds = std::chrono::nanoseconds(Elapsed).count();
+
+      Description += ", " + std::to_string(CachedBlocks) + " cached blocks, "
+                     + std::to_string(Tracked.size()) + " tracked values, "
+                     + std::to_string(Sampled) + " erases in "
+                     + std::to_string(Nanoseconds) + " ns";
+    }
+
+    T.advance(Description);
+    return PreservedAnalyses::all();
+  }
+};
+
+/// Reports how many of the tracked values type shrinking removed, and stops
+/// counting
+class CountTypeShrinkingRemovalsPass
+  : public PassInfoMixin<CountTypeShrinkingRemovalsPass> {
+private:
+  TypeShrinkingScaling &Scaling;
+
+public:
+  CountTypeShrinkingRemovalsPass(TypeShrinkingScaling &Scaling) :
+    Scaling(Scaling) {}
+
+public:
+  PreservedAnalyses run(Function &, FunctionAnalysisManager &) {
+    if (Scaling.Measured) {
+      Task T(1, "Type shrinking removals");
+      T.advance(std::to_string(Scaling.Removed) + " tracked values removed");
+    }
+    Scaling = {};
+    return PreservedAnalyses::all();
   }
 };
 
@@ -709,6 +826,8 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     // the same predicate in a single "if" (in particular in ARM) and obtain
     // more accurate constraints.
     FPM.addPass(JumpThreadingPass());
+    TypeShrinkingScaling Scaling;
+    FPM.addPass(MeasureLazyValueInfoPass(Scaling));
     // Type shrinking does not use LVI. Drop its per-value deletion callbacks
     // before rewriting instructions, rather than retaining them until EarlyCSE.
     FPM.addPass(InvalidateAnalysisPass<LazyValueAnalysis>());
@@ -719,6 +838,7 @@ SummaryCallsBuilder RootAnalyzer::optimize(llvm::Function *OptimizedFunction,
     // Specifically it turns icmp that have been shrank to 32-bit by
     // TypeShrinking back to 64-bits.
     FPM.addPass(TypeShrinking::TypeShrinkingPass());
+    FPM.addPass(CountTypeShrinkingRemovalsPass(Scaling));
 
     // It is important to run EarlyCSE *after* JumpThreading. This has the
     // side effect of invalidating LazyValueInfo (which would otherwise be
