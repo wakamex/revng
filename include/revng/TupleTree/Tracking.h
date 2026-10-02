@@ -44,8 +44,16 @@ struct Tracking {
   template<typename M>
   static void pop(const M &LHS);
 
+  /// Stop tracking, and close the TrackingSession open on \p LHS, if any
   template<typename M>
   static void stop(const M &LHS);
+
+  /// Open a TrackingSession on \p LHS, unless this thread has one already:
+  /// until stop(LHS), push, pop, clearAndResume and collect on LHS visit only
+  /// the trackers and containers that hold state, with the same results.
+  /// \p LHS must not change shape, nor be destroyed, until then.
+  template<typename M>
+  static void openSession(const M &LHS);
 };
 
 } // namespace revng

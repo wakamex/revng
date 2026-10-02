@@ -15,6 +15,7 @@
 #include "revng/ADT/SortedVector.h"
 #include "revng/ADT/UpcastablePointer.h"
 #include "revng/Support/AccessTracker.h"
+#include "revng/Support/TrackingSession.h"
 #include "revng/Support/Generator.h"
 #include "revng/TupleTree/TupleLikeTraits.h"
 
@@ -69,10 +70,14 @@ public:
 private:
   T Content;
   mutable AccessTracker Exact = AccessTracker(false);
+  /// One entry per tracking level, from the outermost. When both are empty,
+  /// the levels are implicit and hold nothing: there are as many as the open
+  /// TrackingSession of the tree has, or one if there is none.
   mutable std::vector<TrackingSet> NonExisting;
   mutable std::vector<llvm::BitVector> Existing;
 
   mutable bool TrackingIsActive = false;
+  mutable TrackingSessionMembership Membership;
 
 public:
   /// \defgroup Methods related to tracking
@@ -81,10 +86,7 @@ public:
   void stopTracking() const { TrackingIsActive = false; }
   void clearTracking() const {
     Exact.clear();
-    NonExisting = {};
-    NonExisting.push_back(TrackingSet());
-    Existing = {};
-    Existing.push_back(llvm::BitVector(Content.size()));
+    forgetLevels();
     TrackingIsActive = true;
   }
 
@@ -104,12 +106,26 @@ public:
   }
 
   void trackingPush() const {
-    Existing.push_back(llvm::BitVector(Content.size()));
-    NonExisting.push_back(TrackingSet());
+    pushLevel();
     Exact.push();
   }
 
   void trackingPop() const {
+    popLevel();
+    Exact.pop();
+  }
+
+  /// \defgroup Level operations without the Exact tracker, which an open
+  ///           TrackingSession lists and updates on its own
+  /// @{
+  void pushLevel() const {
+    materializeLevels();
+    Existing.push_back(llvm::BitVector(Content.size()));
+    NonExisting.push_back(TrackingSet());
+  }
+
+  void popLevel() const {
+    materializeLevels();
     Existing.pop_back();
     if (Existing.empty())
       Existing.push_back(llvm::BitVector(Content.size()));
@@ -117,10 +133,48 @@ public:
     NonExisting.pop_back();
     if (NonExisting.empty())
       NonExisting.push_back(TrackingSet());
-
-    Exact.pop();
   }
 
+  /// Drop every level, leaving the implicit empty ones
+  void forgetLevels() const {
+    NonExisting = {};
+    Existing = {};
+  }
+
+  /// Whether this container has \p Levels levels, all empty
+  bool hasEmptyLevels(size_t Levels) const {
+    if (Existing.empty())
+      return true;
+
+    if (Existing.size() != Levels)
+      return false;
+
+    for (const llvm::BitVector &Level : Existing)
+      if (Level.any())
+        return false;
+
+    for (const TrackingSet &Level : NonExisting)
+      if (not Level.empty())
+        return false;
+
+    return true;
+  }
+
+  TrackingSessionMembership &membership() const { return Membership; }
+  /// @}
+
+private:
+  void materializeLevels() const {
+    if (not Existing.empty())
+      return;
+
+    revng_assert(NonExisting.empty());
+    size_t Levels = detail::implicitLevels(this, Membership);
+    Existing.assign(Levels, llvm::BitVector(Content.size()));
+    NonExisting.assign(Levels, TrackingSet());
+  }
+
+public:
   /// @}
 
 public:
@@ -340,6 +394,7 @@ public:
       return Quantity;
 
     if (Quantity == 0) {
+      materializeLevels();
       NonExisting.back().insert(Key);
     } else {
       markExistingKey(Key);
@@ -352,8 +407,10 @@ public:
   value_type *tryGet(const key_type &Key) {
     auto Iter = Content.find(Key);
     if (Iter == Content.end()) {
-      if (TrackingIsActive)
+      if (TrackingIsActive) {
+        materializeLevels();
         NonExisting.back().insert(Key);
+      }
       return nullptr;
     }
 
@@ -367,8 +424,10 @@ public:
 #endif
     auto Iter = Content.find(Key);
     if (Iter == Content.end()) {
-      if (TrackingIsActive)
+      if (TrackingIsActive) {
+        materializeLevels();
         NonExisting.back().insert(Key);
+      }
       return nullptr;
     }
 
@@ -458,6 +517,7 @@ private:
   void markExistingKey(const key_type &Key) const {
     if (not TrackingIsActive)
       return;
+    materializeLevels();
     auto Iter = Content.find(Key);
     revng_assert(Iter != Content.end());
     revng_assert(Existing.back().size() == Content.size());
@@ -477,9 +537,9 @@ private:
     TrackingSet Set;
     for (auto &BitVector : Existing) {
       revng_assert(Content.size() == BitVector.size());
-      for (size_t I = 0; I < Content.size(); I++) {
-        if (not BitVector[I])
-          continue;
+      // Visit only the set bits: a session collects this once per function
+      // from containers as large as the list of functions
+      for (unsigned I : BitVector.set_bits()) {
         using KOT = KeyedObjectTraits<value_type>;
         Set.insert(KOT::key(*std::next(Content.begin(), I)));
       }

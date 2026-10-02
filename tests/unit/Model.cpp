@@ -11,6 +11,7 @@ bool init_unit_test();
 #include "revng/Model/Processing.h"
 #include "revng/Support/MetaAddress.h"
 #include "revng/Support/MetaAddress/YAMLTraits.h"
+#include "revng/Support/TrackingSession.h"
 #include "revng/Support/YAMLTraits.h"
 #include "revng/TupleTree/DiffError.h"
 #include "revng/TupleTree/Introspection.h"
@@ -479,6 +480,127 @@ BOOST_AUTO_TEST_CASE(CollectReadFieldsShouldCollectAllSegments) {
 
   auto Expected = toTupleTreePaths({ "/Segments" });
   BOOST_TEST(Collected.ExactVectors == Expected);
+}
+
+static TupleTree<model::Binary> makeTrackedModel() {
+  TupleTree<model::Binary> Model;
+  Model->Architecture() = model::Architecture::arm;
+  for (const MetaAddress &Address : { ARM1000, ARM2000, ARM3000 }) {
+    model::Function &Function = Model->Functions()[Address];
+    Function.Name() = "f_" + Address.toString();
+  }
+  auto &Attributes = Model->Functions().at(ARM2000).Attributes();
+  Attributes.insert(FunctionAttribute::NoReturn);
+
+  auto &Struct = Model->makeStructDefinition(16).first;
+  Struct.Fields()[0].Name() = "First";
+  Struct.Fields()[8].Name() = "Second";
+  (void) Model->makeStructDefinition(4);
+  return Model;
+}
+
+static std::vector<std::string> toStrings(const ReadFields &Fields) {
+  std::vector<std::string> Result;
+  for (const TupleTreePath &Path : Fields.Read)
+    Result.push_back("read " + *pathAsString<model::Binary>(Path));
+  for (const TupleTreePath &Path : Fields.ExactVectors)
+    Result.push_back("exact " + *pathAsString<model::Binary>(Path));
+  return Result;
+}
+
+/// Read the model the way a pipe recording the reads of each function does,
+/// with nested levels, a subtree whose tracking is suspended and a copy, and
+/// return what each collect returns
+static std::vector<std::vector<std::string>>
+trackReads(const model::Binary &Binary, bool UseSession) {
+  using revng::Tracking;
+  std::vector<std::vector<std::string>> Result;
+  auto Collect = [&]() {
+    Result.push_back(toStrings(Tracking::collect(Binary)));
+  };
+
+  Tracking::clearAndResume(Binary);
+  if (UseSession) {
+    Tracking::openSession(Binary);
+    revng_check(revng::TrackingSession::find(&Binary) != nullptr);
+  }
+
+  // Reads before the first level
+  Binary.Architecture();
+  Binary.Functions().at(ARM1000).Name();
+  Binary.Segments().tryGet(ARM1000);
+
+  const auto &Key = Binary.TypeDefinitions().begin()->get()->key();
+  for (const MetaAddress &Address : { ARM1000, ARM2000, ARM3000 }) {
+    Tracking::push(Binary);
+    const model::Function &Function = Binary.Functions().at(Address);
+    Function.Name();
+    Function.Attributes().contains(FunctionAttribute::NoReturn);
+
+    if (Address == ARM2000) {
+      const auto &Definition = *Binary.TypeDefinitions().at(Key);
+      const auto &Struct = llvm::cast<model::StructDefinition>(Definition);
+      Struct.Fields().at(8).Name();
+      Struct.Size();
+
+      // A nested level, discarded by its pop
+      Tracking::push(Binary);
+      Function.Comment();
+      Binary.TypeDefinitions().size();
+      Tracking::pop(Binary);
+
+      // A subtree whose reads are discarded, as verification does
+      {
+        DisableTracking Guard(Struct);
+        Struct.Fields().at(0).Name();
+        Struct.CanContainCode();
+      }
+
+      // A copy is not part of the tree
+      const model::Function Copy = Function;
+      Copy.Name();
+      Copy.Attributes().size();
+    }
+
+    if (Address == ARM3000)
+      Binary.Functions().size();
+
+    Collect();
+    Tracking::pop(Binary);
+  }
+
+  Collect();
+  Tracking::stop(Binary);
+  revng_check(revng::TrackingSession::find(&Binary) == nullptr);
+  return Result;
+}
+
+BOOST_AUTO_TEST_CASE(TrackingSessionCollectsWhatTheTreeWalkCollects) {
+  TupleTree<model::Binary> WithoutSession = makeTrackedModel();
+  TupleTree<model::Binary> WithSession = makeTrackedModel();
+
+  auto Expected = trackReads(*WithoutSession, false);
+  auto Actual = trackReads(*WithSession, true);
+  if (Actual != Expected) {
+    for (auto &&[Name, Results] : { std::pair{ "expected", Expected },
+                                    std::pair{ "actual", Actual } }) {
+      dbg << Name << "\n";
+      for (const std::vector<std::string> &Collected : Results) {
+        dbg << "  collect\n";
+        for (const std::string &Path : Collected)
+          dbg << "    " << Path << "\n";
+      }
+    }
+  }
+  revng_check(Actual == Expected);
+
+  // The script reads something at every level
+  revng_check(Expected.size() == 4);
+  for (const std::vector<std::string> &Collected : Expected)
+    revng_check(not Collected.empty());
+
+  // Tracking again gives the same result
+  revng_check(trackReads(*WithSession, true) == Expected);
 }
 
 BOOST_AUTO_TEST_CASE(DiffPathsShouldMentionTheAddedElement) {

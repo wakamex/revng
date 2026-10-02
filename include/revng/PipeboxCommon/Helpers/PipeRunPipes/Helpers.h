@@ -29,6 +29,9 @@ public:
     Outgoing(Outgoing),
     Dependencies(DependenciesSize) {
     revng::Tracking::clearAndResume(Binary);
+    // Commits push, collect and pop the tracking state once per object:
+    // without a session each of them visits the whole model
+    revng::Tracking::openSession(Binary);
   }
 
   ~ObjectDependenciesHelper() {

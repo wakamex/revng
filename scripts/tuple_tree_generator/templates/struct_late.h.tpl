@@ -333,4 +333,7 @@ void revng::Tracking::pop(const /*= base_namespace =*/::/*= struct.name =*/ &LHS
 extern template
 void revng::Tracking::stop(const /*= base_namespace =*/::/*= struct.name =*/ &LHS);
 
+extern template
+void revng::Tracking::openSession(const /*= base_namespace =*/::/*= struct.name =*/ &LHS);
+
 /** endif **/

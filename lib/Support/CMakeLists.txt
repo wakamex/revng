@@ -29,6 +29,7 @@ revng_add_library_internal(
   Statistics.cpp
   Tag.cpp
   Tar.cpp
+  TrackingSession.cpp
   GzipStream.cpp
   WindowsApiSetSchemaParser.cpp
   Unicode.cpp
