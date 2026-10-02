@@ -437,6 +437,8 @@ set(FILECHECK_TESTS
     clift/types/union-with-pointer-recursion.mlir
     detect-abi/overlapping-indirect-branch.S
     detect-abi/trace-progress.S
+    detect-abi/trap-fallthrough.S
+    detect-abi/trap-kinds.S
     lift/gvec-equality.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
