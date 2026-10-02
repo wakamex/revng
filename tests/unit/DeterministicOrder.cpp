@@ -10,8 +10,10 @@ bool init_unit_test();
 #include "boost/test/unit_test.hpp"
 
 #include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
@@ -20,6 +22,8 @@ bool init_unit_test();
 #include "llvm/IR/Module.h"
 
 #include "revng/EarlyFunctionAnalysis/AnalyzeRegisterUsage.h"
+#include "revng/PipeboxCommon/LLVMContainer.h"
+#include "revng/PipeboxCommon/ObjectID.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/Tag.h"
 
@@ -213,4 +217,51 @@ BOOST_AUTO_TEST_CASE(StripDeadDebugInfoKeepsListOrder) {
   BOOST_TEST_REQUIRE(Units->getNumOperands() == 2U);
   BOOST_TEST(Units->getOperand(0) == High);
   BOOST_TEST(Units->getOperand(1) == Low);
+}
+
+BOOST_AUTO_TEST_CASE(FunctionModulesAreParsedInObjectOrder) {
+  // Two modules that both define %T: the one parsed second into the shared
+  // context gets a suffixed name
+  auto MakeBitcode = [](StringRef Name) {
+    LLVMContext Context;
+    Module M(Name, Context);
+    auto *T = StructType::create(Context, { Type::getInt32Ty(Context) }, "T");
+    new GlobalVariable(M,
+                       T,
+                       false,
+                       GlobalValue::ExternalLinkage,
+                       ConstantAggregateZero::get(T),
+                       Name);
+    SmallVector<char, 0> Buffer;
+    writeBitcode(M, Buffer);
+    return Buffer;
+  };
+  SmallVector<char, 0> FirstBitcode = MakeBitcode("first");
+  SmallVector<char, 0> SecondBitcode = MakeBitcode("second");
+
+  // The object that sorts first gets the higher address
+  void *Low = ::operator new(sizeof(ObjectID));
+  void *High = ::operator new(sizeof(ObjectID));
+  if (High < Low)
+    std::swap(Low, High);
+  auto *Second = new (Low) ObjectID(MetaAddress::fromString("0x2000:Code_"
+                                                            "x86_64"));
+  auto *First = new (High) ObjectID(MetaAddress::fromString("0x1000:Code_"
+                                                            "x86_64"));
+  BOOST_TEST_REQUIRE((*First < *Second));
+
+  revng::pypeline::LLVMFunctionContainer Container;
+  Container.deserialize({ { First, FirstBitcode }, { Second, SecondBitcode } });
+
+  auto TypeName = [&Container](const ObjectID &Object, StringRef Global) {
+    const Module &M = Container.getModule(Object);
+    return M.getGlobalVariable(Global)->getValueType()->getStructName().str();
+  };
+  BOOST_TEST(TypeName(*First, "first") == "T");
+  BOOST_TEST(TypeName(*Second, "second") != "T");
+
+  First->~ObjectID();
+  Second->~ObjectID();
+  ::operator delete(Low);
+  ::operator delete(High);
 }

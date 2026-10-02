@@ -4,6 +4,10 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <utility>
+#include <vector>
+
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
@@ -118,7 +122,16 @@ public:
 
   void
   deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
-    for (auto const &[Object, Buffer] : Data) {
+    // Parse in object order, not in the order of the ObjectID pointers: the
+    // modules share a context, and the order in which they are parsed decides
+    // the suffixes their named struct types get there
+    using Entry = std::pair<const ObjectID *, llvm::ArrayRef<char>>;
+    std::vector<Entry> Sorted(Data.begin(), Data.end());
+    llvm::sort(Sorted, [](const Entry &LHS, const Entry &RHS) {
+      return *LHS.first < *RHS.first;
+    });
+
+    for (auto const &[Object, Buffer] : Sorted) {
       llvm::MemoryBufferRef BufferRef({ Buffer.data(), Buffer.size() },
                                       "newBuffer");
       Modules[*Object] = llvm::cantFail(llvm::parseBitcodeFile(BufferRef,
