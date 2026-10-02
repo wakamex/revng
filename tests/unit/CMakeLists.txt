@@ -37,6 +37,23 @@ revng_add_test(NAME test_alloca_kill_point COMMAND test_alloca_kill_point)
 set_tests_properties(test_alloca_kill_point PROPERTIES LABELS "unit")
 
 #
+# test_opaque_register_user
+#
+
+revng_add_test_executable(test_opaque_register_user
+                          "${SRC}/OpaqueRegisterUser.cpp")
+target_compile_definitions(test_opaque_register_user
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_opaque_register_user
+                           PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_opaque_register_user revngModel revngSupport
+                      revngUnitTestHelpers Boost::unit_test_framework
+                      ${LLVM_LIBRARIES})
+revng_add_test(NAME test_opaque_register_user
+               COMMAND test_opaque_register_user)
+set_tests_properties(test_opaque_register_user PROPERTIES LABELS "unit")
+
+#
 # test_classsentinel
 #
 
