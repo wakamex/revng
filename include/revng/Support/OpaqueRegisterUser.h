@@ -33,24 +33,25 @@ public:
     Clobberers.addFnAttribute(Attribute::NoUnwind);
     Clobberers.addFnAttribute(Attribute::WillReturn);
     Clobberers.setTags({ &FunctionTags::ClobbererFunction });
-    Clobberers.initializeFromName(FunctionTags::ClobbererFunction);
 
     Writers.setMemoryEffects(MemoryEffects::readOnly());
     Writers.addFnAttribute(Attribute::NoUnwind);
     Writers.addFnAttribute(Attribute::WillReturn);
     Writers.setTags({ &FunctionTags::WriterFunction });
-    Writers.initializeFromName(FunctionTags::WriterFunction);
 
     Readers.setMemoryEffects(MemoryEffects::inaccessibleMemOnly());
     Readers.addFnAttribute(Attribute::NoUnwind);
     Readers.addFnAttribute(Attribute::WillReturn);
     Readers.setTags({ &FunctionTags::ReaderFunction });
-    Readers.initializeFromName(FunctionTags::ReaderFunction);
   }
 
 public:
   void clobber(revng::IRBuilder &Builder, llvm::GlobalVariable *CSV) {
-    writeImpl(Builder, CSV, "clobber_", Clobberers);
+    writeImpl(Builder,
+              CSV,
+              "clobber_",
+              Clobberers,
+              FunctionTags::ClobbererFunction);
   }
 
   void clobber(revng::IRBuilder &Builder, model::Register::Values Value) {
@@ -60,13 +61,18 @@ public:
   }
 
   llvm::StoreInst *write(revng::IRBuilder &Builder, llvm::GlobalVariable *CSV) {
-    return writeImpl(Builder, CSV, "write_", Writers);
+    return writeImpl(Builder,
+                     CSV,
+                     "write_",
+                     Writers,
+                     FunctionTags::WriterFunction);
   }
 
   llvm::Instruction *read(revng::IRBuilder &Builder,
                           llvm::GlobalVariable *CSV) {
     auto *CSVTy = CSV->getValueType();
     std::string Name = "reader_" + CSV->getName().str();
+    adopt(Readers, FunctionTags::ReaderFunction, Name);
     llvm::Function *Reader = Readers.get(Name,
                                          Builder.getVoidTy(),
                                          { CSVTy },
@@ -88,12 +94,27 @@ public:
   }
 
 private:
+  /// Let \p Pool reuse the function named \p Name if the module already has
+  /// it with \p Tag. Looking each name up when it is needed, rather than
+  /// recording every tagged function of the module up front, keeps this class
+  /// cheap to construct in a module with many functions; passes construct one
+  /// per function.
+  void adopt(OpaqueFunctionsPool<std::string> &Pool,
+             const FunctionTags::Tag &Tag,
+             const std::string &Name) {
+    if (llvm::Function *F = M->getFunction(Name))
+      if (Tag.isTagOf(F))
+        Pool.record(Name, F);
+  }
+
   llvm::StoreInst *writeImpl(revng::IRBuilder &Builder,
                              llvm::GlobalVariable *CSV,
                              llvm::StringRef Prefix,
-                             OpaqueFunctionsPool<std::string> &Pool) {
+                             OpaqueFunctionsPool<std::string> &Pool,
+                             const FunctionTags::Tag &Tag) {
     auto *CSVTy = CSV->getValueType();
     std::string Name = Prefix.str() + CSV->getName().str();
+    adopt(Pool, Tag, Name);
     llvm::Function *Writer = Pool.get(Name, CSVTy, {}, Name);
 
     auto *OpaqueCall = Builder.CreateCall(Writer);
