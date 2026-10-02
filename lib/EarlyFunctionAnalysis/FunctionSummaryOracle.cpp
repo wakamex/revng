@@ -224,12 +224,10 @@ FunctionSummaryOracle importImpl(llvm::Module &M,
   auto RegisterFilter = std::views::filter([SP = Globals.spReg()](GV *CSV) {
     return CSV != nullptr && CSV != SP;
   });
-  PrototypeImporter Importer{
-    .Level = Level,
-    .M = M,
-    .ABICSVs = Globals.abiRegisters() | RegisterFilter
-               | revng::to<std::set<llvm::GlobalVariable *>>()
-  };
+  PrototypeImporter Importer{ .Level = Level,
+                              .M = M,
+                              .ABICSVs = Globals.abiRegisters() | RegisterFilter
+                                         | revng::to<CSVSet>() };
 
   return FunctionSummaryOracle(Binary, std::move(Importer));
 }
