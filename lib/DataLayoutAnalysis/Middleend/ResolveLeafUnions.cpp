@@ -30,11 +30,13 @@ using NodePredicate = const std::function<bool(const LayoutTypeSystemNode *)>;
 
 using NeighborIterator = LayoutTypeSystemNode::NeighborIterator;
 
+// Order neighbors as the type system does, by child ID and then by tag. The
+// order decides which of two incomparable pointer children resolveUnion keeps,
+// so it must not depend on where the nodes and tags were allocated.
 static bool neighborLess(const NeighborIterator &AIt,
                          const NeighborIterator &BIt) {
-  const auto &[AChild, ATag] = *AIt;
-  const auto &[BChild, BTag] = *BIt;
-  return (AChild < BChild) or (ATag < BTag);
+  using Key = LayoutTypeSystemNode::NeighborLinkComparison::Helper;
+  return Key(*AIt) < Key(*BIt);
 }
 
 using NeighborLess = std::integral_constant<decltype(&neighborLess),
