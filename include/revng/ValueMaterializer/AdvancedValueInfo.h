@@ -7,6 +7,7 @@
 #include <map>
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 
 #include "revng/ADT/ConstantRangeSet.h"
@@ -30,7 +31,7 @@ class DataFlowGraph;
 /// pass's value requests.
 class ExtensionCandidates {
 public:
-  using Set = llvm::SmallSet<llvm::Instruction *, 4>;
+  using Set = llvm::SmallSetVector<llvm::Instruction *, 4>;
 
 private:
   llvm::DenseMap<llvm::Instruction *, Set> Cache;
@@ -46,7 +47,7 @@ public:
   using GraphType = const ControlFlowEdgesGraph *;
   using Label = const ControlFlowEdgesGraph::Node *;
   using ResultsMap = std::map<Label, mfp::MFPResult<LatticeElement>>;
-  using InstructionsSet = llvm::SmallPtrSetImpl<llvm::Instruction *>;
+  using InstructionsSet = llvm::SmallSetVector<llvm::Instruction *, 8>;
   using ExtraStateType = mfp::NoExtraState;
 
 private:
@@ -54,7 +55,7 @@ private:
   DataFlowRangeAnalysis &DFRA;
   const llvm::DominatorTree &DT;
   llvm::Instruction *Context;
-  llvm::SmallPtrSetImpl<llvm::Instruction *> &Instructions;
+  const InstructionsSet &Instructions;
   std::map<llvm::Instruction *, ExtensionCandidates::Set> Candidates;
 
 public:
@@ -62,7 +63,7 @@ public:
                        DataFlowRangeAnalysis &DFRA,
                        const llvm::DominatorTree &DT,
                        llvm::Instruction *Context,
-                       InstructionsSet &Instructions,
+                       const InstructionsSet &Instructions,
                        bool ZeroExtendConstraints,
                        ExtensionCandidates *Extensions = nullptr);
 

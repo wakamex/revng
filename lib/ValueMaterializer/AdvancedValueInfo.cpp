@@ -80,7 +80,7 @@ AdvancedValueInfoMFI::AdvancedValueInfoMFI(LazyValueInfo &LVI,
                                            DataFlowRangeAnalysis &DFRA,
                                            const DominatorTree &DT,
                                            Instruction *Context,
-                                           InstructionsSet &Instructions,
+                                           const InstructionsSet &Instructions,
                                            bool ZeroExtendConstraints,
                                            ExtensionCandidates *Extensions) :
   LVI(LVI), DFRA(DFRA), DT(DT), Context(Context), Instructions(Instructions) {
@@ -253,8 +253,12 @@ runAVI(const DataFlowGraph &DFG,
 
   SmallPtrSet<BasicBlock *, 4> Whitelist;
 
+  // The containers below keep the order in which the data flow graph yields
+  // the instructions: the transfer function queries LVI in this order and the
+  // monotone framework starts from the entry points in this order, and LVI's
+  // results depend on the order of its queries
   BasicBlock *ContextBB = Context->getParent();
-  SmallPtrSet<llvm::Instruction *, 8> Targets;
+  AdvancedValueInfoMFI::InstructionsSet Targets;
 
   // Identify all the instructions in the DFG
   for (const DataFlowGraph::Node *Node : post_order(&DFG)) {
@@ -282,10 +286,10 @@ runAVI(const DataFlowGraph &DFG,
   //
   // Collect nodes from which we should start the exploration
   //
-  SmallPtrSet<BasicBlock *, 4> DFGEntryPoints;
+  SmallSetVector<BasicBlock *, 4> DFGEntryPoints;
 
   // Collect in a set all the blocks of the target instructions
-  SmallPtrSet<BasicBlock *, 4> InstructionBlocks;
+  SmallSetVector<BasicBlock *, 4> InstructionBlocks;
   for (Instruction *I : Targets)
     InstructionBlocks.insert(I->getParent());
 
@@ -346,7 +350,8 @@ runAVI(const DataFlowGraph &DFG,
   // Create the subgraph of the CFG containing Whitelist
   //
   auto CFEG = ControlFlowEdgesGraph::fromNodeSet(NodeSet);
-  CFEG.setInterestingInstructions(Targets);
+  SmallPtrSet<Instruction *, 8> Interesting(Targets.begin(), Targets.end());
+  CFEG.setInterestingInstructions(Interesting);
 
   revng_log(ValueMaterializerLogger,
             "The CFG subset we're interested in has " << CFEG.size()
