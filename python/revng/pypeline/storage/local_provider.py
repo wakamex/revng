@@ -158,26 +158,42 @@ WHERE (savepoint_id, container_id, configuration_hash, object_id) NOT IN
 #       the time being this is specialized for the current structure where
 #       there's only children of root, so the check becomes:
 #       `dependencies.object_id != x'' AND objects.object_id = x''`
+#
+# Both statements are written so that SQLite drives them from the few matched
+# rows and looks the rest up by index: a join whose condition is an OR, or
+# that constrains only the first column of the `dependencies` key, scans the
+# whole table for every matched row, which made invalidating the functions of
+# a binary take hours.
+# * The two alternatives of the object_id condition above are the two halves
+#   of a UNION, each reading the matched dependencies first and finding the
+#   objects by `object_id`.
+# * Joining the existing (savepoint_id_start, savepoint_id_end) pairs lets the
+#   lookup of each invalidated object's dependencies use the whole key prefix
+#   up to `object_id`.
 INVALIDATE_QUERY = """
+WITH matched_dependencies AS (
+        SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
+        FROM dependencies
+        WHERE dependencies.model_path IN (SELECT path FROM model_paths_{uuid})
+    UNION
+        SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
+        FROM additional_objects_{uuid}
+)
 INSERT INTO invalidated_objects_{uuid}
-    SELECT DISTINCT objects.rowid
-    FROM objects
-    JOIN (
-            SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
-            FROM dependencies
-            WHERE dependencies.model_path IN (SELECT path FROM model_paths_{uuid})
-        UNION
-            SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
-            FROM additional_objects_{uuid}
-    ) AS dependencies
-    WHERE (
-            (
-              objects.object_id >= dependencies.object_id
-              AND objects.object_id <= CAST((dependencies.object_id || {objectid_mask}) AS BLOB)
-            ) OR (
-              dependencies.object_id != x'' AND objects.object_id = x''
-            )
-          )
+    SELECT objects.rowid
+    FROM matched_dependencies AS dependencies
+    CROSS JOIN objects INDEXED BY object_id_on_object
+    WHERE objects.object_id >= dependencies.object_id
+          AND objects.object_id <= CAST((dependencies.object_id || {objectid_mask}) AS BLOB)
+          AND objects.configuration_hash = dependencies.configuration_hash
+          AND objects.savepoint_id >= dependencies.savepoint_id_start
+          AND objects.savepoint_id <= dependencies.savepoint_id_end
+  UNION
+    SELECT objects.rowid
+    FROM matched_dependencies AS dependencies
+    CROSS JOIN objects INDEXED BY object_id_on_object
+    WHERE dependencies.object_id != x''
+          AND objects.object_id = x''
           AND objects.configuration_hash = dependencies.configuration_hash
           AND objects.savepoint_id >= dependencies.savepoint_id_start
           AND objects.savepoint_id <= dependencies.savepoint_id_end
@@ -186,14 +202,19 @@ INSERT INTO invalidated_objects_{uuid}
 DELETE FROM dependencies
 WHERE rowid in (
     SELECT DISTINCT dependencies.rowid
-    FROM dependencies
-    JOIN (
+    FROM (
         SELECT savepoint_id, container_id, configuration_hash, object_id
         FROM objects
         WHERE rowid IN (SELECT object_row_id FROM invalidated_objects_{uuid})
     ) AS invalidated_objects
+    CROSS JOIN (
+        SELECT DISTINCT savepoint_id_start, savepoint_id_end FROM dependencies
+    ) AS ranges
+    CROSS JOIN dependencies
     WHERE
-        dependencies.savepoint_id_start = invalidated_objects.savepoint_id
+        ranges.savepoint_id_start = invalidated_objects.savepoint_id
+        AND dependencies.savepoint_id_start = ranges.savepoint_id_start
+        AND dependencies.savepoint_id_end = ranges.savepoint_id_end
         AND dependencies.container_id = invalidated_objects.container_id
         AND dependencies.configuration_hash = invalidated_objects.configuration_hash
         AND dependencies.object_id = invalidated_objects.object_id
