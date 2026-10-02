@@ -372,7 +372,9 @@ void pruneDICompileUnits(Module &M) {
   // Purge CUs list
   CUs->clearOperands();
 
-  std::set<DICompileUnit *> Reachable;
+  // Keep the order in which the module references them: recreating the list
+  // in address order would make the module depend on memory layout
+  SetVector<DICompileUnit *> Reachable;
   DebugInfoFinder DIFinder;
   DIFinder.processModule(M);
 
