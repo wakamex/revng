@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "llvm/Pass.h"
+#include "llvm/Transforms/Utils/CodeExtractor.h"
 
 #include "revng/BasicAnalyses/CSVGlobals.h"
 #include "revng/BasicAnalyses/RootFunction.h"
@@ -36,6 +37,8 @@ private:
   LLVMFunctionContainer &Output;
   std::optional<RootFunction> RootF;
   std::optional<CSVGlobals> Globals;
+  /// Analysis cache of root, built when isolating the first function
+  std::optional<llvm::CodeExtractorAnalysisCache> RootCEAC;
   std::vector<IsolatedFunction> IsolatedFunctions;
 
   /// How many output modules still need the body of each isolated function

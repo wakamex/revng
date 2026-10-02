@@ -4,6 +4,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <optional>
+
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ModRef.h"
 #include "llvm/Transforms/Utils/CodeExtractor.h"
@@ -89,7 +91,8 @@ private:
 
   OpaqueFunctionsPool<llvm::Type *> OpaqueReturnAddress;
 
-  llvm::CodeExtractorAnalysisCache CEAC;
+  std::optional<llvm::CodeExtractorAnalysisCache> OwnCEAC;
+  const llvm::CodeExtractorAnalysisCache &CEAC;
 
 public:
   Outliner(llvm::Module &M,
@@ -102,8 +105,34 @@ public:
     Oracle(Oracle),
     UnexpectedPCMarker(initializeUnexpectedPCMarker(M)),
     OpaqueReturnAddress(&M, false),
-    CEAC(*M.getFunction("root")) {
+    OwnCEAC(std::in_place, *M.getFunction("root")),
+    CEAC(*OwnCEAC) {
+    initializeOpaqueReturnAddress();
+  }
 
+  /// Outline using \p RootCEAC, an analysis cache of `root` that the caller
+  /// shares among outliners: building one visits every block of `root`, and
+  /// outlining leaves the blocks of `root` as they were
+  Outliner(llvm::Module &M,
+           RootFunction &RootF,
+           const CSVGlobals &Globals,
+           FunctionSummaryOracle &Oracle,
+           const llvm::CodeExtractorAnalysisCache &RootCEAC) :
+    M(M),
+    RootF(RootF),
+    Globals(Globals),
+    Oracle(Oracle),
+    UnexpectedPCMarker(initializeUnexpectedPCMarker(M)),
+    OpaqueReturnAddress(&M, false),
+    CEAC(RootCEAC) {
+    initializeOpaqueReturnAddress();
+  }
+
+  Outliner(const Outliner &) = delete;
+  Outliner &operator=(const Outliner &) = delete;
+
+private:
+  void initializeOpaqueReturnAddress() {
     using namespace llvm;
     auto Effects = MemoryEffects::inaccessibleMemOnly(llvm::ModRefInfo::Ref);
     OpaqueReturnAddress.setMemoryEffects(Effects);

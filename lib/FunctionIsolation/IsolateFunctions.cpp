@@ -317,9 +317,10 @@ public:
   FunctionOutliner(llvm::Module &M,
                    const model::Binary &Binary,
                    RootFunction &Root,
-                   const CSVGlobals &Globals) :
+                   const CSVGlobals &Globals,
+                   const llvm::CodeExtractorAnalysisCache &RootCEAC) :
     Oracle(FSOracle::importWithoutPrototypes(M, Globals, Binary)),
-    Outliner(M, Root, Globals, Oracle) {}
+    Outliner(M, Root, Globals, Oracle, RootCEAC) {}
 
 public:
   efa::OutlinedFunction outline(MetaAddress Entry,
@@ -661,7 +662,15 @@ Function *Isolate::isolateFunction(const efa::ControlFlowGraph &FM) {
 
   // Outline the function (later on we'll steal its body and move it into F)
   CallIsolatedFunction CallHandler(*this, FM);
-  FunctionOutliner Outliner(*ClonedModule, Binary, *RootF, *Globals);
+  // Outlining leaves the blocks of root as they were, so one analysis cache
+  // of root serves every function
+  if (not RootCEAC)
+    RootCEAC.emplace(*ClonedModule->getFunction("root"));
+  FunctionOutliner Outliner(*ClonedModule,
+                            Binary,
+                            *RootF,
+                            *Globals,
+                            *RootCEAC);
   efa::OutlinedFunction Outlined = Outliner.outline(Entry, &CallHandler);
 
   handleUnexpectedPCCloned(Outlined);
