@@ -440,10 +440,15 @@ Function *RootAnalyzer::createTemporaryRoot(Function *TheFunction,
   JTM.setCFGForm(CFGForm::NoFunctionCalls,
                  &ValueMaterializerJumpTargetWhitelist);
 
-  // Detach the fallthrough of calls that never return
+  // Detach the fallthrough of calls that never return. Send them to the
+  // dispatcher's failure block: it calls `unknown_pc`, so LLVM cannot drop the
+  // code leading there, and it has no successors. The dispatcher itself would
+  // connect each such call to every jump target, and the regions value
+  // materialization explores between a value and its use would then span
+  // most of the program.
   auto DetachedFallthroughs = cutNoReturnFallthroughs(*TheFunction,
                                                       *Model,
-                                                      JTM.dispatcher());
+                                                      JTM.dispatcherFail());
 
   // Whatever we concluded downstream of those fallthroughs was concluded on a
   // CFG we now know to be wrong. Collect the indirect branches involved, so we
