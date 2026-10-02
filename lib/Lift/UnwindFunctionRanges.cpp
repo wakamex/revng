@@ -3,6 +3,7 @@
 //
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 
 #include "llvm/BinaryFormat/Dwarf.h"
@@ -241,10 +242,21 @@ const UnwindFunctionRanges::Sweep &UnwindFunctionRanges::sweep(unsigned Index) {
       Result.DirectJumps.push_back(Destination);
     }
 
+    if (auto Reference = InstrAnalysis
+                           ->evaluateMemoryOperandAddress(Instruction,
+                                                          SubtargetInfo.get(),
+                                                          Address,
+                                                          InstructionSize))
+      Result.DataReferences.push_back(*Reference);
+
     Offset += InstructionSize;
   }
 
   Result.DecodedEnd = R.Start + Offset;
+  llvm::sort(Result.DataReferences);
+  Result.DataReferences.erase(std::unique(Result.DataReferences.begin(),
+                                          Result.DataReferences.end()),
+                              Result.DataReferences.end());
   return Result;
 }
 
@@ -345,7 +357,9 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
 
 std::optional<size_t>
 UnwindFunctionRanges::tableExtent(MetaAddress Jump,
-                                  ArrayRef<MetaAddress> Targets) {
+                                  ArrayRef<MetaAddress> Targets,
+                                  ArrayRef<uint64_t> Entries) {
+  revng_assert(Targets.size() == Entries.size());
   if (Ranges.empty() or Jump.type() != CodeType)
     return std::nullopt;
 
@@ -355,8 +369,24 @@ UnwindFunctionRanges::tableExtent(MetaAddress Jump,
 
   const std::vector<unsigned> &Parts = group(*JumpRange);
 
+  // The table ends before the next address after its first entry that the
+  // function's code refers to: another table of the function, whose entries,
+  // read relative to this table, can point to instructions of the function
+  uint64_t End = std::numeric_limits<uint64_t>::max();
+  if (not Entries.empty()) {
+    for (unsigned Part : Parts) {
+      const std::vector<uint64_t> &References = sweep(Part).DataReferences;
+      auto It = llvm::upper_bound(References, Entries.front());
+      if (It != References.end())
+        End = std::min(End, *It);
+    }
+  }
+
   size_t Extent = 0;
-  for (const MetaAddress &Target : Targets) {
+  for (auto [Target, Entry] : llvm::zip(Targets, Entries)) {
+    if (Entry >= End)
+      break;
+
     if (not Target.isValid() or Target.type() != CodeType)
       break;
 

@@ -56,6 +56,9 @@ private:
     uint64_t DecodedEnd = 0;
     /// The destinations of the direct jumps (not calls) in the range
     llvm::SmallVector<uint64_t, 4> DirectJumps;
+    /// The memory addresses the range's instructions compute from the program
+    /// counter, such as the start of a jump table, sorted
+    std::vector<uint64_t> DataReferences;
   };
 
 private:
@@ -93,13 +96,17 @@ public:
   size_t size() const { return Ranges.size(); }
 
   /// Return how many of \p Targets, the destinations an indirect jump at
-  /// \p Jump reads from consecutive table entries in ascending address order,
-  /// belong to the table: the leading run of destinations that lie in the
-  /// function containing \p Jump at the start of an instruction.
+  /// \p Jump reads from the table entries at \p Entries (in ascending address
+  /// order, one per destination), belong to the table: the leading run of
+  /// destinations that lie in the function containing \p Jump at the start of
+  /// an instruction, read from entries before the next address after the
+  /// first entry that the function's code refers to, which starts another
+  /// table or object.
   ///
   /// \return std::nullopt when there is no unwind information for \p Jump.
-  std::optional<size_t>
-  tableExtent(MetaAddress Jump, llvm::ArrayRef<MetaAddress> Targets);
+  std::optional<size_t> tableExtent(MetaAddress Jump,
+                                    llvm::ArrayRef<MetaAddress> Targets,
+                                    llvm::ArrayRef<uint64_t> Entries);
 
 private:
   std::optional<unsigned> find(uint64_t Address) const;

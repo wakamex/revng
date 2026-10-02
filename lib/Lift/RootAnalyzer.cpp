@@ -965,7 +965,8 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
   // follow belong to other tables and point into other functions. When each
   // destination of the indirect jump at Jump was read from a table entry,
   // keep the destinations of the entries before the first one that does not
-  // point to an instruction of the jump's function. If not even the first one
+  // point to an instruction of the jump's function or that lies at or past
+  // another address the function's code refers to. If not even the first one
   // does, the table is not one of this function's (for instance, a table of
   // functions) and all of them are kept.
   auto BoundJumpTable = [this](MetaAddress Jump, SmallVector<Entry> &Operands) {
@@ -984,10 +985,13 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
     });
 
     SmallVector<MetaAddress> Targets;
-    for (const Entry *Operand : ByTableEntry)
+    SmallVector<uint64_t> Entries;
+    for (const Entry *Operand : ByTableEntry) {
       Targets.push_back(MetaAddress::decomposeIntegerPC(Operand->Value));
+      Entries.push_back(*Operand->TableEntry);
+    }
 
-    auto Extent = JTM.unwindRanges().tableExtent(Jump, Targets);
+    auto Extent = JTM.unwindRanges().tableExtent(Jump, Targets, Entries);
     if (not Extent or *Extent == 0 or *Extent == Targets.size())
       return;
 

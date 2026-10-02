@@ -16,6 +16,13 @@
 # both; data pointing into `g` follows it. The destination in the cold part is
 # kept, and so is the entry after it.
 #
+# `m` has two switches whose tables are adjacent: `a_table`, indexed by an
+# unchecked byte, and then `b_table`. Read relative to `a_table`, the entries
+# of `b_table` point 8 bytes before the cases of the second switch, which are
+# instructions of `m`; the table of the first switch still ends where the
+# code of `m` refers to `b_table`. Taking those as destinations would also
+# split the block of the second switch's jump and leave it unresolved.
+#
 # `t` jumps through a table of functions, `g` and `k`: none of the
 # destinations is in `t`, so the table is not one of its own and every
 # destination is kept.
@@ -27,6 +34,8 @@
 # RUN: FileCheck %s --check-prefix=C < %t.ll
 # RUN: FileCheck %s --check-prefix=H < %t.ll
 # RUN: FileCheck %s --check-prefix=T < %t.ll
+# RUN: FileCheck %s --check-prefix=M1 < %t.ll
+# RUN: FileCheck %s --check-prefix=M2 < %t.ll
 #
 # Each jump through a table ends in a switch on the destination's address, in
 # the block of the jump, after the checks on the address's epoch,
@@ -61,6 +70,17 @@
 # T-NEXT: i64 4198587, label %"bb.0x4010bb:Code_x86_64"
 # T-NEXT: i64 4198596, label %"bb.0x4010c4:Code_x86_64"
 # T-NEXT: ]
+#
+# M1: "bb.0x4010d1:Code_x86_64_epoch_0_address_space_0_type_Code_x86_64":
+# M1-NEXT: switch i64 %{{[0-9]+}}, label %unexpectedpc [
+# M1-NEXT: i64 4198629, label %"bb.0x4010e5:Code_x86_64"
+# M1-NEXT: i64 4198635, label %"bb.0x4010eb:Code_x86_64"
+# M1-NEXT: ]
+# M2: "bb.0x4010f0:Code_x86_64_epoch_0_address_space_0_type_Code_x86_64":
+# M2-NEXT: switch i64 %{{[0-9]+}}, label %unexpectedpc [
+# M2-NEXT: i64 4198664, label %"bb.0x401108:Code_x86_64"
+# M2-NEXT: i64 4198670, label %"bb.0x40110e:Code_x86_64"
+# M2-NEXT: ]
 
 .text
 .globl entry
@@ -204,6 +224,42 @@ h_cold:
   .cfi_endproc
 .size h_cold, .-h_cold
 
+.globl m
+.type m, @function
+m:
+  .cfi_startproc
+  movzbl %dil, %eax
+  leaq a_table(%rip), %rcx
+  movslq (%rcx,%rax,4), %rax
+  addq %rcx, %rax
+  jmpq *%rax
+a0:
+  movl $60, %eax
+  ret
+a1:
+  cmpl $1, %esi
+  ja b_default
+  movl %esi, %eax
+  leaq b_table(%rip), %rcx
+  movslq (%rcx,%rax,4), %rax
+  addq %rcx, %rax
+  # 8 bytes up to b0, the first case of the second switch
+  addq $1, %rdx
+  nop
+  nop
+  jmpq *%rax
+b0:
+  movl $70, %eax
+  ret
+b1:
+  movl $71, %eax
+  ret
+b_default:
+  xorl %eax, %eax
+  ret
+  .cfi_endproc
+.size m, .-m
+
 .section .rodata
 .p2align 3
 t_table:
@@ -232,6 +288,15 @@ h_table:
   .long h3 - h_table
   .rept 252
   .long g_mid - h_table
+  .endr
+a_table:
+  .long a0 - a_table
+  .long a1 - a_table
+b_table:
+  .long b0 - b_table
+  .long b1 - b_table
+  .rept 252
+  .long g_mid - b_table
   .endr
 
 .section .note.GNU-stack,"",@progbits
