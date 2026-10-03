@@ -11,7 +11,8 @@
 # RUN: env REVNG_OPTIONS='-debug-log=registerjt -debug-log=raw-code-pointers' %root/bin/revng quick artifact lift --analyses=parse-binary %t -o %t.bc 2> %t.log
 # RUN: FileCheck %s --check-prefix=LOG < %t.log
 # RUN: llvm-dis %t.bc -o %t.ll
-# RUN: FileCheck %s --check-prefix=IR --implicit-check-not='call void @helper_rdpmc' < %t.ll
+# RUN: FileCheck %s --check-prefix=IR < %t.ll
+# RUN: not grep -F 'call void @helper_rdpmc' %t.ll
 #
 # LOG-DAG: Ignoring raw code pointer at 0x402000:Generic64 to instruction interior 0x401011:Code_x86_64
 # LOG-DAG: Registering bb.0x401030:Code_x86_64 for GlobalData
@@ -32,7 +33,7 @@ entry:
   call direct_overlap
   mov $42, %eax
   ret
-  .org 0x10
+  .org 0x10, 0x90
 operand_stream:
   .byte 0xe9, 0x5f, 0xff, 0xff, 0xff
   .byte 0xe8, 0x5f, 0x0f, 0x33, 0x00
