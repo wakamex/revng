@@ -2396,9 +2396,13 @@ static void absorbVolatileChildren(LayoutTypeSystem &TS) {
   }
 }
 
-static bool arrangeAccessesHierarchically(LayoutTypeSystem &TS) {
+/// \p AnalyzedTwice, when given, is set if some node is analyzed more than
+/// once.
+static bool arrangeAccessesHierarchically(LayoutTypeSystem &TS,
+                                          bool *AnalyzedTwice = nullptr) {
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
+  llvm::DenseSet<const LayoutTypeSystemNode *> Analyzed;
 
   bool Changed = false;
 
@@ -2449,6 +2453,9 @@ static bool arrangeAccessesHierarchically(LayoutTypeSystem &TS) {
       // analyzed in a previous iteration, and we can skip it.
       if (AlreadyAnalyzed)
         continue;
+
+      if (not Analyzed.insert(Parent).second and AnalyzedTwice != nullptr)
+        *AnalyzedTwice = true;
 
       revng_log(Log, "Analyzing parent: " << Parent->ID);
       revng_assert(Parent != FakeRoot);
@@ -2755,40 +2762,116 @@ static void buildContainedFields(LayoutTypeSystem &TS, size_t Depth) {
   }
 }
 
-template<typename BuilderT>
-static void checkArrangeMatchesReference(BuilderT Build) {
-  VerifyLog.enable();
-  auto Prepare = [&Build](LayoutTypeSystem &TS) {
-    Build(TS);
-    dla::StepManager SM;
-    revng_check(SM.addStep<CollapseEqualitySCC>());
-    revng_check(SM.addStep<CollapseInstanceAtOffset0SCC>());
-    revng_check(SM.addStep<PruneLayoutNodesWithoutLayout>());
-    revng_check(SM.addStep<ComputeUpperMemberAccesses>());
-    revng_check(SM.addStep<DecomposeStridedEdges>());
-    SM.run(TS);
-  };
-  LayoutTypeSystem Reference, Actual;
-  Prepare(Reference);
-  Prepare(Actual);
-  bool ReferenceChanged = reference_arrange::arrangeAccessesHierarchically(
-    Reference);
-  bool ActualChanged = ArrangeAccessesHierarchically().runOnTypeSystem(Actual);
-  revng_check(ReferenceChanged == ActualChanged);
-  revng_check(describe(Reference) == describe(Actual));
+/// Each root with each leaf it reaches through non-pointer edges, by node ID
+static std::set<std::pair<uint64_t, uint64_t>>
+leavesReachableFromRoots(LayoutTypeSystem &TS) {
+  std::set<std::pair<uint64_t, uint64_t>> Result;
+  for (LTSN *Root : llvm::nodes(&TS)) {
+    if (not isRoot(Root))
+      continue;
+    using reference_arrange::NonPointerFilterT;
+    for (LTSN *N : llvm::depth_first(NonPointerFilterT(Root)))
+      if (isLeaf(N))
+        Result.insert({ Root->ID, N->ID });
+  }
+  return Result;
 }
 
-BOOST_AUTO_TEST_CASE(ArrangeAccessesHierarchicallyMatchesUnmergedPushes) {
+/// No node is left with two instance children of which one can still be
+/// pushed through the other, except where the push would close an instance
+/// loop
+static bool isArranged(LayoutTypeSystem &TS) {
+  using GT = llvm::GraphTraits<LTSN *>;
+  for (LTSN *Parent : llvm::nodes(&TS)) {
+    for (auto AIt = GT::child_edge_begin(Parent),
+              End = GT::child_edge_end(Parent);
+         AIt != End;
+         ++AIt) {
+      for (auto BIt = std::next(AIt); BIt != End; ++BIt) {
+        auto Push = reference_arrange::canPushThrough(Parent, AIt, BIt);
+        if (not Push.has_value())
+          continue;
+        auto *Through = Push->Through->first;
+        auto *Pushed = Push->ToPush->first;
+        uint64_t PushedSize = getFieldSize(Pushed, Push->ToPush->second);
+        if (Push->OEAfterPush.Offset == 0 and PushedSize == Through->Size
+            and reference_arrange::wouldCloseInstanceLoop(Parent,
+                                                          Through,
+                                                          Pushed))
+          continue;
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+template<typename BuilderT>
+static void prepareForArrange(LayoutTypeSystem &TS, BuilderT Build) {
+  Build(TS);
+  dla::StepManager SM;
+  revng_check(SM.addStep<CollapseEqualitySCC>());
+  revng_check(SM.addStep<CollapseInstanceAtOffset0SCC>());
+  revng_check(SM.addStep<PruneLayoutNodesWithoutLayout>());
+  revng_check(SM.addStep<ComputeUpperMemberAccesses>());
+  revng_check(SM.addStep<DecomposeStridedEdges>());
+  SM.run(TS);
+}
+
+struct ArrangeComparison {
+  bool ReferenceAnalyzedTwice = false;
+  bool Equal = false;
+};
+
+/// Run the step and the previous implementation on two copies of the same
+/// graph; the step must leave every node arranged, keep every leaf reachable
+/// from the roots that reached it, and give the same graph as the previous
+/// implementation whenever that one analyzed no node twice
+template<typename BuilderT>
+static ArrangeComparison checkArrangeAgainstReference(BuilderT Build) {
+  VerifyLog.enable();
+  LayoutTypeSystem Reference, Actual;
+  prepareForArrange(Reference, Build);
+  prepareForArrange(Actual, Build);
+  auto LeavesBefore = leavesReachableFromRoots(Actual);
+
+  ArrangeComparison Result;
+  bool ReferenceChanged = reference_arrange::arrangeAccessesHierarchically(
+    Reference, &Result.ReferenceAnalyzedTwice);
+  bool ActualChanged = ArrangeAccessesHierarchically().runOnTypeSystem(Actual);
+
+  revng_check(isArranged(Actual));
+  auto LeavesAfter = leavesReachableFromRoots(Actual);
+  revng_check(std::includes(LeavesAfter.begin(),
+                            LeavesAfter.end(),
+                            LeavesBefore.begin(),
+                            LeavesBefore.end()));
+
+  Result.Equal = describe(Reference) == describe(Actual);
+  if (not Result.ReferenceAnalyzedTwice) {
+    revng_check(ReferenceChanged == ActualChanged);
+    revng_check(Result.Equal);
+  }
+  return Result;
+}
+
+BOOST_AUTO_TEST_CASE(ArrangeAccessesHierarchicallyMatchesReferenceVisitingOnce) {
   for (size_t Depth : { 1, 2, 3, 6, 9 })
-    checkArrangeMatchesReference([&](LayoutTypeSystem &TS) {
+    checkArrangeAgainstReference([&](LayoutTypeSystem &TS) {
       buildContainedFields(TS, Depth);
     });
 
+  unsigned VisitedOnce = 0;
   for (unsigned Seed = 0; Seed < 600; ++Seed) {
     size_t NodeCount = 2 + Seed % 71;
     size_t ChildrenPerNode = 1 + Seed % 6;
-    checkArrangeMatchesReference([&](LayoutTypeSystem &TS) {
+    auto Comparison = checkArrangeAgainstReference([&](LayoutTypeSystem &TS) {
       buildNestedFields(TS, Seed, NodeCount, ChildrenPerNode);
     });
+    VisitedOnce += not Comparison.ReferenceAnalyzedTwice;
   }
+  // The previous implementation analyzes no node twice in 264 of these graphs,
+  // so the equality above is checked on them
+  revng_check(VisitedOnce == 264);
 }
+

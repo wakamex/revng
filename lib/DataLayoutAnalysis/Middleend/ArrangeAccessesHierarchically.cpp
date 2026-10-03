@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <iterator>
+#include <queue>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -378,8 +380,106 @@ static std::weak_ordering operator<=>(const NeighborIterator &LHS,
   return *LHSTag <=> *RHSTag;
 }
 
+/// For each node that ArrangeAccessesHierarchically has not analyzed yet, the
+/// number of its parents (through non-pointer edges) that it has not analyzed
+/// yet. A node is ready to be analyzed when this count drops to 0. The step
+/// tells it about every edge it adds or removes before a node is analyzed.
+class PendingParents {
+  llvm::DenseMap<const LayoutTypeSystemNode *, unsigned> Count;
+  llvm::SmallVector<LayoutTypeSystemNode *> Released;
+
+public:
+  explicit PendingParents(LayoutTypeSystem &TS) {
+    for (LayoutTypeSystemNode *N : llvm::nodes(&TS))
+      Count[N] = 0;
+    for (LayoutTypeSystemNode *N : llvm::nodes(&TS))
+      for (LayoutTypeSystemNode *Child : distinctChildren(N))
+        ++Count[Child];
+  }
+
+  bool isPending(const LayoutTypeSystemNode *N) const {
+    return Count.count(N) != 0;
+  }
+
+  bool empty() const { return Count.empty(); }
+
+  unsigned count(const LayoutTypeSystemNode *N) const {
+    return Count.lookup(N);
+  }
+
+  /// The distinct children of \p N through non-pointer edges
+  static llvm::SmallVector<LayoutTypeSystemNode *>
+  distinctChildren(LayoutTypeSystemNode *N) {
+    llvm::SmallVector<LayoutTypeSystemNode *> Result;
+    for (LayoutTypeSystemNode *Child : llvm::children<NonPointerFilterT>(N))
+      if (Result.empty() or Result.back() != Child)
+        Result.push_back(Child);
+    return Result;
+  }
+
+  /// Whether a non-pointer edge goes from \p Parent to \p Child
+  static bool isParent(const LayoutTypeSystemNode *Parent,
+                       const LayoutTypeSystemNode *Child) {
+    using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
+    auto &Predecessors = Child->Predecessors;
+    auto It = Predecessors.lower_bound(IDBasedKey{ Parent->ID, nullptr });
+    auto End = Predecessors.upper_bound(IDBasedKey{ Parent->ID + 1,
+                                                    nullptr });
+    for (; It != End; ++It)
+      if (isNotPointerEdge(*It))
+        return true;
+    return false;
+  }
+
+  /// Call before adding a non-pointer edge from \p Parent to \p Child (the
+  /// type system adds no edge from a node to itself)
+  void beforeLink(const LayoutTypeSystemNode *Parent,
+                  const LayoutTypeSystemNode *Child) {
+    if (Parent != Child and isPending(Parent) and not isParent(Parent, Child))
+      ++Count[Child];
+  }
+
+  /// Call after removing a non-pointer edge from \p Parent to \p Child
+  void afterUnlink(const LayoutTypeSystemNode *Parent,
+                   LayoutTypeSystemNode *Child) {
+    if (isPending(Parent) and not isParent(Parent, Child))
+      release(Child);
+  }
+
+  /// Call when \p N leaves the graph without being analyzed
+  void erase(const LayoutTypeSystemNode *N) { Count.erase(N); }
+
+  /// Call once \p N has been analyzed
+  void analyzed(LayoutTypeSystemNode *N) {
+    revng_assert(Count.lookup(N) == 0);
+    Count.erase(N);
+    for (LayoutTypeSystemNode *Child : distinctChildren(N))
+      release(Child);
+  }
+
+  /// The nodes whose count dropped to 0 since the last call
+  llvm::SmallVector<LayoutTypeSystemNode *> takeReady() {
+    llvm::SmallVector<LayoutTypeSystemNode *> Result;
+    for (LayoutTypeSystemNode *N : Released)
+      if (isPending(N) and Count.lookup(N) == 0)
+        Result.push_back(N);
+    Released.clear();
+    return Result;
+  }
+
+private:
+  void release(LayoutTypeSystemNode *N) {
+    auto It = Count.find(N);
+    revng_assert(It != Count.end() and It->second > 0);
+    if (--It->second == 0)
+      Released.push_back(N);
+  }
+};
+
 static llvm::SmallPtrSet<LayoutTypeSystemNode *, 8>
-absorbVolatileChildren(LayoutTypeSystem &TS, LayoutTypeSystemNode *Parent) {
+absorbVolatileChildren(LayoutTypeSystem &TS,
+                       LayoutTypeSystemNode *Parent,
+                       PendingParents *Pending = nullptr) {
   revng_log(Log, "absorbVolatileChildren of: " << Parent->ID);
   LoggerIndent Indent{ Log };
 
@@ -432,13 +532,22 @@ absorbVolatileChildren(LayoutTypeSystem &TS, LayoutTypeSystemNode *Parent) {
     // Remove all volatile nodes
     for (LayoutTypeSystemNode *Volatile : VolatileChildren) {
       Absorbed.insert(Volatile);
+      auto GrandChildren = PendingParents::distinctChildren(Volatile);
       TS.dropOutgoingEdges(Volatile);
+      if (Pending)
+        for (LayoutTypeSystemNode *GrandChild : GrandChildren)
+          Pending->afterUnlink(Volatile, GrandChild);
       revng_log(Log, "Merge volatile child: " << Volatile->ID);
       TS.mergeNodes({ Parent, Volatile });
+      if (Pending)
+        Pending->erase(Volatile);
     }
 
-    for (auto &[OffsetExpr, Target] : CompoundEdges.takeVector())
+    for (auto &[OffsetExpr, Target] : CompoundEdges.takeVector()) {
+      if (Pending)
+        Pending->beforeLink(Parent, Target);
       TS.addInstanceLink(Parent, Target, std::move(OffsetExpr));
+    }
   }
   return Absorbed;
 }
@@ -539,19 +648,14 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
 
   absorbVolatileChildren(TS);
 
-  // This dla::Step will heavily mutate the graph while iterating on it.
-  // Despite thinking hard about it, we couldn't come up with a sane visit order
-  // that could be pre-computed and guaranteed to be stable during the mutation,
-  // or could be updated cheaply.
-  // So we precompute some kind of global topological ordering, and use it as a
-  // hard-coded ordering for analysis throughout the dla::Step.
-  // Then we go fixed-point until we don't have anything left to recompute, but
-  // we always follow this order because it's still better than iterating
-  // randomly, or with some other ordering that is not stable.
+  // Analyze each node once, after all the nodes that have an instance edge to
+  // it. Analyzing a node only adds or removes edges between it and the nodes
+  // it reaches, so once every parent of a node has been analyzed its edges
+  // stop changing, and analyzing it then arranges all of them at once. The
+  // ready nodes are taken in reverse post order of the graph as it is when the
+  // step starts, which is a topological order of that graph.
 
-  // Add a fake root to be able to compute a RPOT from that. What's important
-  // here is not that it's strictly a RPOT, but that it is a topological
-  // traversal.
+  // Add a fake root to be able to compute a RPOT from that.
   auto *FakeRoot = TS.createArtificialLayoutType();
   for (LayoutTypeSystemNode *Root : llvm::nodes(&TS)) {
     revng_assert(Root != nullptr);
@@ -561,32 +665,35 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
     TS.addInstanceLink(FakeRoot, Root, OffsetExpression{});
   }
 
-  // Compute the RPOT
-  auto Queue = llvm::ReversePostOrderTraversal(NonPointerFilterT(FakeRoot));
-
-  // Compute the node to analyze.
-  std::set<const LayoutTypeSystemNode *> ToAnalyze;
-  for (const auto *Node : Queue)
-    ToAnalyze.insert(Node);
+  // Number the nodes in RPOT
+  llvm::DenseMap<const LayoutTypeSystemNode *, unsigned> Position;
+  for (LayoutTypeSystemNode *Node :
+       llvm::ReversePostOrderTraversal(NonPointerFilterT(FakeRoot)))
+    Position.insert({ Node, Position.size() });
 
   // The fake root is never to analyze and can already be removed.
-  ToAnalyze.erase(FakeRoot);
+  Position.erase(FakeRoot);
   TS.removeNode(FakeRoot);
+  revng_assert(Position.size() == TS.getNumLayouts());
 
-  while (not ToAnalyze.empty()) {
+  PendingParents Pending(TS);
+  using ReadyEntry = std::pair<unsigned, LayoutTypeSystemNode *>;
+  std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, std::greater<>>
+    Ready;
+  for (LayoutTypeSystemNode *Node : llvm::nodes(&TS))
+    if (Pending.count(Node) == 0)
+      Ready.push({ Position.lookup(Node), Node });
 
-    for (LayoutTypeSystemNode *Parent : Queue) {
+  while (not Ready.empty()) {
+    LayoutTypeSystemNode *Parent = Ready.top().second;
+    Ready.pop();
 
-      // Erase Parent from ToAnalyze
-      bool AlreadyAnalyzed = not ToAnalyze.erase(Parent);
+    // A node absorbed into its parent leaves the graph unanalyzed
+    if (not Pending.isPending(Parent))
+      continue;
 
-      // If erasure failed, Parent wasn't in ToAnalyze, so it was already
-      // analyzed in a previous iteration, and we can skip it.
-      if (AlreadyAnalyzed)
-        continue;
-
+    {
       revng_log(Log, "Analyzing parent: " << Parent->ID);
-      revng_assert(Parent != FakeRoot);
       LoggerIndent Indent{ Log };
 
       // If we reach this point we have to analyze Parent, to see if some of its
@@ -602,9 +709,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // For instance if we had A->B, A->C, B->C, and C was pushed down B, then
       // C becomes volatile inside B.
       {
-        auto Absorbed = absorbVolatileChildren(TS, Parent);
-        for (auto *A : Absorbed)
-          ToAnalyze.erase(A);
+        absorbVolatileChildren(TS, Parent, &Pending);
       }
 
       // What is pushed through an edge E, in the order it arrives: single
@@ -824,7 +929,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
             continue;
 
           auto *ToPushThrough = EdgeToPushThrough->first;
-          ToAnalyze.insert(ToPushThrough);
+          revng_assert(Pending.isPending(ToPushThrough));
 
           for (NeighborIterator PushedEdgeIt : EdgesToPush) {
             auto *ToPushDown = PushedEdgeIt->first;
@@ -865,6 +970,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
             EdgesToErase.insert(PushedEdgeIt);
 
             revng_assert(not isLeaf(ToPushThrough));
+            Pending.beforeLink(ToPushThrough, ToPushDown);
             TS.addInstanceLink(ToPushThrough, ToPushDown, std::move(FinalOE));
           }
         }
@@ -878,13 +984,20 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           revng_log(Log,
                     "erase: " << Parent->ID << " -> " << ToErase->first->ID
                               << " label: " << ToErase->second);
+          LayoutTypeSystemNode *Child = ToErase->first;
           TS.eraseEdge(Parent, ToErase);
+          Pending.afterUnlink(Parent, Child);
         }
       }
 
       Changed |= not EdgesToErase.empty();
     }
+
+    Pending.analyzed(Parent);
+    for (LayoutTypeSystemNode *Node : Pending.takeReady())
+      Ready.push({ Position.lookup(Node), Node });
   }
+  revng_assert(Pending.empty());
 
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
