@@ -81,9 +81,10 @@ PromoteGlobalToLocalPass::run(llvm::Function &F,
     CSVMap[CSV] = Alloca;
   }
 
-  // Load all the CSVs and store their value onto the local variables.
-  for (const auto &[CSV, Alloca] : CSVMap)
-    Builder.CreateStore(Builder.createLoad(CSV), Alloca);
+  // Load all the CSVs and store their value onto the local variables, in the
+  // order of their names: the map's order is the order of their addresses.
+  for (GlobalVariable *CSV : toSortedByName(llvm::make_first_range(CSVMap)))
+    Builder.CreateStore(Builder.createLoad(CSV), CSVMap.at(CSV));
 
   return PreservedAnalyses::none();
 }
