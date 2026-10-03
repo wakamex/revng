@@ -177,7 +177,13 @@ file(RELATIVE_PATH RELATIVE_LLVM_TOOLS_BINARY_DIR "${CMAKE_INSTALL_PREFIX}"
      "${LLVM_TOOLS_BINARY_DIR}")
 file(APPEND "${ADDITIONAL_BIN_PATHS}" "${RELATIVE_LLVM_TOOLS_BINARY_DIR}\n")
 
-# Build the support module for each architecture and in several configurations
+# Build the support module for each architecture and in several configurations.
+# Their debug information ends up in every lifted module: name the source and
+# build directories by fixed names, so that it does not depend on where rev.ng
+# was built.
+set(SUPPORT_MODULES_PATH_MAP
+    "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=/revng-source"
+    "-ffile-prefix-map=${CMAKE_BINARY_DIR}=/revng-build")
 set(SUPPORT_MODULES_CONFIGS "normal;trace")
 set(SUPPORT_MODULES_CONFIG_normal "")
 set(SUPPORT_MODULES_CONFIG_trace "-DTRACE")
@@ -202,7 +208,8 @@ foreach(
     COMMAND
       ${TARGET_CLANG} ARGS "${CMAKE_SOURCE_DIR}/share/revng/early-linked.c" -o
       "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}" -S -emit-llvm -g
-      -DTARGET_${ARCH} -I"${CMAKE_SOURCE_DIR}/share/revng"
+      ${SUPPORT_MODULES_PATH_MAP} -DTARGET_${ARCH}
+      -I"${CMAKE_SOURCE_DIR}/share/revng"
       -I"${CMAKE_CURRENT_SOURCE_DIR}/include")
   add_custom_target("early-linked-module-${OUTPUT}" ALL
                     DEPENDS "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}")
@@ -218,7 +225,8 @@ foreach(
       COMMAND
         ${TARGET_CLANG} ARGS "${CMAKE_SOURCE_DIR}/share/revng/support.c" -O2
         -fexceptions -o "${CMAKE_BINARY_DIR}/share/revng/${OUTPUT}" -S
-        -emit-llvm -g -DTARGET_${ARCH} -I"${CMAKE_SOURCE_DIR}/share/revng"
+        -emit-llvm -g ${SUPPORT_MODULES_PATH_MAP} -DTARGET_${ARCH}
+        -I"${CMAKE_SOURCE_DIR}/share/revng"
         -I"${CMAKE_CURRENT_SOURCE_DIR}/include"
         ${SUPPORT_MODULES_CONFIG_${CONFIG}})
     add_custom_target("support-module-${OUTPUT}" ALL

@@ -431,6 +431,7 @@ set(FILECHECK_TESTS
     clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-then.mlir
     lift/cpu-state-initializers-layout.S
+    lift/no-build-paths.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll
