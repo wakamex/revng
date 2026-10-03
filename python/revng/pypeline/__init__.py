@@ -13,11 +13,26 @@ try:
 except ImportError:
     SOURCE_ID = ""
 
-# The version that guards cached objects: storage providers discard every object
-# stored under a different cache version. SOURCE_ID identifies the source the
-# build was made from, so builds of the same source share caches; without it,
-# fall back to the package version, which changes with every configuration.
-cache_version = SOURCE_ID or __version__
+# A distribution that ships rev.ng with its own copies of the libraries and
+# resources it depends on can identify them in _runtime_id.py.
+try:
+    from ._runtime_id import RUNTIME_ID
+except ImportError:
+    RUNTIME_ID = ""
+
+
+def combine_cache_version(source_id: str, runtime_id: str, version: str) -> str:
+    """
+    The version that guards cached objects: storage providers discard every
+    object stored under a different cache version. The source identity makes
+    builds of the same source share caches; without it, the package version,
+    which changes with every configuration, takes its place. The runtime
+    identity, when present, adds the dependencies the source does not determine.
+    """
+    return "+".join(part for part in (source_id or version, runtime_id) if part)
+
+
+cache_version = combine_cache_version(SOURCE_ID, RUNTIME_ID, __version__)
 
 from .analysis import Analysis
 from .compression import Compression

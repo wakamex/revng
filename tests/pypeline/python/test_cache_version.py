@@ -81,7 +81,21 @@ def test_source_id(tmp_path: Path):
 
 def test_source_id_without_git(tmp_path: Path):
     assert write_source_id(tmp_path, tmp_path) == ""
-    assert revng.pypeline.cache_version == (revng.pypeline.SOURCE_ID or revng.pypeline.__version__)
+    assert revng.pypeline.cache_version == revng.pypeline.combine_cache_version(
+        revng.pypeline.SOURCE_ID, revng.pypeline.RUNTIME_ID, revng.pypeline.__version__
+    )
+
+
+def test_combine_cache_version():
+    combine = revng.pypeline.combine_cache_version
+    assert combine("git-tree-1", "", "0.1.5") == "git-tree-1"
+    assert combine("", "", "0.1.5") == "0.1.5"
+    assert combine("git-tree-1", "runtime-2", "0.1.5") == "git-tree-1+runtime-2"
+    assert combine("", "runtime-2", "0.1.5") == "0.1.5+runtime-2"
+    # A runtime identity separates runtimes built from the same source
+    assert combine("git-tree-1", "runtime-2", "0.1.5") != combine(
+        "git-tree-1", "runtime-3", "0.1.5"
+    )
 
 
 def open_with_cache_version(monkeypatch, tmp_path: Path, cache_version: str):
@@ -108,6 +122,8 @@ def store_root(provider: LocalStorageProvider):
         ("git-tree-3333", False),
         # A build without git metadata falls back to the package version
         ("0.1.1759500000", False),
+        # The same source with other dependencies
+        ("git-tree-1111+runtime-4444", False),
     ],
 )
 def test_cache_version_prunes(monkeypatch, tmp_path: Path, second: str, kept: bool):
