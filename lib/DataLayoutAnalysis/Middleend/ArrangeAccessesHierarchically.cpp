@@ -90,9 +90,14 @@ static bool isFixedChild(const LayoutTypeSystemNode *Parent,
   // If there's a strided edge going to Child, then Child is fixed.
   // If Child has another Parent that is different from Parent, then it's
   // fixed
-  if (Child->NonScalar or isLeaf(Child) or hasPointerChild(Child)
-      or hasPointerParent(Child) or hasStridedParent(Child)
-      or hasAnotherParent(Child, Parent)) {
+  //
+  // hasAnotherParent comes before the other edge checks, which visit every
+  // outgoing or incoming edge of Child when it has no pointer or strided
+  // edge: a child shared by many parents is fixed for each of them, and
+  // usually its first incoming edge shows it.
+  if (Child->NonScalar or isLeaf(Child) or hasAnotherParent(Child, Parent)
+      or hasPointerChild(Child) or hasPointerParent(Child)
+      or hasStridedParent(Child)) {
     return true;
   }
 
