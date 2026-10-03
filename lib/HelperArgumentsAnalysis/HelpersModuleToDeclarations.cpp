@@ -2,6 +2,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <vector>
+
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 
@@ -41,11 +43,12 @@ public:
     }
 
     // Assume the module M already contains the functions.
-    // Collect all functions whose name starts with "helper_" to prevent DCE
-    llvm::DenseSet<Function *> Helpers;
+    // Collect all functions whose name starts with "helper_" to prevent DCE,
+    // in module order
+    std::vector<Function *> Helpers;
     for (Function &F : M)
       if (isHelper(F))
-        Helpers.insert(&F);
+        Helpers.push_back(&F);
 
     PointerType *PointerType = PointerType::get(M.getContext(), 0);
 

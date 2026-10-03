@@ -438,6 +438,7 @@ set(FILECHECK_TESTS
     llvm-passes/exit-ssa.ll
     llvm-passes/extractvalue-to-gep.ll
     llvm-passes/generic-region-info.ll
+    llvm-passes/helpers-list-order.ll
     llvm-passes/inline-divergent-scopes-and-materialize-trivial-goto.ll
     llvm-passes/inline-divergent-scopes.ll
     llvm-passes/inline-helpers.ll
