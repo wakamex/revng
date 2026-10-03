@@ -261,6 +261,8 @@ const UnwindFunctionRanges::Sweep &UnwindFunctionRanges::sweep(unsigned Index) {
 }
 
 bool UnwindFunctionRanges::isInstructionInterior(MetaAddress Address) {
+  if (Address.type() != CodeType)
+    return false;
   if (auto Index = find(Address.address()))
     return not isInstructionStart(*Index, Address.address());
   return false;
