@@ -7,6 +7,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <map>
@@ -22,11 +23,13 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/iterator_range.h"
+#include "llvm/Support/TypeName.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "revng/ADT/Concepts.h"
 #include "revng/ADT/GenericGraph.h"
 #include "revng/ADT/ReversePostOrderTraversal.h"
+#include "revng/Support/ConvergenceMonitor.h"
 
 namespace mfp {
 
@@ -221,6 +224,28 @@ concept HasNodeRange = requires() {
 template<typename Label, typename LatticeElement>
 using ResultMap = std::map<Label, MFPResult<LatticeElement>>;
 
+/// Report a solve of \p MFIType that does not converge at the label with
+/// reverse post-order index \p Index.
+template<typename MFIType, typename Label>
+void reportNonConvergence(llvm::StringRef Reason,
+                          size_t Index,
+                          const Label &Node,
+                          uint64_t Visits,
+                          uint64_t TotalVisits) {
+  std::string Name;
+  llvm::raw_string_ostream Stream(Name);
+  Stream << "label " << Index << " ";
+  dumpLabel(Stream, Node);
+  revng::NonConvergence Failure;
+  Failure.Loop = (llvm::Twine("monotone framework ")
+                  + llvm::getTypeName<MFIType>())
+                   .str();
+  Failure.Reason = Reason.str();
+  Failure.Visits = TotalVisits;
+  Failure.Items.push_back({ .Name = Stream.str(), .Visits = Visits });
+  revng::reportNonConvergence(Failure);
+}
+
 template<MonotoneFrameworkInstance MFI>
 using MFIResultMap = ResultMap<typename MFI::Label,
                                typename MFI::LatticeElement>;
@@ -384,12 +409,29 @@ getMaximalFixedPointImpl(MFPConfiguration<MFIType> &Configuration) {
   revng_log(Logger, "Starting the iterations");
   LoggerIndent Indent(Logger);
 
+  // Visits of each label, by priority. A label visited far more often than
+  // the lattice's height allows means a transfer function or comparison that
+  // is not monotone, and a solve that may not terminate.
+  const uint64_t VisitBound = revng::mfpVisitBound();
+  std::vector<uint32_t> Visits(VisitBound != 0 ? LabelPriority.size() : 0, 0);
+  unsigned Inconsistencies = 0;
+
   unsigned IterationIndex = 0;
   while (not Worklist.empty()) {
     // Fetch the next label from the worklist
     WorklistItem First = *Worklist.begin();
     Label Start = First.Item;
     Worklist.erase(First);
+
+    if (VisitBound != 0 and ++Visits[First.Priority] > VisitBound) {
+      reportNonConvergence<MFIType>("visit bound",
+                                    First.Priority,
+                                    Start,
+                                    Visits[First.Priority],
+                                    IterationIndex + 1);
+      // A warning goes on with the rest of the solve
+      Visits[First.Priority] = 0;
+    }
 
     auto &LabelAnalysis = AnalysisResult.at(Start);
 
@@ -459,6 +501,24 @@ getMaximalFixedPointImpl(MFPConfiguration<MFIType> &Configuration) {
                                      .combineValues(SuccessorResults.InValue,
                                                     LabelAnalysis.OutValue);
 
+        // After many visits, check that the combined value covers the
+        // incoming one: if the comparison disagrees with the combination,
+        // the successor is re-enqueued forever.
+        size_t SuccessorPriority = LabelPriority.at(Successor);
+        if (VisitBound != 0
+            and Visits[SuccessorPriority] >= revng::MFPConsistencyCheckAfter
+            and not Instance.isLessOrEqual(LabelAnalysis.OutValue,
+                                           SuccessorResults.InValue)
+            and ++Inconsistencies == revng::MFPInconsistencyLimit) {
+          reportNonConvergence<MFIType>("oscillation: the combined value does "
+                                        "not cover the value it combined, by "
+                                        "the instance's own comparison",
+                                        SuccessorPriority,
+                                        Successor,
+                                        Visits[SuccessorPriority],
+                                        IterationIndex + 1);
+        }
+
         if (Logger.isEnabled()) {
           Logger << "Enqueuing. New initial value:\n";
           mfp::dump(*Logger.getAsLLVMStream(), 1, SuccessorResults.InValue);
@@ -473,6 +533,20 @@ getMaximalFixedPointImpl(MFPConfiguration<MFIType> &Configuration) {
     }
 
     ++IterationIndex;
+  }
+
+  // Record solves that came anywhere near the bound in the trace
+  if (VisitBound != 0) {
+    auto Max = std::max_element(Visits.begin(), Visits.end());
+    if (Max != Visits.end() and *Max >= revng::MFPConsistencyCheckAfter) {
+      revng::emitTraceEvent((llvm::Twine("Convergence progress: monotone "
+                                         "framework ")
+                             + llvm::getTypeName<MFIType>() + ": visits "
+                             + llvm::Twine(IterationIndex) + ", items "
+                             + llvm::Twine(Visits.size()) + ", max visits "
+                             + llvm::Twine(*Max))
+                              .str());
+    }
   }
 
   return AnalysisResult;

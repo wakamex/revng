@@ -4,9 +4,15 @@
 
 #define BOOST_TEST_MODULE MFPExtraState
 bool init_unit_test();
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
+
+extern "C" {
+#include <sys/wait.h>
+#include <unistd.h>
+}
 
 #include "boost/test/unit_test.hpp"
 
@@ -15,6 +21,7 @@ bool init_unit_test();
 #include "revng/ADT/GenericGraph.h"
 #include "revng/MFP/MFP.h"
 #include "revng/MFP/SetLattices.h"
+#include "revng/Support/ConvergenceMonitor.h"
 
 // Each node has a name and an ordered list of integer "operations" that the
 // transfer function adds to a `std::set<int>` lattice. The `ExtraState`
@@ -204,4 +211,153 @@ BOOST_AUTO_TEST_CASE(ExtraStateRecordingOnDiamond) {
   BOOST_TEST(S.getBefore(EntryOp0) == IntSet{});
   BOOST_TEST(S.getAfter(LeftOp0) == IntSet({ 1, 2 }));
   BOOST_TEST(S.getBefore(TailOp0) == IntSet({ 1, 2, 3 }));
+}
+
+// A gen/kill analysis over registers whose sets are ordered by name, while the
+// buggy comparison runs std::includes by address, as
+// FunctionSummary::containedOrEqual did. A strict subset whose missing
+// register sorts between two present ones then compares as not included, so
+// the solver re-enqueues a successor whose value the combination did not
+// change, forever. The solver must report that instead of looping.
+
+namespace {
+
+struct Register {
+  const char *Name;
+};
+
+struct ByName {
+  bool operator()(const Register *A, const Register *B) const {
+    return std::strcmp(A->Name, B->Name) < 0;
+  }
+};
+
+using RegisterSet = std::set<const Register *, ByName>;
+
+// Array order is address order, so the names sort opposite to the addresses
+Register Registers[] = { { "x" }, { "n" }, { "m" }, { "b" }, { "a" } };
+const Register *X = &Registers[0];
+const Register *N = &Registers[1];
+const Register *M = &Registers[2];
+const Register *B = &Registers[3];
+const Register *A = &Registers[4];
+
+struct GenKill {
+  RegisterSet Gen;
+  RegisterSet Kill;
+};
+
+using GenKillNode = ForwardNode<GenKill>;
+using GenKillGraph = GenericGraph<GenKillNode>;
+
+struct GenKillMFI {
+  using Label = GenKillNode *;
+  using GraphType = GenKillGraph *;
+  using LatticeElement = RegisterSet;
+
+  bool CompareByAddress = false;
+
+  LatticeElement combineValues(const LatticeElement &Left,
+                               const LatticeElement &Right) const {
+    LatticeElement Result = Left;
+    Result.insert(Right.begin(), Right.end());
+    return Result;
+  }
+
+  bool isLessOrEqual(const LatticeElement &Left,
+                     const LatticeElement &Right) const {
+    if (CompareByAddress)
+      return std::includes(Right.begin(), Right.end(), Left.begin(), Left.end());
+    return std::includes(Right.begin(),
+                         Right.end(),
+                         Left.begin(),
+                         Left.end(),
+                         ByName());
+  }
+
+  LatticeElement applyTransferFunction(Label Node,
+                                       const LatticeElement &In,
+                                       mfp::NoExtraState &) const {
+    LatticeElement Out;
+    for (const Register *R : In)
+      if (not Node->Kill.contains(R))
+        Out.insert(R);
+    Out.insert(Node->Gen.begin(), Node->Gen.end());
+    return Out;
+  }
+};
+
+static_assert(mfp::MonotoneFrameworkInstance<GenKillMFI>);
+
+/// Solve on Entry -> {L, R}, L <-> R, where each side kills a register the
+/// other's incoming value keeps between two others.
+mfp::MFIResultMap<GenKillMFI> solveGenKill(bool CompareByAddress) {
+  GenKillGraph Graph;
+  auto *Entry = Graph.addNode(GenKill{ { M, N, X }, {} });
+  auto *L = Graph.addNode(GenKill{ { A }, { B, M } });
+  auto *R = Graph.addNode(GenKill{ { B }, { A, N } });
+  Graph.setEntryNode(Entry);
+  Entry->addSuccessor(L);
+  Entry->addSuccessor(R);
+  L->addSuccessor(R);
+  R->addSuccessor(L);
+
+  GenKillMFI MFI{ .CompareByAddress = CompareByAddress };
+  RegisterSet Bottom;
+  RegisterSet ExtremalValue;
+  std::vector<GenKillNode *> ExtremalLabels{ Entry };
+  mfp::MFPConfiguration<GenKillMFI> Configuration{
+    .Instance = &MFI,
+    .Flow = &Graph,
+    .Bottom = &Bottom,
+    .ExtremalValue = &ExtremalValue,
+    .ExtremalLabels = &ExtremalLabels,
+  };
+  return mfp::getMaximalFixedPoint<GenKillMFI>(Configuration);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(ConsistentComparisonConverges) {
+  std::vector<revng::NonConvergence> Reports;
+  auto Previous = revng::setNonConvergenceHandler(
+    [&Reports](const revng::NonConvergence &Failure) {
+      Reports.push_back(Failure);
+    });
+  auto Result = solveGenKill(false);
+  revng::setNonConvergenceHandler(Previous);
+  BOOST_TEST(Result.size() == 3u);
+  BOOST_TEST(Reports.empty());
+}
+
+BOOST_AUTO_TEST_CASE(InconsistentComparisonFailsTheSolve) {
+  // Without the check the solve never ends, so it runs in a child process
+  // with the default handler, which stops it with the diagnostic
+  int Pipe[2];
+  BOOST_REQUIRE(pipe(Pipe) == 0);
+  pid_t Child = fork();
+  BOOST_REQUIRE(Child >= 0);
+  if (Child == 0) {
+    dup2(Pipe[1], 2);
+    close(Pipe[0]);
+    alarm(60);
+    solveGenKill(true);
+    _exit(0);
+  }
+  close(Pipe[1]);
+  std::string Output;
+  char Buffer[4096];
+  ssize_t Read = 0;
+  while ((Read = read(Pipe[0], Buffer, sizeof(Buffer))) > 0)
+    Output.append(Buffer, Read);
+  close(Pipe[0]);
+  int Status = 0;
+  waitpid(Child, &Status, 0);
+
+  BOOST_TEST(WIFEXITED(Status));
+  BOOST_TEST(WEXITSTATUS(Status) == 1);
+  BOOST_TEST(Output.find("[convergence] error: monotone framework")
+             != std::string::npos);
+  BOOST_TEST(Output.find("GenKillMFI") != std::string::npos);
+  BOOST_TEST(Output.find("oscillation") != std::string::npos);
 }

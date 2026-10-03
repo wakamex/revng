@@ -54,6 +54,17 @@ void reportNonConvergence(const NonConvergence &Failure);
 /// Whether -convergence-check enables detection at all.
 bool convergenceChecksEnabled();
 
+/// Visits of one label after which a monotone framework solve is reported as
+/// not converging; 0 when checks are disabled.
+uint64_t mfpVisitBound();
+
+/// Visits of one label after which a monotone framework solve also checks
+/// that each combined value covers the value it combined.
+inline constexpr uint32_t MFPConsistencyCheckAfter = 256;
+
+/// Inconsistent combinations after which a solve is reported.
+inline constexpr unsigned MFPInconsistencyLimit = 3;
+
 /// Emit a zero-length task named \p Name in the trace, so that readers
 /// following the trace see it at the position it happened.
 void emitTraceEvent(llvm::StringRef Name);

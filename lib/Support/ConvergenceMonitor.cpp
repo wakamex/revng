@@ -63,6 +63,12 @@ static cl::opt<uint64_t> ConvergenceVisitBound("convergence-visit-bound",
                                                         "reported"),
                                                cl::init(1000));
 
+static cl::opt<uint64_t> MFPVisitBound("mfp-visit-bound",
+                                       cl::desc("Visits of one label after "
+                                                "which a monotone framework "
+                                                "solve is reported"),
+                                       cl::init(1000000));
+
 /// Trace event names are written into JSON without escaping.
 static std::string sanitize(StringRef Text) {
   std::string Result;
@@ -148,6 +154,10 @@ void reportNonConvergence(const NonConvergence &Failure) {
 
 bool convergenceChecksEnabled() {
   return ConvergenceCheck != Policy::Off;
+}
+
+uint64_t mfpVisitBound() {
+  return convergenceChecksEnabled() ? MFPVisitBound.getValue() : 0;
 }
 
 ConvergenceMonitor::ConvergenceMonitor(StringRef Loop) :
