@@ -9,6 +9,7 @@
 #include <sstream>
 #include <type_traits>
 
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator_range.h"
@@ -1431,7 +1432,9 @@ void pruneDICompileUnits(llvm::Module &M);
 /// address.
 bool stripDeadDebugInfoInOrder(llvm::Module &M);
 
-llvm::SmallSet<llvm::Value *, 2> findPhiTreeLeaves(llvm::Value *Root);
+/// The values that reach \p Root through a tree of PHIs, each once, in the
+/// order of the PHIs' operands.
+llvm::SmallSetVector<llvm::Value *, 2> findPhiTreeLeaves(llvm::Value *Root);
 
 namespace revng {
 

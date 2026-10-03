@@ -1970,12 +1970,12 @@ SegregateFunctionStack::handleCallSite(llvm::CallInst *SSACSCall,
     // We're returning an aggregate, but not via SPTAR, we're using one or
     // more registers
     if (OldReturnType->isStructTy()) {
-      SmallVector<SmallPtrSet<CallInst *, 2>, 2>
+      SmallVector<SmallSetVector<CallInst *, 2>, 2>
         ExtractedValues = getExtractedValuesFromInstruction(OldCall);
       for (auto &Group : llvm::enumerate(ExtractedValues)) {
 
         unsigned FieldIndex = Group.index();
-        SmallPtrSet<CallInst *, 2> &ExtractedAtIndex = Group.value();
+        SmallSetVector<CallInst *, 2> &ExtractedAtIndex = Group.value();
         if (ExtractedAtIndex.empty())
           continue;
 
@@ -2015,12 +2015,12 @@ SegregateFunctionStack::handleCallSite(llvm::CallInst *SSACSCall,
     } else if (OldReturnType->isStructTy() and NewReturnType->isIntegerTy()) {
       // We're returning a large integer value through multiple values (e.g.,
       // returning a 64-bit integer through two registers in i386)
-      SmallVector<SmallPtrSet<CallInst *, 2>, 2>
+      SmallVector<SmallSetVector<CallInst *, 2>, 2>
         ExtractedValues = getExtractedValuesFromInstruction(OldCall);
       for (auto &Group : llvm::enumerate(ExtractedValues)) {
 
         unsigned FieldIndex = Group.index();
-        SmallPtrSet<CallInst *, 2> &ExtractedAtIndex = Group.value();
+        SmallSetVector<CallInst *, 2> &ExtractedAtIndex = Group.value();
         if (ExtractedAtIndex.empty())
           continue;
 

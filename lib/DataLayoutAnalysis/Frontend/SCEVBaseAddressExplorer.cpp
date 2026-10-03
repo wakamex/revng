@@ -31,11 +31,11 @@ static bool isAlwaysAddress(const llvm::SCEV *S) {
   return false;
 }
 
-std::set<const llvm::SCEV *>
+llvm::SmallSetVector<const llvm::SCEV *, 4>
 SCEVBaseAddressExplorer::findBases(llvm::ScalarEvolution *SE,
                                    const llvm::SCEV *Root,
                                    const SCEVTypeMap &M) {
-  std::set<const llvm::SCEV *> Result;
+  llvm::SmallSetVector<const llvm::SCEV *, 4> Result;
   Worklist.clear();
   Worklist.push_back(Root);
 

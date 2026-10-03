@@ -4,6 +4,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/ADT/SetVector.h"
+
 #include "revng/Support/FunctionCallMarker.h"
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/IRHelperRegistry.h"
@@ -220,10 +222,13 @@ inline bool isFallthrough(llvm::BasicBlock *BB) {
   return isFallthrough(BB->getTerminator());
 }
 
-llvm::SmallVector<llvm::SmallPtrSet<llvm::CallInst *, 2>, 2>
+/// For each field of the struct \p I returns, the calls to OpaqueExtractValue
+/// that extract it, through PHIs, each once, in the order of the users of \p I
+/// and of the PHIs.
+llvm::SmallVector<llvm::SmallSetVector<llvm::CallInst *, 2>, 2>
 getExtractedValuesFromInstruction(llvm::Instruction *);
 
-llvm::SmallVector<llvm::SmallPtrSet<const llvm::CallInst *, 2>, 2>
+llvm::SmallVector<llvm::SmallSetVector<const llvm::CallInst *, 2>, 2>
 getExtractedValuesFromInstruction(const llvm::Instruction *);
 
 /// Set the key of a model::Segment stored as a metadata.
