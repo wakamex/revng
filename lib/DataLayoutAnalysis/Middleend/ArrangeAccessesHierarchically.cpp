@@ -3,10 +3,12 @@
 //
 
 #include <algorithm>
+#include <deque>
 #include <iterator>
 #include <unordered_map>
 #include <utility>
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -525,13 +527,57 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           ToAnalyze.erase(A);
       }
 
-      // Represents an edge iterator pointing to an instance edge, along with an
-      // OffsetExpression that is not the one currently attached to the instance
-      // edge, but that it is used to move the edge around.
-      struct EdgeWithOffset {
-        NeighborIterator Edge;
-        OffsetExpression FinalOE;
+      // What is pushed through an edge E, in the order it arrives: single
+      // edges, and everything pushed through another edge A before A itself
+      // was pushed through E. Every edge that ends up pushed through E gets
+      // the offset computeOffsetAfterPush gives for the two edges, and pushing
+      // an edge a second time would change nothing: the edge it adds is
+      // already there, or was skipped because it would close a loop, which it
+      // still would since edges are only added meanwhile. So, instead of
+      // copying what was pushed through A into each edge containing A, which
+      // costs the depth of the hierarchy times the size of the lists, each
+      // list refers to the lists it includes, and is expanded once, keeping
+      // the first occurrence of each edge, when it is applied.
+      struct PushedThrough {
+        struct Event {
+          // Pushed edge, when Included is null
+          NeighborIterator Edge;
+          // Everything pushed through another edge, when not null
+          const PushedThrough *Included = nullptr;
+        };
+        llvm::SmallVector<Event> Events;
+
+        // The pushed edges, each once, in the order they first arrived
+        llvm::SmallVector<NeighborIterator> expand() const {
+          llvm::SmallVector<NeighborIterator> Result;
+          llvm::DenseSet<const LayoutTypeSystemNode::Link *> Seen;
+          llvm::DenseSet<const PushedThrough *> Expanded{ this };
+          llvm::SmallVector<std::pair<const PushedThrough *, size_t>> Stack{
+            { this, 0 }
+          };
+          while (not Stack.empty()) {
+            auto [List, Index] = Stack.back();
+            if (Index == List->Events.size()) {
+              Stack.pop_back();
+              continue;
+            }
+            ++Stack.back().second;
+            const Event &Next = List->Events[Index];
+            if (Next.Included != nullptr) {
+              // A list expanded before adds no edge that is not there yet
+              if (Expanded.insert(Next.Included).second)
+                Stack.push_back({ Next.Included, 0 });
+            } else if (Seen.insert(&*Next.Edge).second) {
+              Result.push_back(Next.Edge);
+            }
+          }
+          return Result;
+        }
       };
+
+      // Owns the lists, which outlive their entries in ChildrenHierarchy when
+      // other lists include them
+      std::deque<PushedThrough> Lists;
 
       revng_log(Log, "Initialize ChildrenHierarchy");
       // A map whose key is an edge iterator representing an instance edge, and
@@ -541,8 +587,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // In particular, we only keep in this map the neighbor iterator that are
       // the roots of the hierarchy of instance edges, i.e. the instance edges
       // that cannot be pushed through any other edge.
-      std::map<NeighborIterator, llvm::SmallVector<EdgeWithOffset>>
-        ChildrenHierarchy;
+      std::map<NeighborIterator, PushedThrough *> ChildrenHierarchy;
 
       using GT = llvm::GraphTraits<LayoutTypeSystemNode *>;
 
@@ -554,7 +599,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
            AIt != ChildEnd;
            ++AIt) {
         if (isInstanceEdge(*AIt))
-          ChildrenHierarchy[AIt];
+          ChildrenHierarchy[AIt] = &Lists.emplace_back();
       }
 
       revng_log(Log, "Compare children edges");
@@ -572,15 +617,12 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                                       << " label: " << AEdgeIt->second);
 
         // A vector of instance edges that are contained in AEdgeIt and that
-        // should be pushed through it, along with the new offsets they will
-        // have after the push through.
-        llvm::SmallVector<EdgeWithOffset> ContainedInA;
+        // should be pushed through it.
+        llvm::SmallVector<NeighborIterator> ContainedInA;
 
         // A vector of instance edges that contain AEdgeIt. AEdgeIt will have to
-        // be pushed through all of them. The FinalOE in EdgeWithOffset here
-        // represents the new offset that AEdgeIt will have after being pushed
-        // through them.
-        llvm::SmallVector<EdgeWithOffset> ContainsA;
+        // be pushed through all of them.
+        llvm::SmallVector<NeighborIterator> ContainsA;
 
         for (auto BRootIt = ARootNext; BRootIt != HierarchyEnd; ++BRootIt) {
           LoggerIndent OtherChildIndent{ Log };
@@ -601,24 +643,20 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           if (ToPush == AEdgeIt) {
             revng_assert(Through == BEdgeIt);
             // AEdgeIt can be pushed inside BEdgeIt
-            auto BWithNewAOffset = EdgeWithOffset{ BEdgeIt,
-                                                   std::move(OEAfterPush) };
-            ContainsA.push_back(std::move(BWithNewAOffset));
+            ContainsA.push_back(BEdgeIt);
           } else {
             revng_assert(ToPush == BEdgeIt and Through == AEdgeIt);
             // BEdgeIt can be pushed inside AEdgeIt
-            auto BWithNewBOffset = EdgeWithOffset{ BEdgeIt,
-                                                   std::move(OEAfterPush) };
-            ContainedInA.push_back(std::move(BWithNewBOffset));
+            ContainedInA.push_back(BEdgeIt);
           }
         }
 
         // Now, push all the roots contained in A into A, and remove them from
         // ChildrenHierarchy, since they're not roots anymore.
-        PushedInsideA.reserve(PushedInsideA.size() + ContainedInA.size());
-        PushedInsideA.append(ContainedInA);
-        for (const auto &[PushedInA, Unused] : ContainedInA)
+        for (NeighborIterator PushedInA : ContainedInA) {
           ChildrenHierarchy.erase(PushedInA);
+          PushedInsideA->Events.push_back({ PushedInA });
+        }
 
         // Then, for all the other edges that contain A, A can be pushed through
         // them, along with all the nodes that have already been pushed through
@@ -627,26 +665,13 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // itelf from ChildrenHierarchy, since it's not a root anymore.
         ARootNext = std::next(ARootIt);
         if (not ContainsA.empty()) {
-          for (const auto &[LargerThanA, FinalOE] : ContainsA) {
-
-            // If A needs to be pushed through LargerThanA, and all things that
-            // were previously pushed pushed through A can now be pushed through
-            // LargerThanA.
-            auto &PushedThroughLargerThanA = ChildrenHierarchy.at(LargerThanA);
-            PushedThroughLargerThanA.reserve(PushedThroughLargerThanA.size()
-                                             + PushedInsideA.size() + 1);
-            for (auto &[EdgeToPush, OEAfterPush] : PushedInsideA) {
-              // We have to recompute the offset of EdgeToPush here, after being
-              // pushed through LargerThanA, because this value was never
-              // computed before, given that these two edges have never been
-              // compared before.
-              PushedThroughLargerThanA.push_back(EdgeWithOffset{
-                EdgeToPush, computeOffsetAfterPush(EdgeToPush, LargerThanA) });
-            }
-            // Then also AEdgeIt can be pushed through LargerThanA. The final
-            // offset of AEdgeIt after being pushed through has already been
-            // computed in advance, so we just use that.
-            PushedThroughLargerThanA.push_back({ AEdgeIt, std::move(FinalOE) });
+          for (NeighborIterator LargerThanA : ContainsA) {
+            // A can be pushed through LargerThanA, and so can all the things
+            // that were previously pushed through A.
+            PushedThrough *PushedThroughLargerThanA = ChildrenHierarchy.at(
+              LargerThanA);
+            PushedThroughLargerThanA->Events.push_back({ {}, PushedInsideA });
+            PushedThroughLargerThanA->Events.push_back({ AEdgeIt });
           }
           // Now AEdgeIt is not a root anymore, so we have to erase it and
           // update ARootNext.
@@ -658,7 +683,8 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       {
         revng_log(Log, "Collect EdgesToErase");
         LoggerIndent IndentCollect{ Log };
-        for (auto &[EdgeToPushThrough, EdgesToPush] : ChildrenHierarchy) {
+        for (auto &[EdgeToPushThrough, ToPush] : ChildrenHierarchy) {
+          llvm::SmallVector<NeighborIterator> EdgesToPush = ToPush->expand();
 
           if (EdgesToPush.empty())
             continue;
@@ -666,8 +692,10 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           auto *ToPushThrough = EdgeToPushThrough->first;
           ToAnalyze.insert(ToPushThrough);
 
-          for (auto &[PushedEdgeIt, FinalOE] : EdgesToPush) {
+          for (NeighborIterator PushedEdgeIt : EdgesToPush) {
             auto *ToPushDown = PushedEdgeIt->first;
+            OffsetExpression FinalOE = computeOffsetAfterPush(PushedEdgeIt,
+                                                              EdgeToPushThrough);
 
             // We already checked that we don't close an instance loop, but we
             // did it on the graph before any push happened, and edges were only
