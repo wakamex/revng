@@ -96,8 +96,7 @@ static bool updateArgumentTypes(model::Binary &Model,
       // The stack argument on llvm IR is the last argument
       const llvm::Value *LLVMStackArg = toLLVMValue(*std::prev(LLVMArgs.end()));
 
-      revng_log(Log,
-                "Updating stack arg " << LLVMStackArg->getNameOrAsOperand());
+      revng_log(Log, "Updating stack arg " << getName(LLVMStackArg));
       LayoutTypePtr Key{ LLVMStackArg, LayoutTypePtr::FieldNumNone };
 
       if (auto NewTypeIt = DLATypes.find(Key); NewTypeIt != DLATypes.end()) {
@@ -144,7 +143,7 @@ static bool updateArgumentTypes(model::Binary &Model,
     revng_assert(ModelArg.Type()->isScalar());
 
     const llvm::Value *LLVMVal = toLLVMValue(LLVMArg);
-    revng_log(Log, "Updating argument " << LLVMVal->getNameOrAsOperand());
+    revng_log(Log, "Updating argument " << getName(LLVMVal));
 
     // Don't update if the type is already fine-grained or if the DLA has
     // nothing to say.
@@ -200,9 +199,7 @@ static bool updateReturnType(model::Binary &Model,
 
     unsigned int Index = IsScalar ? LayoutTypePtr::FieldNumNone :
                                     ModelRet.index();
-    revng_log(Log,
-              "Updating elem " << Index << " of "
-                               << LLVMRetVal->getNameOrAsOperand());
+    revng_log(Log, "Updating elem " << Index << " of " << getName(LLVMRetVal));
 
     // Don't update if the type is already fine-grained or if the DLA has
     // nothing to say.
@@ -252,7 +249,7 @@ static bool updateArgumentTypes(model::Binary &Model,
 
   for (const auto &[LLVMArg, ModelArg] : llvm::zip_first(LLVMArgs, ModelArgs)) {
     const llvm::Value *LLVMVal = toLLVMValue(LLVMArg);
-    revng_log(Log, "Updating argument " << LLVMVal->getNameOrAsOperand());
+    revng_log(Log, "Updating argument " << getName(LLVMVal));
 
     // Don't update if the type is already fine-grained or if the DLA has
     // nothing to say.
@@ -304,7 +301,7 @@ static bool updateReturnType(model::Binary &Model,
                 "WARNING: model::CABIFunctionDefinition returns a scalar type, "
                 "the associated llvm::Function should return an integer or a "
                 "pointer: "
-                  << LLVMRetVal->getNameOrAsOperand());
+                    << getName(LLVMRetVal));
       // If this happens we have an aggregate on LLVMIR and a scalar on
       // CABIFunction type. This should only happen in corner cases and we don't
       // have a general way to solve it properly right now, so we bail out and
@@ -312,7 +309,7 @@ static bool updateReturnType(model::Binary &Model,
       return false;
     }
 
-    revng_log(Log, "Is scalar: " << LLVMRetVal->getNameOrAsOperand());
+    revng_log(Log, "Is scalar: " << getName(LLVMRetVal));
 
     // Don't update if the type is already fine-grained or if the DLA has
     // nothing to say.
@@ -704,9 +701,7 @@ bool dla::updateFuncSignatures(const llvm::Module &M,
 
     auto &ModelPrototype = *Model->prototypeOrDefault(ModelFunc->prototype());
 
-    revng_log(Log,
-              "Updating prototype of function "
-                << LLVMFunc.getNameOrAsOperand());
+    revng_log(Log, "Updating prototype of function " << getName(&LLVMFunc));
     Updated |= updatePrototype(*Model, ModelPrototype, &LLVMFunc, TypeMap);
     Updated |= updateStackFrameType(*ModelFunc, LLVMFunc, TypeMap, *Model);
 
@@ -715,9 +710,7 @@ bool dla::updateFuncSignatures(const llvm::Module &M,
       if (const auto *I = llvm::dyn_cast<llvm::CallInst>(&Inst)) {
         auto *Prototype = getCallSitePrototype(*Model, I);
         if (Prototype != nullptr) {
-          revng_log(Log,
-                    "Updating prototype of indirect call "
-                      << I->getNameOrAsOperand());
+          revng_log(Log, "Updating prototype of indirect call " << getName(I));
           Updated |= updatePrototype(*Model, *Prototype, I, TypeMap);
         }
       }
