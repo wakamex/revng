@@ -439,11 +439,7 @@ public:
     auto TheLibTcg = LibTcg::get(Architecture);
 
     // TODO: fix TargetIsLittleEndian once we support non-x86-64 targets
-    VariableManager Variables(M,
-                              /* TargetIsLittleEndian */ true,
-                              TheLibTcg.archInfo().env_offset,
-                              TheLibTcg.envPointer(),
-                              TheLibTcg.globalNames());
+    VariableManager Variables(M, /* TargetIsLittleEndian */ true, TheLibTcg);
 
     fixHelpers(Variables, M);
 

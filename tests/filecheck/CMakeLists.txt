@@ -430,6 +430,7 @@ set(FILECHECK_TESTS
     clift/types/union-with-pointer-recursion.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-then.mlir
+    lift/cpu-state-initializers-layout.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll
