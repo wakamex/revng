@@ -352,8 +352,13 @@ static bool isPossiblyReturningHelper(const JumpTargetManager &JTM,
   if (auto *Callee = getCalledFunction(Call))
     CalleeName = Callee->getName();
 
-  // Returns the value of the n-th argument, if constant
+  // Returns the value of the n-th argument, if the call has one and it is
+  // constant. Helpers that affect the PC take from one to several arguments,
+  // so a call need not have the one asked for.
   auto GetArgument = [Call](unsigned Index) -> std::optional<uint64_t> {
+    if (Index >= Call->arg_size())
+      return std::nullopt;
+
     Value *V = Call->getArgOperand(Index);
     auto *CI = dyn_cast_or_null<ConstantInt>(V);
     if (CI == nullptr)
@@ -383,12 +388,14 @@ static bool isPossiblyReturningHelper(const JumpTargetManager &JTM,
       return false;
     }
 
-    std::optional<uint64_t> Exception = GetArgument(1);
-    if (CalleeName == "helper_raise_exception" and Exception.has_value()) {
-      auto Bytes = JTM.binaryView().getByAddress(PC, Size);
-      bool Is64Bit = PC.type() == MetaAddressType::Code_x86_64;
-      if (Bytes and isFaultingX86Instruction(*Bytes, *Exception, Is64Bit))
-        return false;
+    // Only read the exception number of the helper that takes one
+    if (CalleeName == "helper_raise_exception") {
+      if (std::optional<uint64_t> Exception = GetArgument(1)) {
+        auto Bytes = JTM.binaryView().getByAddress(PC, Size);
+        bool Is64Bit = PC.type() == MetaAddressType::Code_x86_64;
+        if (Bytes and isFaultingX86Instruction(*Bytes, *Exception, Is64Bit))
+          return false;
+      }
     }
   } break;
 
@@ -426,7 +433,8 @@ bool TDBP::forceFallthroughAfterHelper(CallInst *Call) {
           // The helper raises an exception execution cannot continue after:
           // nothing follows it, the block ends with the `unreachable` after
           // the exit
-          if (not isa<UnreachableInst>(Call->getParent()->getTerminator()))
+          auto *Terminator = Call->getParent()->getTerminator();
+          if (not isa_and_nonnull<UnreachableInst>(Terminator))
             return false;
 
           eraseFromParent(Call);

@@ -7,6 +7,9 @@
 # edge, while one after which execution continues falls through the padding
 # into vN. QEMU raises #UD for the undefined opcodes and for valid instructions
 # it does not implement alike, so the lifter tells them apart by their bytes.
+# The helpers raising an exception take its number as an argument; others that
+# change the PC, such as rdpmc's, take only the CPU state and keep their
+# fallthrough.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -nostdlib -static -Wl,--build-id=none -Wl,-T,%S/overlapping-indirect-branch.ld %s -o %t
 # RUN: %root/bin/revng quick artifact emit-cfg --analyses=parse-binary,detect-abi %t | FileCheck %s
@@ -68,6 +71,11 @@
 # CHECK-NOT: Unreachable
 # CHECK: 0x401168:Code_x86_64
 # CHECK-LABEL: /function/0x401170:Code_x86_64:
+# rdpmc, whose helper takes no argument besides the CPU state
+# CHECK-LABEL: /function/0x401180:Code_x86_64:
+# CHECK-NOT: Unreachable
+# CHECK: 0x401188:Code_x86_64
+# CHECK-LABEL: /function/0x401190:Code_x86_64:
 
 .macro case n, insn:vararg
 .p2align 5
@@ -106,4 +114,5 @@ case 6, .byte 0x66, 0x0f, 0x0b
 case 7, int $0x80
 case 8, syscall
 case 9, vpaddd %zmm2, %zmm1, %zmm0
+case 10, rdpmc
 .section .note.GNU-stack,"",@progbits
