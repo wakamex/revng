@@ -5,9 +5,12 @@
 #include <algorithm>
 #include <deque>
 #include <iterator>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
@@ -456,6 +459,78 @@ static void absorbVolatileChildren(LayoutTypeSystem &TS) {
   }
 }
 
+/// Byte ranges of fields, each with a number, to find the ones that overlap
+/// a given range in time proportional to their count
+class OverlapIndex {
+  struct Field {
+    uint64_t Start = 0;
+    uint64_t End = 0;
+    unsigned Number = 0;
+  };
+
+  // Sorted by start
+  std::vector<Field> Fields;
+  // The largest end in each range of Fields, as a segment tree
+  std::vector<uint64_t> MaxEnd;
+  size_t Leaves = 1;
+
+public:
+  void add(uint64_t Start, uint64_t End, unsigned Number) {
+    revng_assert(Start < End);
+    Fields.push_back({ Start, End, Number });
+  }
+
+  void build() {
+    llvm::stable_sort(Fields, [](const Field &LHS, const Field &RHS) {
+      return LHS.Start < RHS.Start;
+    });
+    while (Leaves < Fields.size())
+      Leaves *= 2;
+    MaxEnd.assign(2 * Leaves, 0);
+    for (size_t I = 0; I < Fields.size(); ++I)
+      MaxEnd[Leaves + I] = Fields[I].End;
+    for (size_t I = Leaves - 1; I > 0; --I)
+      MaxEnd[I] = std::max(MaxEnd[2 * I], MaxEnd[2 * I + 1]);
+  }
+
+  /// Call \p Callback with the number of each field that shares a byte with
+  /// [Start, End)
+  template<typename CallbackT>
+  void forEachOverlapping(uint64_t Start,
+                          uint64_t End,
+                          CallbackT &&Callback) const {
+    auto ByStart = [](const Field &F, uint64_t Offset) {
+      return F.Start < Offset;
+    };
+    auto First = std::lower_bound(Fields.begin(),
+                                  Fields.end(),
+                                  Start,
+                                  ByStart);
+
+    // The fields starting inside the range
+    for (auto It = First; It != Fields.end() and It->Start < End; ++It)
+      Callback(It->Number);
+
+    // The fields starting before it and ending inside or after it
+    size_t Before = First - Fields.begin();
+    llvm::SmallVector<std::tuple<size_t, size_t, size_t>, 32> Stack{
+      { 1, 0, Leaves }
+    };
+    while (not Stack.empty()) {
+      auto [Node, Low, High] = Stack.pop_back_val();
+      if (Low >= Before or MaxEnd[Node] <= Start)
+        continue;
+      if (High - Low == 1) {
+        Callback(Fields[Low].Number);
+        continue;
+      }
+      size_t Middle = (Low + High) / 2;
+      Stack.push_back({ 2 * Node + 1, Middle, High });
+      Stack.push_back({ 2 * Node, Low, Middle });
+    }
+  }
+};
+
 bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
@@ -607,6 +682,58 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           ChildrenHierarchy[AIt] = &Lists.emplace_back();
       }
 
+      // canPushThrough finds nothing for two edges whose fields share no
+      // byte, and finding nothing changes nothing. So each root is compared
+      // only with the later roots whose fields overlap its own, which an
+      // index of the fields by byte range finds, in the order of
+      // ChildrenHierarchy: the same comparisons that find something, in the
+      // same order, without comparing all pairs of the children of a node
+      // with thousands of them. A child of size 0 has no field size, and its
+      // edges are compared with every root, as before.
+      std::vector<NeighborIterator> Roots;
+      llvm::DenseMap<const LayoutTypeSystemNode::Link *, unsigned> RootNumber;
+      std::vector<bool> IsRoot;
+      OverlapIndex Overlaps;
+      llvm::SmallVector<unsigned> Unsized;
+      for (const auto &[Edge, Unused] : ChildrenHierarchy) {
+        unsigned Number = Roots.size();
+        Roots.push_back(Edge);
+        RootNumber[&*Edge] = Number;
+        IsRoot.push_back(true);
+        if (Edge->first->Size == 0) {
+          Unsized.push_back(Number);
+        } else {
+          uint64_t Start = Edge->second->getOffsetExpr().Offset;
+          Overlaps.add(Start,
+                       Start + getFieldSize(Edge->first, Edge->second),
+                       Number);
+        }
+      }
+      Overlaps.build();
+
+      // The roots after Number in ChildrenHierarchy that canPushThrough may
+      // find something with, in that order
+      auto Candidates = [&](unsigned Number) {
+        llvm::SmallVector<unsigned> Result;
+        auto Add = [&](unsigned Other) {
+          if (Other > Number and IsRoot[Other])
+            Result.push_back(Other);
+        };
+        NeighborIterator Edge = Roots[Number];
+        if (Edge->first->Size == 0) {
+          for (unsigned Other = Number + 1; Other < Roots.size(); ++Other)
+            Add(Other);
+          return Result;
+        }
+        uint64_t Start = Edge->second->getOffsetExpr().Offset;
+        uint64_t End = Start + getFieldSize(Edge->first, Edge->second);
+        Overlaps.forEachOverlapping(Start, End, Add);
+        for (unsigned Other : Unsized)
+          Add(Other);
+        llvm::sort(Result);
+        return Result;
+      };
+
       revng_log(Log, "Compare children edges");
       // Now compare each root only with other roots
       auto ARootIt = ChildrenHierarchy.begin();
@@ -629,10 +756,10 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // be pushed through all of them.
         llvm::SmallVector<NeighborIterator> ContainsA;
 
-        for (auto BRootIt = ARootNext; BRootIt != HierarchyEnd; ++BRootIt) {
+        for (unsigned BNumber : Candidates(RootNumber.lookup(&*AEdgeIt))) {
           LoggerIndent OtherChildIndent{ Log };
 
-          auto &[BEdgeIt, ContainedInB] = *BRootIt;
+          NeighborIterator BEdgeIt = Roots[BNumber];
           revng_log(Log,
                     "with BEdge: " << BEdgeIt->first->ID
                                    << " label: " << BEdgeIt->second);
@@ -660,6 +787,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // ChildrenHierarchy, since they're not roots anymore.
         for (NeighborIterator PushedInA : ContainedInA) {
           ChildrenHierarchy.erase(PushedInA);
+          IsRoot[RootNumber.lookup(&*PushedInA)] = false;
           PushedInsideA->Events.push_back({ PushedInA });
         }
 
@@ -680,6 +808,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           }
           // Now AEdgeIt is not a root anymore, so we have to erase it and
           // update ARootNext.
+          IsRoot[RootNumber.lookup(&*AEdgeIt)] = false;
           ARootNext = ChildrenHierarchy.erase(ARootIt);
         }
       }
