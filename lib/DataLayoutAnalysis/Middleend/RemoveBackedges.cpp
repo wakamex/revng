@@ -2,10 +2,12 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
 #include <compare>
 #include <limits>
 #include <vector>
 
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -166,6 +168,14 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
   // breaks those loops too while visiting each node once.
   auto Nodes = llvm::to_vector(llvm::nodes(&TS));
   llvm::SmallPtrSet<const LTSN *, 16> Explored;
+
+  // Nodes from which the first pass reaches no loop. A search from a root finds
+  // no loop below such a node, and cannot close a loop through it, since that
+  // loop would be reachable from it. So the first pass treats them as already
+  // visited instead of searching below them again from every root that reaches
+  // them, which gives the same result. Removing edges keeps them loop-free.
+  // They are all in Explored, so the second pass never visits them.
+  llvm::DenseSet<const LTSN *> Acyclic;
   for (size_t Index = 0; Index < 2 * Nodes.size(); ++Index) {
     LTSN *Root = Nodes[Index % Nodes.size()];
     revng_assert(Root != nullptr);
@@ -184,6 +194,9 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
 
       if (not isSCCRoot<SCC>(Root))
         continue;
+
+      if (Acyclic.contains(Root))
+        continue;
     }
 
     revng_log(Log, "# Looking for mixed loops from: " << Root->ID);
@@ -195,6 +208,10 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
     llvm::SmallPtrSet<const LTSN *, 16> InStack;
     llvm::SmallVector<EdgeInfo> BackedgesOnStack;
     llvm::SmallVector<StackEntry> VisitStack;
+
+    // The entries of VisitStack below this depth reach a loop, or a node that
+    // may reach one. The others reach no loop, as far as the search has gone.
+    size_t LoopFreeDepth = 0;
 
     // Helper enum to describe if push succeeds and different ways to fail
     enum class TryPushStatus {
@@ -239,8 +256,17 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
                 "--| next children is " << NextChild->ID
                                         << " tag: " << *NextTag);
 
+      if (not SecondPass and Acyclic.contains(NextChild)) {
+        revng_log(Log, "--| reaches no loop!");
+        return TryPushResult{ .Status = TryPushStatus::AlreadyVisited,
+                              .EdgeToPush = NextEdgeToVisit };
+      }
+
       bool NewVisit = Visited.insert(NextChild).second;
       if (not NewVisit) {
+        // Either NextChild closes a loop, or it was visited before and is not
+        // known to reach no loop: everything on the stack may reach a loop.
+        LoopFreeDepth = VisitStack.size();
         if (InStack.contains(NextChild)) {
           revng_log(Log, "--| loop detected!");
           return TryPushResult{ .Status = TryPushStatus::FailedCloseLoop,
@@ -285,10 +311,15 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
       StackEntry Back = VisitStack.back();
       revng_log(Log, "<-- pop(" << Back.Node->ID << ')');
 
+      // A node that the search below found loop-free reaches no loop
+      if (not SecondPass and VisitStack.size() > LoopFreeDepth)
+        Acyclic.insert(Back.Node);
+
       // Erase the node and the StackEntry from stack
       bool Erased = InStack.erase(Back.Node);
       revng_assert(Erased);
       VisitStack.pop_back();
+      LoopFreeDepth = std::min<size_t>(LoopFreeDepth, VisitStack.size());
 
       // If the stack is now empty, we're done.
       if (VisitStack.empty())

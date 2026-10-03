@@ -5,6 +5,7 @@
 #define BOOST_TEST_MODULE DLASteps
 bool init_unit_test();
 
+#include <compare>
 #include <random>
 #include <set>
 #include <string>
@@ -12,8 +13,12 @@ bool init_unit_test();
 
 #include "boost/test/unit_test.hpp"
 
+#include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
 
@@ -1269,6 +1274,420 @@ static bool referenceCollapseSCCs(LayoutTypeSystem &TS) {
   return ToCollapse.size();
 }
 
+/// The backedge removal before it skipped nodes known to reach no loop,
+/// verbatim
+namespace reference {
+
+static Logger Log("dla-remove-backedges-reference");
+
+using LTSN = LayoutTypeSystemNode;
+
+template<typename T>
+concept SCCWithBackedgeHelper = requires {
+  typename T::SCCNodeView;
+  typename T::BackedgeNodeView;
+};
+
+struct InstanceOffsetZeroWithInstanceBackedge {
+  using SCCNodeView = EdgeFilteredGraph<const LTSN *, isInstanceOff0>;
+  using BackedgeNodeView = EdgeFilteredGraph<const LTSN *, isInstanceOffNon0>;
+};
+
+template<SCCWithBackedgeHelper SCC>
+static bool isMixedEdge(const llvm::GraphTraits<LTSN *>::EdgeRef &E) {
+  return SCC::SCCNodeView::filter()(E) or SCC::BackedgeNodeView::filter()(E);
+}
+
+template<SCCWithBackedgeHelper SCC>
+static bool isSCCLeaf(const LTSN *N) {
+  using Graph = llvm::GraphTraits<typename SCC::SCCNodeView>;
+  return Graph::child_begin(N) == Graph::child_end(N);
+}
+
+template<SCCWithBackedgeHelper SCC>
+static bool isSCCRoot(const LTSN *N) {
+  using Inverse = llvm::Inverse<typename SCC::SCCNodeView>;
+  using InverseGraph = llvm::GraphTraits<Inverse>;
+  return InverseGraph::child_begin(N) == InverseGraph::child_end(N);
+}
+
+template<SCCWithBackedgeHelper SCC>
+static bool hasNoSCCEdge(const LTSN *Node) {
+  return isSCCRoot<SCC>(Node) and isSCCLeaf<SCC>(Node);
+};
+
+template<SCCWithBackedgeHelper SCC>
+using MixedNodeT = EdgeFilteredGraph<LTSN *, isMixedEdge<SCC>>;
+
+template<SCCWithBackedgeHelper SCC>
+struct StackEntry {
+  LTSN *Node = nullptr;
+  const LTSN *ComponentLeader = nullptr;
+  typename MixedNodeT<SCC>::ChildEdgeIteratorType NextToVisitIt;
+};
+
+struct EdgeInfo {
+  LTSN *Src = nullptr;
+  LTSN *Tgt = nullptr;
+  const TypeLinkTag *Tag = nullptr;
+  // Comparison operators to use in set
+  std::strong_ordering operator<=>(const EdgeInfo &) const = default;
+};
+
+template<SCCWithBackedgeHelper SCC>
+static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
+  bool Changed = false;
+  if (VerifyLog.isEnabled()) {
+    revng_assert(TS.verifyConsistency());
+
+    // Verify that the graph is a DAG looking only at SCCNodeView
+    std::set<const LTSN *> Visited;
+    for (const auto &Node : llvm::nodes(&TS)) {
+      revng_assert(Node != nullptr);
+      if (Visited.contains(Node))
+        continue;
+
+      auto I = llvm::scc_begin(typename SCC::SCCNodeView(Node));
+      auto E = llvm::scc_end(typename SCC::SCCNodeView(Node));
+      for (; I != E; ++I) {
+        Visited.insert(I->begin(), I->end());
+        if (I.hasCycle())
+          revng_check(false);
+      }
+    }
+  }
+
+  revng_log(Log, "Removing Backedges From Loops");
+
+  llvm::Task T(2, "removeBackedgesFromSCC");
+  T.advance("Detect SCC Node View Components");
+  // Assign each node to a Component, except for those that have no incoming nor
+  // outgoing SCCNodeView edges. The goal is to identify the subsets of nodes
+  // that are connected by means of SCCNodeView edges. In this way we divide the
+  // graph in subgraphs, such that for each pair of nodes P and Q with (P != Q)
+  // in the same sugraphs (i.e. with the same component) P is reachable from Q
+  // looking only at **undirected** SCCNodeView edges. Each of this subgraphs is
+  // called "component". The idea is that SCCNodeView edges are more meaningful
+  // than SCCBackedgeView edges, so we don't want to remove any of them, but we
+  // need to identify such edges that create loops across multiple components,
+  // and cut them.
+  llvm::EquivalenceClasses<const LTSN *> Components;
+  {
+    revng_log(Log, "Detect components");
+    for (const LTSN *N : llvm::nodes(&TS)) {
+      revng_assert(N != nullptr);
+      revng_log(Log, "N->ID: " << N->ID);
+      LoggerIndent Indent{ Log };
+
+      for (const LTSN *Child : llvm::children<typename SCC::SCCNodeView>(N)) {
+        revng_log(Log, "Merging with SCCNodeView Child with ID: " << Child->ID);
+        Components.unionSets(N, Child);
+      }
+    }
+  }
+
+  if (Log.isEnabled()) {
+    revng_log(Log, "Detected components:");
+    LoggerIndent Indent{ Log };
+    for (auto I = Components.begin(), E = Components.end(); I != E;
+         ++I) { // Iterate over all of the equivalence sets.
+
+      if (!I->isLeader()) {
+        // Ignore non-leader sets.
+        continue;
+      }
+
+      revng_log(Log,
+                "Component for Node with ID: "
+                  << (*Components.findLeader(I))->ID);
+      LoggerIndent MoreIndent{ Log };
+      // Loop over members in this set.
+      for (const LTSN *N : llvm::make_range(Components.member_begin(I),
+                                            Components.member_end()))
+        revng_log(Log, "ID: " << N->ID);
+    }
+  }
+
+  // Here all the nodes are nodes have a component, except nodes that have no
+  // incoming or outgoing SCCNodeView edges
+
+  T.advance("Remove Backedges");
+  using MixedNodeT = MixedNodeT<SCC>;
+
+  // Visit the nodes twice. The first pass starts from SCCNodeView roots.
+  // Merging nodes can also create loops that no SCCNodeView root reaches, for
+  // example a loop whose only entries are pointer edges. The second pass starts
+  // from every node no search has reached yet, sharing one visited set, so it
+  // breaks those loops too while visiting each node once.
+  auto Nodes = llvm::to_vector(llvm::nodes(&TS));
+  llvm::SmallPtrSet<const LTSN *, 16> Explored;
+  for (size_t Index = 0; Index < 2 * Nodes.size(); ++Index) {
+    LTSN *Root = Nodes[Index % Nodes.size()];
+    revng_assert(Root != nullptr);
+    bool SecondPass = Index >= Nodes.size();
+    if (Index == 0 or Index == Nodes.size())
+      revng_log(Log, (SecondPass ? "## Second pass" : "## First pass"));
+
+    if (SecondPass) {
+      if (Explored.contains(Root))
+        continue;
+    } else {
+      // We start from SCCNodeView roots and look if we find an SCC with mixed
+      // edges.
+      if (hasNoSCCEdge<SCC>(Root))
+        continue;
+
+      if (not isSCCRoot<SCC>(Root))
+        continue;
+    }
+
+    revng_log(Log, "# Looking for mixed loops from: " << Root->ID);
+
+    using StackEntry = StackEntry<SCC>;
+
+    llvm::SmallPtrSet<const LTSN *, 16> RootVisited;
+    auto &Visited = SecondPass ? Explored : RootVisited;
+    llvm::SmallPtrSet<const LTSN *, 16> InStack;
+    llvm::SmallVector<EdgeInfo> BackedgesOnStack;
+    llvm::SmallVector<StackEntry> VisitStack;
+
+    // Helper enum to describe if push succeeds and different ways to fail
+    enum class TryPushStatus {
+      FailedNoChildren,
+      FailedCloseLoop,
+      AlreadyVisited,
+      Success,
+    };
+
+    // Struct holding the success/failure status, along with the edge iterator
+    // that caused it.
+    struct TryPushResult {
+      TryPushStatus Status;
+      MixedNodeT::ChildEdgeIteratorType EdgeToPush;
+    };
+
+    const auto TryPushNextChild = [&]() -> TryPushResult {
+      revng_assert(not VisitStack.empty());
+      revng_assert(VisitStack.size() == InStack.size());
+      StackEntry &Top = VisitStack.back();
+      const auto &[TopNode, TopComponent, _] = Top;
+      // Make a copy, because we have to increment the old Top.NextToVisitIt,
+      // while at the same time we still want to have access to the previous one
+      // in case of failure.
+      typename MixedNodeT::ChildEdgeIteratorType
+        NextEdgeToVisit = Top.NextToVisitIt;
+
+      revng_log(Log, "--* TryPushNextChild of (" << TopNode->ID << ')');
+      LoggerIndent Indent{ Log };
+
+      if (NextEdgeToVisit == MixedNodeT::child_edge_end(TopNode)) {
+        revng_log(Log, "--| no children left");
+        return TryPushResult{ .Status = TryPushStatus::FailedNoChildren,
+                              .EdgeToPush = NextEdgeToVisit };
+      }
+
+      ++Top.NextToVisitIt;
+
+      LTSN *NextChild = NextEdgeToVisit->first;
+      const TypeLinkTag *NextTag = NextEdgeToVisit->second;
+      revng_log(Log,
+                "--| next children is " << NextChild->ID
+                                        << " tag: " << *NextTag);
+
+      bool NewVisit = Visited.insert(NextChild).second;
+      if (not NewVisit) {
+        if (InStack.contains(NextChild)) {
+          revng_log(Log, "--| loop detected!");
+          return TryPushResult{ .Status = TryPushStatus::FailedCloseLoop,
+                                .EdgeToPush = NextEdgeToVisit };
+        } else {
+          revng_log(Log, "--| already visited!");
+          return TryPushResult{ .Status = TryPushStatus::AlreadyVisited,
+                                .EdgeToPush = NextEdgeToVisit };
+        }
+      }
+
+      // Make sure we track all the backedges on stack, because if we ever hit
+      // a loop we'll have to mark these for removal.
+      EdgeInfo NewEdge = { TopNode, NextChild, NextTag };
+      if (SCC::BackedgeNodeView::filter()({ nullptr, NewEdge.Tag }))
+        BackedgesOnStack.push_back(std::move(NewEdge));
+
+      // Add a new entry on the stack
+      revng_log(Log, "TopComponent: " << TopComponent);
+
+      StackEntry NewEntry = {
+        .Node = NextChild,
+        .ComponentLeader = Components.findValue(NextChild) != Components.end() ?
+                             *Components.findLeader(NextChild) :
+                             TopComponent,
+        .NextToVisitIt = MixedNodeT::child_edge_begin(NextChild)
+      };
+
+      VisitStack.push_back(std::move(NewEntry));
+      InStack.insert(NextChild);
+      revng_assert(InStack.size() == VisitStack.size());
+
+      revng_log(Log, "--> pushed!");
+      return TryPushResult{ .Status = TryPushStatus::Success,
+                            .EdgeToPush = NextEdgeToVisit };
+    };
+
+    const auto Pop = [&]() {
+      revng_assert(InStack.size() == VisitStack.size());
+
+      // Make a copy before popping.
+      StackEntry Back = VisitStack.back();
+      revng_log(Log, "<-- pop(" << Back.Node->ID << ')');
+
+      // Erase the node and the StackEntry from stack
+      bool Erased = InStack.erase(Back.Node);
+      revng_assert(Erased);
+      VisitStack.pop_back();
+
+      // If the stack is now empty, we're done.
+      if (VisitStack.empty())
+        return;
+
+      // If after popping, the stack isn't empty, we have to check if we've
+      // popped a backedge, and in that case remove it from BackedgesOnStack.
+      StackEntry &Parent = VisitStack.back();
+      auto Begin = MixedNodeT::child_edge_begin(Parent.Node);
+      revng_assert(Parent.NextToVisitIt != Begin);
+
+      EdgeInfo PoppedEdge = {
+        .Src = Parent.Node,
+        .Tgt = Back.Node,
+        .Tag = std::prev(Parent.NextToVisitIt)->second,
+      };
+
+      // If we've popped a backedge it must be equal to PoppedEdge. If it's not
+      // the stack is malformed. If it's the correct edge, we have to remove it
+      // from BackedgesOnStack since we're popping.
+      if (SCC::BackedgeNodeView::filter()({ nullptr, PoppedEdge.Tag })) {
+        revng_assert(BackedgesOnStack.back() == PoppedEdge);
+        BackedgesOnStack.pop_back();
+      }
+    };
+
+    llvm::SmallSet<EdgeInfo, 8> ToRemove;
+
+    bool HasComponent = Components.findValue(Root) != Components.end();
+    revng_assert(SecondPass or HasComponent);
+    StackEntry Init = { .Node = Root,
+                        .ComponentLeader = HasComponent ?
+                                             Components.getLeaderValue(Root) :
+                                             Root,
+                        .NextToVisitIt = MixedNodeT::child_edge_begin(Root) };
+    VisitStack.push_back(std::move(Init));
+    InStack.insert(Root);
+    Visited.insert(Root);
+
+    while (not VisitStack.empty()) {
+
+      StackEntry &Top = VisitStack.back();
+
+      revng_log(Log, "## Stack top has ID: " << Top.Node->ID);
+      revng_log(Log, "   Component ID: " << Top.ComponentLeader->ID);
+
+      const auto &[Status, Edge] = TryPushNextChild();
+      switch (Status) {
+
+      default:
+        // do nothing
+        break;
+
+      case TryPushStatus::FailedNoChildren: {
+        Pop();
+      } break;
+
+      case TryPushStatus::FailedCloseLoop: {
+
+        // If we're closing a loop, add all the backedges involved in the loop
+        // in the edges ToRemove.
+        if (Log.isEnabled()) {
+          for (EdgeInfo &B : BackedgesOnStack) {
+            revng_log(Log,
+                      "remove backedge that is on stack: "
+                        << B.Src->ID << " -> " << B.Tgt->ID
+                        << " Tag: " << B.Tag);
+          }
+        }
+        ToRemove.insert(BackedgesOnStack.begin(), BackedgesOnStack.end());
+
+        if (SCC::BackedgeNodeView::filter()({ nullptr, Edge->second })) {
+          // This means that the edge E we tried to push on the stack is an
+          // BackedgeNodeView edge closing a loop.
+          EdgeInfo BackedgeNotPushed{
+            .Src = VisitStack.back().Node,
+            .Tgt = Edge->first,
+            .Tag = Edge->second,
+          };
+          revng_log(Log,
+                    "remove backedge closing loop, that isn't on stack: "
+                      << BackedgeNotPushed.Src->ID << " -> "
+                      << BackedgeNotPushed.Tgt->ID
+                      << " Tag: " << BackedgeNotPushed.Tag);
+          ToRemove.insert(std::move(BackedgeNotPushed));
+        }
+
+      } break;
+      }
+    }
+
+    // Actually remove the edges
+    for (auto &[Pred, Child, T] : ToRemove) {
+      using Edge = LTSN::NeighborsSet::value_type;
+      revng_log(Log,
+                "# Removing backedge: " << Pred->ID << " -> " << Child->ID);
+      revng_assert(SCC::BackedgeNodeView::filter()({ Pred, T }));
+      Edge ChildToPred = std::make_pair(Pred, T);
+      bool Erased = Child->Predecessors.erase(ChildToPred);
+      revng_assert(Erased);
+      Edge PredToChild = std::make_pair(Child, T);
+      Erased = Pred->Successors.erase(PredToChild);
+      revng_assert(Erased);
+      Changed = true;
+    }
+
+    if (not SecondPass)
+      Explored.insert(RootVisited.begin(), RootVisited.end());
+  }
+
+  if (VerifyLog.isEnabled()) {
+    revng_assert(TS.verifyConsistency());
+
+    // Verify that the graph is a DAG looking both at SCCNodeView and
+    // BackedgeNodeView
+    std::set<const LTSN *> Visited;
+    for (const auto &Node : llvm::nodes(&TS)) {
+      revng_assert(Node != nullptr);
+      if (Visited.contains(Node))
+        continue;
+
+      auto I = llvm::scc_begin(MixedNodeT(Node));
+      auto E = llvm::scc_end(MixedNodeT(Node));
+      for (; I != E; ++I) {
+        Visited.insert(I->begin(), I->end());
+        if (I.hasCycle()) {
+          for (const auto *N : *I)
+            llvm::dbgs() << std::to_string(N->ID) << "\n";
+          revng_check(false);
+        }
+      }
+    }
+  }
+
+  return Changed;
+}
+
+static bool
+removeInstanceBackedgesFromInstanceAtOffset0Loops(LayoutTypeSystem &TS) {
+  return removeBackedgesFromSCC<InstanceOffsetZeroWithInstanceBackedge>(TS);
+}
+
+} // namespace reference
+
 /// Everything the collapse can change: nodes, sizes, edges and equivalence
 /// classes
 static std::string describe(LayoutTypeSystem &TS) {
@@ -1398,8 +1817,8 @@ static void checkCollapseMatchesReference(BuilderT Build) {
     Build(Actual);
     bool ReferenceChanged = referenceCollapseSCCs<InstanceOffset0EdgeT>(
       Reference);
-    ReferenceChanged |= removeInstanceBackedgesFromInstanceAtOffset0Loops(
-      Reference);
+    ReferenceChanged |= reference::
+      removeInstanceBackedgesFromInstanceAtOffset0Loops(Reference);
     bool ActualChanged = CollapseInstanceAtOffset0SCC().runOnTypeSystem(
       Actual);
     revng_check(ReferenceChanged == ActualChanged);
@@ -1429,6 +1848,110 @@ BOOST_AUTO_TEST_CASE(CollapseSCCsMatchesOneTraversalPerStart) {
                             NodeCount,
                             EdgesPerNode,
                             Mixes[Seed % Mixes.size()]);
+    });
+  }
+}
+
+/// Roots that all reach one long chain of instance edges, with loops closed
+/// by instance edges at an offset other than 0 every \p LoopEvery nodes, so
+/// that the backedge removal searches the chain again from every root
+static void buildRootsOverSharedChain(LayoutTypeSystem &TS,
+                                      size_t RootCount,
+                                      size_t ChainLength,
+                                      size_t LoopEvery) {
+  std::vector<LTSN *> Chain;
+  for (size_t I = 0; I < ChainLength; ++I) {
+    LTSN *N = TS.createArtificialLayoutType();
+    N->Size = 8;
+    Chain.push_back(N);
+  }
+  for (size_t I = 1; I < ChainLength; ++I) {
+    if (I % 3 == 0)
+      TS.addInstanceLink(Chain[I - 1], Chain[I], OffsetExpression{});
+    else
+      TS.addInstanceLink(Chain[I - 1], Chain[I], OffsetExpression{ I % 7 + 1 });
+    if (I % LoopEvery == 0)
+      TS.addInstanceLink(Chain[I], Chain[I - LoopEvery / 2],
+                         OffsetExpression{ 2 });
+  }
+  for (size_t I = 0; I < RootCount; ++I) {
+    LTSN *Root = TS.createArtificialLayoutType();
+    Root->Size = 16;
+    TS.addInstanceLink(Root, Chain[(I * 13) % ChainLength], OffsetExpression{});
+    if (I % 4 == 0)
+      TS.addInstanceLink(Root, Chain[(I * 7) % ChainLength],
+                         OffsetExpression{ 8 });
+  }
+}
+
+/// A random graph whose instance-at-offset-0 edges form a DAG, as they do
+/// after their SCCs are collapsed, with other instance edges anywhere. One node
+/// in five is a pointer, with at most one edge out, a pointer edge.
+static void buildRandomOffset0DAG(LayoutTypeSystem &TS,
+                                  unsigned Seed,
+                                  size_t NodeCount,
+                                  double EdgesPerNode) {
+  std::mt19937 Generator(Seed);
+  std::vector<LTSN *> Nodes;
+  for (size_t I = 0; I < NodeCount; ++I) {
+    LTSN *N = TS.createArtificialLayoutType();
+    N->Size = 8;
+    Nodes.push_back(N);
+  }
+  std::uniform_int_distribution<size_t> PickNode(0, NodeCount - 1);
+  std::discrete_distribution<unsigned> PickKind({ 4, 3, 1 });
+  auto IsPointer = [](size_t Index) { return Index % 5 == 4; };
+  size_t EdgeCount = EdgesPerNode * NodeCount;
+  for (size_t I = 0; I < EdgeCount; ++I) {
+    size_t Src = PickNode(Generator);
+    size_t Tgt = PickNode(Generator);
+    unsigned Kind = PickKind(Generator);
+    if (IsPointer(Src) != (Kind == 2))
+      continue;
+    if (Kind == 2 and not Nodes[Src]->Successors.empty())
+      continue;
+    switch (Kind) {
+    case 0:
+      if (Src < Tgt)
+        TS.addInstanceLink(Nodes[Src], Nodes[Tgt], OffsetExpression{});
+      break;
+    case 1:
+      TS.addInstanceLink(Nodes[Src],
+                         Nodes[Tgt],
+                         OffsetExpression{ std::uniform_int_distribution<
+                           uint64_t>(1, 16)(Generator) });
+      break;
+    default:
+      TS.addPointerLink(Nodes[Src], Nodes[Tgt]);
+      break;
+    }
+  }
+}
+
+template<typename BuilderT>
+static void checkBackedgeRemovalMatchesReference(BuilderT Build) {
+  LayoutTypeSystem Reference, Actual;
+  Build(Reference);
+  Build(Actual);
+  bool ReferenceChanged = reference::
+    removeInstanceBackedgesFromInstanceAtOffset0Loops(Reference);
+  bool ActualChanged = removeInstanceBackedgesFromInstanceAtOffset0Loops(
+    Actual);
+  revng_check(ReferenceChanged == ActualChanged);
+  revng_check(describe(Reference) == describe(Actual));
+}
+
+BOOST_AUTO_TEST_CASE(RemoveBackedgesMatchesSearchFromEveryRoot) {
+  for (size_t LoopEvery : { 2, 5, 16, 1000 })
+    checkBackedgeRemovalMatchesReference([&](LayoutTypeSystem &TS) {
+      buildRootsOverSharedChain(TS, 60, 200, LoopEvery);
+    });
+
+  for (unsigned Seed = 0; Seed < 1000; ++Seed) {
+    size_t NodeCount = 2 + Seed % 89;
+    double EdgesPerNode = 0.5 + (Seed % 9) * 0.4;
+    checkBackedgeRemovalMatchesReference([&](LayoutTypeSystem &TS) {
+      buildRandomOffset0DAG(TS, Seed, NodeCount, EdgesPerNode);
     });
   }
 }
