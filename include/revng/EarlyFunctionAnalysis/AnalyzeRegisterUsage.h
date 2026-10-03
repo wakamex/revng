@@ -5,6 +5,7 @@
 //
 
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -33,7 +34,20 @@ inline bool isIgnoredInRegisterUsage(const llvm::Instruction &I) {
   return I.getMetadata(IgnoreMDName) != nullptr;
 }
 
-using CSVSet = std::set<llvm::GlobalVariable *>;
+/// Order CSVs by name: the analyses emit code for each CSV in a set in
+/// iteration order, and the result of optimizing that code depends on it, so
+/// an order based on addresses makes the results depend on memory layout
+struct CSVByName {
+  bool operator()(const llvm::GlobalVariable *LHS,
+                  const llvm::GlobalVariable *RHS) const {
+    // Lookups may ask for the CSV of a register that has none
+    if (LHS == nullptr or RHS == nullptr)
+      return LHS == nullptr and RHS != nullptr;
+    return LHS->getName() < RHS->getName();
+  }
+};
+
+using CSVSet = std::set<llvm::GlobalVariable *, CSVByName>;
 
 class RUAResults {
 public:

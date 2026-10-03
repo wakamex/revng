@@ -10,10 +10,12 @@ bool init_unit_test();
 #include "boost/test/unit_test.hpp"
 
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
+#include "revng/EarlyFunctionAnalysis/AnalyzeRegisterUsage.h"
 #include "revng/Support/Tag.h"
 
 using namespace llvm;
@@ -58,4 +60,33 @@ BOOST_AUTO_TEST_CASE(TagsSetIsOrderedByName) {
   };
   BOOST_TEST(Name(0) == "test-deterministic-order-a");
   BOOST_TEST(Name(1) == "test-deterministic-order-z");
+}
+
+BOOST_AUTO_TEST_CASE(CSVSetIsOrderedByName) {
+  LLVMContext Context;
+  Module M("m", Context);
+  auto *Int64 = Type::getInt64Ty(Context);
+  auto MakeCSV = [&]() {
+    return new GlobalVariable(M,
+                              Int64,
+                              false,
+                              GlobalValue::ExternalLinkage,
+                              ConstantInt::get(Int64, 0));
+  };
+  GlobalVariable *Low = MakeCSV();
+  GlobalVariable *High = MakeCSV();
+  if (High < Low)
+    std::swap(Low, High);
+  Low->setName("_z");
+  High->setName("_a");
+
+  efa::CSVSet Set{ Low, High, nullptr };
+  BOOST_TEST_REQUIRE(Set.size() == 3U);
+  auto It = Set.begin();
+  BOOST_TEST(*It++ == nullptr);
+  BOOST_TEST(*It++ == High);
+  BOOST_TEST(*It++ == Low);
+
+  // Looking up a register that has no CSV must work
+  BOOST_TEST(Set.count(nullptr) == 1U);
 }
