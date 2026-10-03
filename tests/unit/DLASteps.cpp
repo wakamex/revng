@@ -5,11 +5,20 @@
 #define BOOST_TEST_MODULE DLASteps
 bool init_unit_test();
 
+#include <random>
+#include <set>
+#include <string>
+#include <vector>
+
 #include "boost/test/unit_test.hpp"
+
+#include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SetVector.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
 
 #include "lib/DataLayoutAnalysis/Middleend/DLAStep.h"
+#include "lib/DataLayoutAnalysis/Middleend/RemoveBackedges.h"
 
 using LTSN = dla::LayoutTypeSystemNode;
 
@@ -1130,4 +1139,296 @@ BOOST_AUTO_TEST_CASE(ArrangeAccessesHierarchically_onlyLoopingPushIsRefused) {
   // The other one went through.
   revng_check(countInstanceEdges(ChildC, ChildA) == 1);
   revng_check(countInstanceEdges(Parent, ChildA) == 0);
+}
+
+//
+// Collapsing SCCs in one traversal gives what one traversal per start gave
+//
+
+using GraphNodeT = LTSN *;
+using EqualityNodeT = EdgeFilteredGraph<GraphNodeT, isEqualityEdge>;
+using InstanceOffset0EdgeT = EdgeFilteredGraph<GraphNodeT, isInstanceOff0>;
+
+static bool sizeGreater(const LTSN *LHS, const LTSN *RHS) {
+  return LHS->Size > RHS->Size;
+}
+
+/// The collapse before it found the SCCs in one traversal: a fresh
+/// llvm::scc_iterator from every node not yet visited
+template<typename NodeT>
+static bool referenceCollapseSCCs(LayoutTypeSystem &TS) {
+
+  std::set<GraphNodeT> VisitedNodes;
+
+  using scc_t = std::vector<GraphNodeT>;
+  llvm::SmallVector<scc_t, 0> ToCollapse;
+
+  // We cannot start just from the roots because we cannot exclude that there
+  // are loops without entries.
+  for (const auto &Node : llvm::nodes(&TS)) {
+    revng_assert(Node != nullptr);
+    if (VisitedNodes.contains(Node))
+      continue;
+
+    llvm::scc_iterator<NodeT> I = llvm::scc_begin(NodeT(Node));
+    llvm::scc_iterator<NodeT> E = llvm::scc_end(NodeT(Node));
+    for (const auto &SCC : llvm::make_range(I, E)) {
+      revng_assert(not SCC.empty());
+      if (VisitedNodes.contains(SCC[0]))
+        continue;
+      VisitedNodes.insert(SCC.begin(), SCC.end());
+
+      if (SCC.size() > 1)
+        ToCollapse.push_back(SCC);
+    }
+  }
+
+  for (scc_t &SCC : ToCollapse) {
+    revng_assert(not SCC.empty());
+    // Reorder the SCC so that nodes with the same size are adjacent.
+    // Nodes with larger sizes come first.
+    llvm::stable_sort(SCC, sizeGreater);
+
+    // Now, merge all the nodes that have the same size, while noting the
+    // leaders.
+    llvm::SmallSetVector<LayoutTypeSystemNode *, 8> Leaders;
+    {
+      auto LeaderIt = SCC.begin();
+      auto CurrentSize = (*LeaderIt)->Size;
+      auto End = SCC.end();
+
+      while (LeaderIt != End) {
+
+        Leaders.insert(*LeaderIt);
+
+        // Find the first node with a size different from CurrentSize.
+        auto EndCurrentSize = std::next(LeaderIt);
+        while (EndCurrentSize != End and (*EndCurrentSize)->Size == CurrentSize)
+          ++EndCurrentSize;
+
+        // Merge all the nodes with the same size.
+        TS.mergeNodes({ &*LeaderIt, &*EndCurrentSize });
+
+        // Go to the next size.
+        LeaderIt = EndCurrentSize;
+      }
+    }
+
+    // Now, if the last Leader has Size 0, we merge it with the first Leader,
+    // which represents the largest type.
+    if (Leaders.size() > 1 and Leaders.back()->Size == 0) {
+      TS.mergeNodes(llvm::SmallVector{ Leaders.front(), Leaders.back() });
+      Leaders.pop_back();
+    }
+
+    // If a single leader is left, we're done, all the nodes have been merged
+    // together.
+    if (Leaders.size() < 2)
+      continue;
+
+    // If we're left with more than one leader, we just want to remove all edges
+    // between them and replace them with offset-at-0 edges, from the larger
+    // leader to the smaller.
+    auto LeaderIt = Leaders.begin();
+    auto LeaderEnd = Leaders.end();
+    for (; LeaderIt != LeaderEnd; ++LeaderIt) {
+
+      // For each leader we erase all the non-pointer edges going to other
+      // leaders.
+      auto *Leader = *LeaderIt;
+      using DLAGraph = llvm::GraphTraits<LayoutTypeSystemNode *>;
+      auto EdgeIt = DLAGraph::child_edge_begin(Leader);
+      auto EdgeEnd = DLAGraph::child_edge_end(Leader);
+      auto EdgeNext = DLAGraph::child_edge_end(Leader);
+
+      for (; EdgeIt != EdgeEnd; EdgeIt = EdgeNext) {
+
+        EdgeNext = std::next(EdgeIt);
+        auto &Edge = *EdgeIt;
+
+        // Skip pointers
+        if (isPointerEdge(Edge))
+          continue;
+
+        const auto &[Child, Tag] = Edge;
+
+        // Skip edges that go to non-leaders
+        if (not Leaders.contains(Child))
+          continue;
+
+        TS.eraseEdge(Leader, EdgeIt);
+      }
+
+      // Then, for each leader, we add an instance-at-offset-0 edge to the next
+      // leader, which is the one with immediately lower size.
+      if (auto NextLeaderIt = std::next(LeaderIt); NextLeaderIt != LeaderEnd)
+        TS.addInstanceLink(*LeaderIt, *NextLeaderIt, dla::OffsetExpression{});
+    }
+  }
+
+  return ToCollapse.size();
+}
+
+/// Everything the collapse can change: nodes, sizes, edges and equivalence
+/// classes
+static std::string describe(LayoutTypeSystem &TS) {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  auto PrintEdges = [&OS](const LTSN::NeighborsSet &Edges) {
+    for (const auto &[Other, Tag] : Edges) {
+      OS << " " << Other->ID << ":" << Tag->getKind();
+      if (Tag->getKind() == TypeLinkTag::LK_Instance)
+        Tag->getOffsetExpr().print(OS);
+    }
+  };
+  for (const LTSN *N : llvm::nodes(&TS)) {
+    OS << N->ID << " size " << N->Size << " info " << N->InterferingInfo
+       << " nonscalar " << N->NonScalar << " successors";
+    PrintEdges(N->Successors);
+    OS << " predecessors";
+    PrintEdges(N->Predecessors);
+    OS << "\n";
+  }
+  VectEqClasses &Eq = TS.getEqClasses();
+  Eq.compress();
+  for (unsigned I = 0; I < Eq.getNumElements(); ++I) {
+    auto Class = Eq.getEqClassID(I);
+    OS << I << " class " << (Class ? std::to_string(*Class) : "removed")
+       << "\n";
+  }
+  return Result;
+}
+
+/// A random type system: nodes of a few sizes joined by equality,
+/// instance-at-offset-0, other instance and pointer edges in the proportions
+/// \p Weights, with about \p EdgesPerNode edges per node. One node in five is
+/// a pointer, with at most one edge out, a pointer edge.
+static void buildRandomTypeSystem(LayoutTypeSystem &TS,
+                                  unsigned Seed,
+                                  size_t NodeCount,
+                                  double EdgesPerNode,
+                                  std::array<unsigned, 4> Weights) {
+  std::mt19937 Generator(Seed);
+  const uint64_t Sizes[] = { 0, 1, 2, 4, 8, 8, 16 };
+  std::vector<LTSN *> Nodes;
+  for (size_t I = 0; I < NodeCount; ++I) {
+    LTSN *N = TS.createArtificialLayoutType();
+    N->Size = Sizes[std::uniform_int_distribution<size_t>(0, 6)(Generator)];
+    Nodes.push_back(N);
+  }
+
+  std::uniform_int_distribution<size_t> PickNode(0, NodeCount - 1);
+  std::discrete_distribution<unsigned> PickKind(Weights.begin(),
+                                                Weights.end());
+  auto IsPointer = [](const LTSN *N) { return N->ID % 5 == 4; };
+  size_t EdgeCount = EdgesPerNode * NodeCount;
+  for (size_t I = 0; I < EdgeCount; ++I) {
+    LTSN *Src = Nodes[PickNode(Generator)];
+    LTSN *Tgt = Nodes[PickNode(Generator)];
+    unsigned Kind = PickKind(Generator);
+    if (IsPointer(Src) != (Kind == 3) or (Kind == 0 and IsPointer(Tgt)))
+      continue;
+    if (Kind == 3 and not Src->Successors.empty())
+      continue;
+    switch (Kind) {
+    case 0:
+      TS.addEqualityLink(Src, Tgt);
+      break;
+    case 1:
+      TS.addInstanceLink(Src, Tgt, OffsetExpression{});
+      break;
+    case 2:
+      TS.addInstanceLink(Src,
+                         Tgt,
+                         OffsetExpression{ std::uniform_int_distribution<
+                           uint64_t>(1, 16)(Generator) });
+      break;
+    default:
+      TS.addPointerLink(Src, Tgt);
+      break;
+    }
+  }
+}
+
+/// Chains in which every node reaches all the earlier ones, so a traversal per
+/// start walks everything again from each node, closed into cycles every
+/// \p CycleEvery nodes
+static void buildBackwardChains(LayoutTypeSystem &TS,
+                                bool Equality,
+                                size_t NodeCount,
+                                size_t CycleEvery) {
+  std::vector<LTSN *> Nodes;
+  for (size_t I = 0; I < NodeCount; ++I) {
+    LTSN *N = TS.createArtificialLayoutType();
+    N->Size = (I * 7) % 3 == 0 ? 8 : (I % 2 ? 4 : 0);
+    Nodes.push_back(N);
+  }
+  auto Link = [&](LTSN *Src, LTSN *Tgt) {
+    if (Equality)
+      TS.addEqualityLink(Src, Tgt);
+    else
+      TS.addInstanceLink(Src, Tgt, OffsetExpression{});
+  };
+  for (size_t I = 1; I < NodeCount; ++I) {
+    Link(Nodes[I], Nodes[I - 1]);
+    if (I % CycleEvery == 0)
+      Link(Nodes[I - CycleEvery / 2], Nodes[I]);
+    if (I % 5 == 0)
+      TS.addInstanceLink(Nodes[I], Nodes[I / 2], OffsetExpression{ 4 });
+  }
+}
+
+template<typename BuilderT>
+static void checkCollapseMatchesReference(BuilderT Build) {
+  // Equality SCCs
+  {
+    LayoutTypeSystem Reference, Actual;
+    Build(Reference);
+    Build(Actual);
+    bool ReferenceChanged = referenceCollapseSCCs<EqualityNodeT>(Reference);
+    bool ActualChanged = CollapseEqualitySCC().runOnTypeSystem(Actual);
+    revng_check(ReferenceChanged == ActualChanged);
+    revng_check(describe(Reference) == describe(Actual));
+  }
+
+  // Instance-at-offset-0 SCCs, then the backedge removal that runs with them
+  {
+    LayoutTypeSystem Reference, Actual;
+    Build(Reference);
+    Build(Actual);
+    bool ReferenceChanged = referenceCollapseSCCs<InstanceOffset0EdgeT>(
+      Reference);
+    ReferenceChanged |= removeInstanceBackedgesFromInstanceAtOffset0Loops(
+      Reference);
+    bool ActualChanged = CollapseInstanceAtOffset0SCC().runOnTypeSystem(
+      Actual);
+    revng_check(ReferenceChanged == ActualChanged);
+    revng_check(describe(Reference) == describe(Actual));
+  }
+}
+
+BOOST_AUTO_TEST_CASE(CollapseSCCsMatchesOneTraversalPerStart) {
+  for (bool Equality : { true, false })
+    for (size_t CycleEvery : { 2, 3, 8, 1000 })
+      checkCollapseMatchesReference([&](LayoutTypeSystem &TS) {
+        buildBackwardChains(TS, Equality, 300, CycleEvery);
+      });
+
+  const std::array<std::array<unsigned, 4>, 4> Mixes = { {
+    { 1, 1, 1, 1 },
+    { 0, 4, 1, 1 },
+    { 3, 1, 0, 1 },
+    { 0, 6, 3, 0 },
+  } };
+  for (unsigned Seed = 0; Seed < 400; ++Seed) {
+    size_t NodeCount = 1 + Seed % 97;
+    double EdgesPerNode = 0.5 + (Seed % 7) * 0.5;
+    checkCollapseMatchesReference([&](LayoutTypeSystem &TS) {
+      buildRandomTypeSystem(TS,
+                            Seed,
+                            NodeCount,
+                            EdgesPerNode,
+                            Mixes[Seed % Mixes.size()]);
+    });
+  }
 }
