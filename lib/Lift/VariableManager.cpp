@@ -28,6 +28,7 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include "revng/Lift/CPUStateOffset.h"
+#include "revng/Lift/LibTcg.h"
 #include "revng/Lift/VariableManager.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/Register.h"
@@ -144,19 +145,17 @@ getTypeAtOffset(const DataLayout *TheLayout, Type *VarType, intptr_t Offset) {
 
 VariableManager::VariableManager(Module &M,
                                  bool TargetIsLittleEndian,
-                                 unsigned LibTcgEnvOffset,
-                                 uint8_t *LibTcgEnvPtr,
-                                 const std::map<intptr_t, StringRef>
-                                   &GlobalNames) :
+                                 LibTcg &TheLibTcg) :
   TheModule(M),
   AllocaBuilder(getContext(&M)),
   ArchCPUStruct(nullptr),
   ModuleLayout(&TheModule.getDataLayout()),
-  LibTcgEnvOffset(LibTcgEnvOffset),
-  LibTcgEnvPtr(LibTcgEnvPtr),
+  TheLibTcg(TheLibTcg),
+  LibTcgEnvOffset(TheLibTcg.archInfo().env_offset),
+  LibTcgEnvPtr(TheLibTcg.envPointer()),
   Env(nullptr),
   TargetIsLittleEndian(TargetIsLittleEndian),
-  GlobalNames(GlobalNames) {
+  GlobalNames(TheLibTcg.globalNames()) {
 
   // Reminder:
   //
@@ -544,6 +543,13 @@ VariableManager::getByCPUStateOffsetWithRemainder(intptr_t Offset) {
   revng_assert(InitializerPointer >= LibTcgEnvPtr - LibTcgEnvOffset);
   auto *InitialValue = fromBytes(cast<IntegerType>(VariableType),
                                  InitializerPointer);
+
+  // An address of memory libtcg mapped while setting up its CPU depends on the
+  // memory layout of this process, not on the CPU the program runs on
+  if (TheLibTcg.isMappedGuestAddress(InitialValue->getZExtValue())) {
+    revng_log(Log, "The initial value is an address libtcg mapped, using 0");
+    InitialValue = ConstantInt::get(cast<IntegerType>(VariableType), 0);
+  }
 
   // TODO: if this is CSV, check it's of the correct size we expect
   auto &Result = getOrCreateUnstableGlobal(TheModule,

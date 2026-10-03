@@ -40,6 +40,12 @@ private:
   LibTcgArchInfo ArchInfo;
   std::map<intptr_t, llvm::StringRef> GlobalNames;
 
+  // QEMU's `page_get_flags`, which libtcg exports. Its argument is a guest
+  // address (`target_ulong`), which is never wider than 64 bits.
+  using PageGetFlagsFunc = int(uint64_t);
+  PageGetFlagsFunc *PageGetFlags = nullptr;
+  uint64_t MaxGuestAddress = 0;
+
 public:
   ~LibTcg();
 
@@ -79,4 +85,13 @@ public:
   }
 
   const auto &globalNames() const { return GlobalNames; }
+
+  /// Whether \p Address is a guest address of memory that libtcg mapped.
+  ///
+  /// libtcg sets up its CPU the way QEMU's linux-user does, and that setup
+  /// maps guest memory for parts of the CPU state, such as the x86 descriptor
+  /// tables, and stores their address in the CPU state. libtcg reserves no
+  /// guest address space, so these addresses are wherever the host placed the
+  /// mapping: they change with the memory layout of the process.
+  bool isMappedGuestAddress(uint64_t Address) const;
 };

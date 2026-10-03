@@ -2,6 +2,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <cstdint>
+
 extern "C" {
 #include "dlfcn.h"
 }
@@ -40,6 +42,14 @@ LibTcg LibTcg::get(model::Architecture::Values Architecture) {
 
   Result.ArchInfo = Result.Interface.get_arch_info();
 
+  void *PageGetFlagsSym = dlsym(Result.LibraryHandle, "page_get_flags");
+  Result.PageGetFlags = reinterpret_cast<PageGetFlagsFunc *>(PageGetFlagsSym);
+  revng_assert(Result.PageGetFlags != nullptr);
+  Result.MaxGuestAddress = model::Architecture::getPointerSize(Architecture)
+                               == 4 ?
+                             UINT32_MAX :
+                             UINT64_MAX;
+
   std::set<llvm::StringRef> Names;
   for (int I = 0; I < Result.ArchInfo.num_globals; ++I) {
     if (Result.ArchInfo.globals[I].name == nullptr)
@@ -54,6 +64,16 @@ LibTcg LibTcg::get(model::Architecture::Values Architecture) {
   }
 
   return Result;
+}
+
+bool LibTcg::isMappedGuestAddress(uint64_t Address) const {
+  // PAGE_VALID in QEMU's include/exec/cpu-all.h
+  constexpr int QEMUPageValid = 0x0008;
+
+  if (Address == 0 or Address > MaxGuestAddress)
+    return false;
+
+  return (PageGetFlags(Address) & QEMUPageValid) != 0;
 }
 
 LibTcg::~LibTcg() {

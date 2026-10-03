@@ -214,11 +214,7 @@ void CodeGenerator::translate(LibTcg &LibTcg,
   }
 
   const auto &ArchInfo = LibTcg.archInfo();
-  VariableManager Variables(*TheModule,
-                            TargetIsLittleEndian,
-                            ArchInfo.env_offset,
-                            LibTcg.envPointer(),
-                            LibTcg.globalNames());
+  VariableManager Variables(*TheModule, TargetIsLittleEndian, LibTcg);
   //
   // Create well-known CSVs
   //

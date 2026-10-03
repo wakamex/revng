@@ -24,6 +24,7 @@ class StructType;
 class Value;
 } // namespace llvm
 
+class LibTcg;
 struct LibTcgInstructionList;
 struct LibTcgInstruction;
 struct LibTcgArgument;
@@ -63,6 +64,7 @@ private:
 
   llvm::StructType *ArchCPUStruct;
   const llvm::DataLayout *ModuleLayout;
+  const LibTcg &TheLibTcg;
   unsigned LibTcgEnvOffset;
   uint8_t *LibTcgEnvPtr;
 
@@ -73,9 +75,7 @@ private:
 public:
   VariableManager(llvm::Module &M,
                   bool TargetIsLittleEndian,
-                  unsigned LibTcgEnvOffset,
-                  uint8_t *LibTcgEnvPtr,
-                  const std::map<intptr_t, llvm::StringRef> &GlobalNames);
+                  LibTcg &TheLibTcg);
 
   void setAllocaInsertPoint(llvm::Instruction *I) {
     AllocaBuilder.SetInsertPoint(I);
