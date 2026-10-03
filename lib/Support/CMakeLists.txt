@@ -23,6 +23,7 @@ revng_add_library_internal(
   IRHelpers.cpp
   MetaAddress.cpp
   ModuleStatistics.cpp
+  MoveToOwnModule.cpp
   OnQuit.cpp
   PathList.cpp
   Progress.cpp

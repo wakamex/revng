@@ -630,3 +630,18 @@ target_link_libraries(
   Boost::unit_test_framework ${LLVM_LIBRARIES})
 revng_add_test(NAME test_deterministic_order COMMAND test_deterministic_order)
 set_tests_properties(test_deterministic_order PROPERTIES LABELS "unit")
+
+#
+# test_move_to_own_module
+#
+
+revng_add_test_executable(test_move_to_own_module
+                          "${SRC}/MoveToOwnModule.cpp")
+target_compile_definitions(test_move_to_own_module
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_move_to_own_module
+                           PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_move_to_own_module revngSupport
+                      Boost::unit_test_framework ${LLVM_LIBRARIES})
+revng_add_test(NAME test_move_to_own_module COMMAND test_move_to_own_module)
+set_tests_properties(test_move_to_own_module PROPERTIES LABELS "unit")

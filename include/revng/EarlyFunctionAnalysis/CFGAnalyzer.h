@@ -19,6 +19,7 @@
 #include "revng/Model/Binary.h"
 #include "revng/Model/ProgramCounterHandler.h"
 #include "revng/Support/IRBuilder.h"
+#include "revng/Support/MoveToOwnModule.h"
 #include "revng/Support/OpaqueFunctionsPool.h"
 #include "revng/Support/OpaqueRegisterUser.h"
 #include "revng/Support/TemporaryLLVMOption.h"
@@ -202,6 +203,16 @@ private:
   /// Read the calls of \p Marker in \p F, in the order of its use list
   static std::vector<IndirectBranchFacts>
   readIndirectBranchInfo(llvm::Function &F, llvm::Function &Marker);
+
+  /// The worker: parse \p Shipped into a context of its own, run the
+  /// pipeline and read the facts. It touches nothing of the analyzer.
+  static std::vector<IndirectBranchFacts>
+  work(const ShippedFunction &Shipped,
+       llvm::StringRef MarkerName,
+       llvm::StringRef StackPointerName,
+       llvm::raw_ostream &OutputIBI,
+       llvm::raw_ostream &OutputAAWriter,
+       llvm::Task &T);
 
   /// Main thread, after the pipeline: decide the summary from the facts
   FunctionSummary milkInfo(const MetaAddress &Address,

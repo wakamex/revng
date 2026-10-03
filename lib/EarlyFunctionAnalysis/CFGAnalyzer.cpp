@@ -46,6 +46,7 @@
 #include "revng/Support/Generator.h"
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/MetaAddress.h"
+#include "revng/Support/MoveToOwnModule.h"
 #include "revng/Support/NewPC.h"
 
 // This name is not present after `lift`.
@@ -81,6 +82,14 @@ static opt<std::string> IndirectBranchInfoSummaryPath("indirect-branch-info-"
                                                       desc("Write the results "
                                                            "of SA2 on disk."),
                                                       value_desc("filename"));
+
+static opt<bool> RoundTrip("detect-abi-round-trip",
+                           desc("Run the optimization pipeline of each "
+                                "preliminary analysis on a copy of the "
+                                "function in a context of its own, moved "
+                                "there through bitcode, as a worker thread "
+                                "would"),
+                           init(false));
 
 static Logger Log("cfg-analyzer");
 
@@ -1222,6 +1231,47 @@ PreparedFunction CFGAnalyzer::prepare(const MetaAddress &Entry,
   return Result;
 }
 
+/// The CSVs the helpers \p F calls read and write, which the pipeline looks up
+/// by name
+static std::vector<llvm::GlobalValue *> helperCSVs(llvm::Function &F) {
+  std::vector<llvm::GlobalValue *> Result;
+  for (llvm::Instruction &I : llvm::instructions(F)) {
+    if (not isCallToHelper(&I))
+      continue;
+
+    if (auto Usage = tryGetCSVUsedByHelperCall(&I)) {
+      llvm::append_range(Result, Usage->Read);
+      llvm::append_range(Result, Usage->Written);
+    }
+  }
+
+  return Result;
+}
+
+std::vector<IndirectBranchFacts>
+CFGAnalyzer::work(const ShippedFunction &Shipped,
+                  llvm::StringRef MarkerName,
+                  llvm::StringRef StackPointerName,
+                  llvm::raw_ostream &OutputIBI,
+                  llvm::raw_ostream &OutputAAWriter,
+                  llvm::Task &T) {
+  using namespace llvm;
+
+  LLVMContext Context;
+  T.advance("Parse");
+  std::unique_ptr<Module> M = receiveFunction(Shipped, Context);
+  Function &F = *M->getFunction(Shipped.Name);
+  Function *Marker = M->getFunction(MarkerName);
+  GlobalVariable *StackPointer = M->getGlobalVariable(StackPointerName, true);
+  revng_assert(Marker != nullptr and StackPointer != nullptr);
+
+  T.advance("Optimize" + describeSize(F));
+  runOptimizationPipeline(F, StackPointer, OutputIBI, OutputAAWriter);
+
+  T.advance("Collect results" + describeSize(F));
+  return readIndirectBranchInfo(F, *Marker);
+}
+
 FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
                                      PreliminaryAnalysisInputs *Inputs) {
   using namespace llvm;
@@ -1236,21 +1286,40 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
     Oracle.recordCallSitesIn(nullptr);
   });
 
-  llvm::Task T(4, "Analyze function");
+  llvm::Task T(RoundTrip ? 6 : 4, "Analyze function");
 
   // Outline and prepare the function, reading the oracle and the model
   PreparedFunction Prepared = prepare(Entry, T);
-  Function &F = *Prepared.Outlined.Function;
   Function &Marker = *Prepared.Outlined.IndirectBranchInfoMarker;
 
-  // Execute the optimization pipeline over the outlined function, which
-  // reads nothing but the function and its module
-  T.advance("Optimize" + describeSize(F));
-  runOptimizationPipeline(F, Globals.spReg(), *OutputIBI, *OutputAAWriter);
+  std::vector<IndirectBranchFacts> Branches;
+  if (RoundTrip) {
+    // Move the function to a module of its own and through bitcode, then run
+    // the pipeline on a copy in a context of its own
+    Function *F = Prepared.Outlined.releaseFunction();
+    T.advance("Extract" + describeSize(*F));
+    // The marker comes along even when the function has no indirect branch
+    std::vector<GlobalValue *> Extra = helperCSVs(*F);
+    Extra.push_back(&Marker);
+    ShippedFunction Shipped = shipFunction(*F, Extra);
+    Branches = work(Shipped,
+                    Marker.getName(),
+                    Globals.spReg()->getName(),
+                    *OutputIBI,
+                    *OutputAAWriter,
+                    T);
+  } else {
+    // Execute the optimization pipeline over the outlined function, which
+    // reads nothing but the function and its module
+    Function &F = *Prepared.Outlined.Function;
+    T.advance("Optimize" + describeSize(F));
+    runOptimizationPipeline(F, Globals.spReg(), *OutputIBI, *OutputAAWriter);
 
-  // Squeeze out the results obtained from the optimization passes
-  T.advance("Collect results" + describeSize(F));
-  auto Branches = readIndirectBranchInfo(F, Marker);
+    // Squeeze out the results obtained from the optimization passes
+    T.advance("Collect results" + describeSize(F));
+    Branches = readIndirectBranchInfo(F, Marker);
+  }
+
   return milkInfo(Prepared.Outlined.Address,
                   std::move(Prepared.CFG),
                   Prepared.Decoded,
