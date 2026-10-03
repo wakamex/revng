@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "revng/HelperArgumentsAnalysis/Annotation.h"
 #include "revng/Support/FastValuePrinter.h"
 
 #include "ArgumentUsageAnalysis.h"
@@ -99,13 +100,11 @@ struct GlobalAUAResults {
   }
 };
 
-using OffsetAndSize = std::pair<uint64_t, uint64_t>;
-
 struct CPUStateUsage {
   GlobalAUAResults RawAUAResults;
 
-  llvm::DenseSet<OffsetAndSize> Reads;
-  llvm::DenseSet<OffsetAndSize> Writes;
+  Annotation::OffsetAndSizeSet Reads;
+  Annotation::OffsetAndSizeSet Writes;
   bool Escapes = false;
 
 public:
@@ -230,8 +229,7 @@ private:
 
   /// These are the set of parts of the CPU state that each memory access could
   /// touch.
-  std::map<const llvm::Use *, llvm::DenseSet<OffsetAndSize>>
-    MemoryAccessOffsets;
+  std::map<const llvm::Use *, Annotation::OffsetAndSizeSet> MemoryAccessOffsets;
 
   /// These are the set of memory accesses where the CPU state escapes.
   /// This takes precedence over MemoryAccessOffsets.
@@ -259,9 +257,8 @@ public:
     return &It->second;
   }
 
-  const llvm::DenseSet<std::pair<uint64_t, uint64_t>> &
-  getOffsets(const llvm::Use &U) const {
-    static llvm::DenseSet<std::pair<uint64_t, uint64_t>> Empty;
+  const Annotation::OffsetAndSizeSet &getOffsets(const llvm::Use &U) const {
+    static Annotation::OffsetAndSizeSet Empty;
     auto It = MemoryAccessOffsets.find(&U);
     if (It == MemoryAccessOffsets.end())
       return Empty;

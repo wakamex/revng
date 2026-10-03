@@ -4,8 +4,10 @@
 
 #define BOOST_TEST_MODULE DeterministicOrder
 bool init_unit_test();
+#include <algorithm>
 #include <new>
 #include <utility>
+#include <vector>
 
 #include "boost/test/unit_test.hpp"
 
@@ -22,6 +24,7 @@ bool init_unit_test();
 #include "llvm/IR/Module.h"
 
 #include "revng/EarlyFunctionAnalysis/AnalyzeRegisterUsage.h"
+#include "revng/HelperArgumentsAnalysis/Annotation.h"
 #include "revng/PipeboxCommon/LLVMContainer.h"
 #include "revng/PipeboxCommon/ObjectID.h"
 #include "revng/Support/IRHelpers.h"
@@ -264,4 +267,39 @@ BOOST_AUTO_TEST_CASE(FunctionModulesAreParsedInObjectOrder) {
   Second->~ObjectID();
   ::operator delete(Low);
   ::operator delete(High);
+}
+
+/// The CPU-state usage analysis inserts offsets in an order that follows
+/// addresses, so the annotation must list them by content. A hash set lists
+/// these six in the order { 10176, 10560, 10816, 10568, 10184, 10800 }.
+BOOST_AUTO_TEST_CASE(AnnotationListsOffsetsInOrder) {
+  using OffsetAndSize = aua::OffsetAndSize;
+  std::vector<OffsetAndSize> Offsets = { { 10800, 8 }, { 10560, 8 },
+                                         { 10176, 8 }, { 10816, 4 },
+                                         { 10568, 8 }, { 10184, 8 } };
+  aua::Annotation Annotation;
+  for (const OffsetAndSize &Offset : Offsets) {
+    Annotation.Reads.insert(Offset);
+    Annotation.Writes.insert(Offset);
+  }
+
+  LLVMContext Context;
+  MDNode &Node = Annotation.serializeToMetadata(Context);
+  auto Listed = [&Node](unsigned Index) {
+    std::vector<OffsetAndSize> Result;
+    for (const MDOperand &Operand :
+         cast<MDTuple>(Node.getOperand(Index))->operands()) {
+      auto *Pair = cast<MDTuple>(Operand.get());
+      auto Value = [Pair](unsigned I) {
+        return mdconst::extract<ConstantInt>(Pair->getOperand(I))
+          ->getZExtValue();
+      };
+      Result.push_back({ Value(0), Value(1) });
+    }
+    return Result;
+  };
+
+  std::sort(Offsets.begin(), Offsets.end());
+  BOOST_TEST((Listed(1) == Offsets));
+  BOOST_TEST((Listed(2) == Offsets));
 }
