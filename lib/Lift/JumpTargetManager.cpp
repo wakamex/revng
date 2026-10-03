@@ -40,6 +40,7 @@ namespace {
 
 Logger JTCountLog("jtcount");
 Logger RegisterJTLog("registerjt");
+Logger RawCodePointerLog("raw-code-pointers");
 Logger ReadFromPointerLog("read-from-pointer");
 
 CounterMap<std::string> HarvestingStats("harvesting");
@@ -698,8 +699,19 @@ void JumpTargetManager::findCodePointers(MetaAddress StartVirtualAddress,
     auto Read = read<value_type, static_cast<endianness>(endian), 1>;
     uint64_t RawValue = Read(Cursor);
     MetaAddress Value = fromPC(RawValue);
-    if (Value.isInvalid())
+    if (Value.isInvalid() or not isPC(Value))
       continue;
+
+    // Raw words are only candidate pointers. An unwind entry supplies a
+    // decoding origin independent of their order in the scan. Keep explicit
+    // model entries and recovered branches outside this heuristic filter.
+    if (unwindRanges().isInstructionInterior(Value)) {
+      revng_log(RawCodePointerLog,
+                "Ignoring raw code pointer at "
+                  << (StartVirtualAddress + (Cursor - Start)).toString()
+                  << " to instruction interior " << Value.toString());
+      continue;
+    }
 
     BasicBlock *Result = registerJT(Value, JumpTargetReason::GlobalData);
 

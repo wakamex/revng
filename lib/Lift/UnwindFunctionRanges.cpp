@@ -260,6 +260,12 @@ const UnwindFunctionRanges::Sweep &UnwindFunctionRanges::sweep(unsigned Index) {
   return Result;
 }
 
+bool UnwindFunctionRanges::isInstructionInterior(MetaAddress Address) {
+  if (auto Index = find(Address.address()))
+    return not isInstructionStart(*Index, Address.address());
+  return false;
+}
+
 bool UnwindFunctionRanges::isInstructionStart(unsigned Index,
                                               uint64_t Address) {
   const Range &R = Ranges[Index];

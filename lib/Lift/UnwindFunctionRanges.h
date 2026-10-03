@@ -95,6 +95,12 @@ public:
   bool empty() const { return Ranges.empty(); }
   size_t size() const { return Ranges.size(); }
 
+  /// Whether decoding from an unwind range's start places Address inside an
+  /// instruction. Missing unwind information or a failed decode is unknown,
+  /// so returns false. This is a filter for speculative raw pointer scans,
+  /// not a restriction on explicit entries or recovered branches.
+  bool isInstructionInterior(MetaAddress Address);
+
   /// Return how many of \p Targets, the destinations an indirect jump at
   /// \p Jump reads from the table entries at \p Entries (in ascending address
   /// order, one per destination), belong to the table: the leading run of
