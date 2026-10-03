@@ -5,10 +5,13 @@
 //
 
 #include <ranges>
+#include <string>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
@@ -175,8 +178,13 @@ public:
   /// \p Modules is a multipass range of `llvm::Module *`. VisitedValues and
   /// VisitedPrototypes are kept alive across all the modules, so that values
   /// and prototypes shared between modules converge on the same nodes.
+  /// \p ModuleNames names each module in the progress steps.
   template<typename ModuleRange>
-  void buildFromLLVMModules(ModuleRange &&Modules) {
+  void buildFromLLVMModules(ModuleRange &&Modules,
+                            llvm::ArrayRef<std::string> ModuleNames) {
+    revng_assert(static_cast<size_t>(std::ranges::distance(Modules))
+                 == ModuleNames.size());
+
     // The debug printer only needs a module handle for debugging convenience,
     // so install it with the first module of the range. For an empty request
     // the default base printer installed by LayoutTypeSystem stands.
@@ -190,12 +198,26 @@ public:
     SegmentNodeMapT SegmentNodes;
     initializeSegments(SegmentNodes);
 
-    for (llvm::Module *M : Modules)
-      createInterproceduralTypes(*M, SegmentNodes);
+    llvm::Task T(3, "DLA type system");
+    T.advance("Create interprocedural types");
+    {
+      llvm::Task PerModule(ModuleNames.size(), "Create interprocedural types");
+      for (auto &&[M, Name] : llvm::zip_equal(Modules, ModuleNames)) {
+        PerModule.advance(Name);
+        createInterproceduralTypes(*M, SegmentNodes);
+      }
+    }
 
-    for (llvm::Module *M : Modules)
-      createIntraproceduralTypes(*M);
+    T.advance("Create intraprocedural types");
+    {
+      llvm::Task PerModule(ModuleNames.size(), "Create intraprocedural types");
+      for (auto &&[M, Name] : llvm::zip_equal(Modules, ModuleNames)) {
+        PerModule.advance(Name);
+        createIntraproceduralTypes(*M);
+      }
+    }
 
+    T.advance("Create values list");
     createValuesList();
     VisitedValues.clear();
     VisitedPrototypes.clear();

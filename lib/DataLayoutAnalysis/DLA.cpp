@@ -4,6 +4,8 @@
 
 #include <ranges>
 #include <set>
+#include <string>
+#include <vector>
 
 #include "revng/DataLayoutAnalysis/DLA.h"
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
@@ -29,13 +31,18 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
                      return &ModuleContainer.getModule(*Object);
                    });
 
+  // Name each module's progress steps by the address of its function
+  std::vector<std::string> ModuleNames;
+  for (const ObjectID *Object : Incoming[0])
+    ModuleNames.push_back(std::get<MetaAddress>(Object->key()).toString());
+
   llvm::Task T(3, "runDataLayoutAnalysis");
   T.advance("DLA Frontend");
 
   // Front-end: Create the LayoutTypeSystem graph from the LLVM modules
   dla::LayoutTypeSystem TS;
   dla::DLATypeSystemLLVMBuilder Builder{ TS, *Model.get() };
-  Builder.buildFromLLVMModules(Modules);
+  Builder.buildFromLLVMModules(Modules, ModuleNames);
 
   if (BuilderLog.isEnabled())
     Builder.dumpValuesMapping("DLA-values-initial.csv");
@@ -104,15 +111,28 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
     Builder.dumpValuesMapping("DLA-values-after-ME.csv");
 
   T.advance("DLA Backend");
+  llvm::Task Backend(3, "DLA Backend");
 
   // Generate model types
+  Backend.advance("Make model types");
   auto ValueToTypeMap = dla::makeModelTypes(TS, Values, Model.get());
 
+  Backend.advance("Update function signatures and segment types");
   std::set<MetaAddress> UpdatedSegments;
-  for (llvm::Module *M : Modules) {
-    dla::updateFuncSignatures(*M, Model.get(), ValueToTypeMap);
-    dla::updateSegmentsTypes(*M, Model.get(), ValueToTypeMap, UpdatedSegments);
+  {
+    llvm::Task PerModule(ModuleNames.size(),
+                         "Update function signatures and segment types");
+    for (auto &&[M, Name] : llvm::zip_equal(Modules, ModuleNames)) {
+      PerModule.advance(Name);
+      dla::updateFuncSignatures(*M, Model.get(), ValueToTypeMap);
+      dla::updateSegmentsTypes(*M,
+                               Model.get(),
+                               ValueToTypeMap,
+                               UpdatedSegments);
+    }
   }
+
+  Backend.advance("Verify the model");
   revng_assert(Model.get()->verify(true));
 
   return llvm::Error::success();
