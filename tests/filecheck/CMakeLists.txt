@@ -444,6 +444,7 @@ set(FILECHECK_TESTS
     lift/gvec-equality.S
     lift/helper-abort-message.S
     lift/jump-table-extent.S
+    lift/no-build-paths.S
     lift/trace-type-shrinking.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
