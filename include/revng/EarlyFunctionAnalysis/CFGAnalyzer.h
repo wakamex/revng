@@ -5,8 +5,11 @@
 //
 
 #include <memory>
+#include <optional>
 #include <set>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -24,6 +27,8 @@ class FunctionSummaryOracle;
 class PreliminaryAnalysisInputs;
 
 namespace llvm {
+class Task;
+class raw_ostream;
 class Module;
 class GlobalVariable;
 class Function;
@@ -92,6 +97,28 @@ public:
 
 /// The instructions each CFG block decodes, as (block, instruction) pairs
 using DecodedInstructions = std::set<std::pair<BasicBlockID, BasicBlockID>>;
+
+/// What the optimized `indirect_branch_info` call of one indirect branch tells:
+/// the constant arguments the preliminary analysis reads
+struct IndirectBranchFacts {
+  BasicBlockID Block;
+  std::string CalledSymbol;
+  bool JumpsToReturnAddress = false;
+  std::optional<int64_t> StackPointerOffset;
+  bool ReturnAddressPreserved = false;
+
+  /// For each register of `CFGAnalyzer::abiCSVs`, whether it is known to hold
+  /// its value at the function's entry
+  llvm::SmallVector<bool, 16> PreservedRegisters;
+};
+
+/// A function outlined and prepared for the optimization pipeline, with what
+/// the analysis recovered from it before the pipeline
+struct PreparedFunction {
+  OutlinedFunction Outlined;
+  SortedVector<efa::BasicBlock> CFG;
+  DecodedInstructions Decoded;
+};
 
 /// This class, given an Oracle, analyzes a function returning its CFG, the set
 /// of callee saved registers, whether it's noreturn or not and its final stack
@@ -162,11 +189,25 @@ private:
 
   void materializePCValues(llvm::Function *F, revng::IRBuilder &);
 
-  void runOptimizationPipeline(llvm::Function *F);
+  /// Main thread, before the pipeline: outline the function at \p Entry and
+  /// prepare it
+  PreparedFunction prepare(const MetaAddress &Entry, llvm::Task &T);
 
-  FunctionSummary milkInfo(OutlinedFunction *F,
+  /// The pipeline: everything it reads is in \p F's module and its arguments
+  static void runOptimizationPipeline(llvm::Function &F,
+                                      llvm::GlobalVariable *StackPointer,
+                                      llvm::raw_ostream &OutputIBI,
+                                      llvm::raw_ostream &OutputAAWriter);
+
+  /// Read the calls of \p Marker in \p F, in the order of its use list
+  static std::vector<IndirectBranchFacts>
+  readIndirectBranchInfo(llvm::Function &F, llvm::Function &Marker);
+
+  /// Main thread, after the pipeline: decide the summary from the facts
+  FunctionSummary milkInfo(const MetaAddress &Address,
                            SortedVector<efa::BasicBlock> &&CFG,
-                           const DecodedInstructions &Decoded);
+                           const DecodedInstructions &Decoded,
+                           const std::vector<IndirectBranchFacts> &Branches);
 
   struct State {
     llvm::Value *StackPointer;

@@ -112,11 +112,10 @@ makeIndirectEdge(efa::FunctionEdgeType::Values Type) {
 namespace efa {
 
 static efa::BasicBlock &
-blockFromIndirectBranchInfo(CallBase *CI,
+blockFromIndirectBranchInfo(const IndirectBranchFacts &Branch,
                             SortedVector<efa::BasicBlock> &CFG,
                             const DecodedInstructions &Decoded) {
-  auto *BlockIDArgument = CI->getArgOperand(CallerBlockIDIndex);
-  auto ID = BasicBlockID::fromValue(BlockIDArgument);
+  const BasicBlockID &ID = Branch.Block;
   auto It = CFG.find(ID);
   if (It != CFG.end())
     return *It;
@@ -664,7 +663,10 @@ void CFGAnalyzer::materializePCValues(llvm::Function *F,
   }
 }
 
-void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
+void CFGAnalyzer::runOptimizationPipeline(llvm::Function &F,
+                                          llvm::GlobalVariable *StackPointer,
+                                          llvm::raw_ostream &OutputIBI,
+                                          llvm::raw_ostream &OutputAAWriter) {
   using namespace llvm;
 
   // TODO: break it down in the future, and check if some passes can be dropped
@@ -675,7 +677,7 @@ void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
     // compute subexpressions elimination and resolve redundant expressions in
     // order to compute the stack height.
     FPM.addPass(RemoveNewPCCallsPass());
-    FPM.addPass(RemoveHelperCallsPass(Globals.spReg()));
+    FPM.addPass(RemoveHelperCallsPass(StackPointer));
     FPM.addPass(PromoteGlobalToLocalPass());
     FPM.addPass(SimplifyCFGPass());
     FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
@@ -691,7 +693,7 @@ void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
     // Second stage: add alias analysis info and canonicalize `i2p` + `add` into
     // `getelementptr` instructions. Since the IR may change remarkably, another
     // round of passes is necessary to take more optimization opportunities.
-    FPM.addPass(SegregateDirectStackAccessesPass(Globals.spReg()));
+    FPM.addPass(SegregateDirectStackAccessesPass(StackPointer));
     FPM.addPass(EarlyCSEPass(true));
     FPM.addPass(InstCombinePass());
     FPM.addPass(GVNPass());
@@ -699,10 +701,10 @@ void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
     // Third stage: if enabled, serialize the results and dump the functions on
     // disk with the alias information included as comments.
     if (IndirectBranchInfoSummaryPath.getNumOccurrences() == 1)
-      FPM.addPass(IndirectBranchInfoPrinterPass(*OutputIBI));
+      FPM.addPass(IndirectBranchInfoPrinterPass(OutputIBI));
 
     if (AAWriterPath.getNumOccurrences() == 1)
-      FPM.addPass(AAWriterPass(*OutputAAWriter));
+      FPM.addPass(AAWriterPass(OutputAAWriter));
 
     ModuleAnalysisManager MAM;
 
@@ -720,7 +722,7 @@ void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
     PB.registerFunctionAnalyses(FAM);
     PB.registerModuleAnalyses(MAM);
 
-    FPM.run(*F, FAM);
+    FPM.run(F, FAM);
   }
 }
 
@@ -739,13 +741,11 @@ public:
   const CSVSet &getClobberedRegisters() const { return ClobberedRegs; }
 
 public:
-  void recordClobberedRegisters(llvm::CallBase *CI) {
-    using namespace llvm;
-    for (unsigned I = FirstPreservedRegisterIndex; I < CI->arg_size(); ++I) {
-      auto *Register = dyn_cast<ConstantInt>(CI->getArgOperand(I));
-      if (Register == nullptr or Register->getZExtValue() != 0)
-        ClobberedRegs.insert(ABICSVs[I - FirstPreservedRegisterIndex]);
-    }
+  void recordClobberedRegisters(const IndirectBranchFacts &Branch) {
+    revng_assert(Branch.PreservedRegisters.size() == ABICSVs.size());
+    for (auto &&[CSV, Preserved] : zip(ABICSVs, Branch.PreservedRegisters))
+      if (not Preserved)
+        ClobberedRegs.insert(CSV);
   }
 
   void add(const CSVSet &Clobbered) {
@@ -796,15 +796,57 @@ static bool isNoReturn(const model::Binary &Binary,
   return false;
 }
 
-FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
-                                      SortedVector<efa::BasicBlock> &&CFG,
-                                      const DecodedInstructions &Decoded) {
+std::vector<IndirectBranchFacts>
+CFGAnalyzer::readIndirectBranchInfo(llvm::Function &F,
+                                    llvm::Function &Marker) {
+  using namespace llvm;
+  std::vector<IndirectBranchFacts> Result;
+
+  for (CallBase *CI : callers(&Marker)) {
+    if (CI->getParent()->getParent() != &F)
+      continue;
+
+    IndirectBranchFacts &Branch = Result.emplace_back();
+    Branch.Block = BasicBlockID::fromValue(CI->getArgOperand(CallerBlockID));
+
+    auto *CalledSymbolArgument = CI->getArgOperand(CalledSymbolIndex);
+    Branch.CalledSymbol = extractFromConstantStringPtr(CalledSymbolArgument);
+
+    // Is this indirect branch targeting jumping to the return address?
+    Value *Argument = CI->getArgOperand(JumpsToReturnAddressIndex);
+    if (auto *ConstantOffset = dyn_cast<ConstantInt>(Argument))
+      Branch.JumpsToReturnAddress = ConstantOffset->getSExtValue() == 0;
+
+    Argument = CI->getArgOperand(StackPointerOffsetIndex);
+    if (auto *StackPointerOffset = dyn_cast<ConstantInt>(Argument))
+      Branch.StackPointerOffset = StackPointerOffset->getSExtValue();
+
+    Argument = CI->getArgOperand(ReturnValuePreservedIndex);
+    auto *ReturnValuePreserved = dyn_cast<ConstantInt>(Argument);
+    Branch.ReturnAddressPreserved = ReturnValuePreserved != nullptr
+                                    and ReturnValuePreserved->isZero();
+
+    for (unsigned I = FirstPreservedRegisterIndex; I < CI->arg_size(); ++I) {
+      auto *Register = dyn_cast<ConstantInt>(CI->getArgOperand(I));
+      Branch.PreservedRegisters.push_back(Register != nullptr
+                                          and Register->isZero());
+    }
+  }
+
+  return Result;
+}
+
+FunctionSummary
+CFGAnalyzer::milkInfo(const MetaAddress &Address,
+                      SortedVector<efa::BasicBlock> &&CFG,
+                      const DecodedInstructions &Decoded,
+                      const std::vector<IndirectBranchFacts> &Branches) {
   using namespace llvm;
   using namespace efa::FunctionEdgeType;
   using namespace model::Architecture;
   int64_t CallPushSize = getCallPushSize(Binary->Architecture());
 
-  revng_log(Log, "Milking info for " << OutlinedFunction->Address.toString());
+  revng_log(Log, "Milking info for " << Address.toString());
   LoggerIndent Ident(Log);
 
   revng_log(Log, "Initial CFG:\n");
@@ -816,49 +858,34 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     }
   }
 
+  using BranchFacts = const IndirectBranchFacts *;
   using EdgeType = UpcastablePointer<efa::FunctionEdgeBase>;
-  SmallVector<std::pair<CallBase *, EdgeType>, 4> IBIResult;
+  SmallVector<std::pair<BranchFacts, EdgeType>, 4> IBIResult;
 
   // Temporary bins for IBIs that need extra processing
-  SmallVector<std::tuple<CallBase *, int64_t, const FunctionSummary *>, 4>
+  SmallVector<std::tuple<BranchFacts, int64_t, const FunctionSummary *>, 4>
     TailCalls;
-  SmallVector<std::pair<CallBase *, int64_t>, 4> MaybeReturns;
-  SmallVector<std::tuple<CallBase *, int64_t, const FunctionSummary *>, 4>
+  SmallVector<std::pair<BranchFacts, int64_t>, 4> MaybeReturns;
+  SmallVector<std::tuple<BranchFacts, int64_t, const FunctionSummary *>, 4>
     MaybeIndirectTailCalls;
 
-  for (CallBase *CI :
-       callers(OutlinedFunction->IndirectBranchInfoMarker.get())) {
-    if (CI->getParent()->getParent() != OutlinedFunction->Function.get())
-      continue;
+  for (const IndirectBranchFacts &Branch : Branches) {
+    BranchFacts CI = &Branch;
+    bool JumpsToReturnAddress = Branch.JumpsToReturnAddress;
 
-    Value *Argument = nullptr;
-    bool JumpsToReturnAddress = false;
-
-    // Is this indirect branch targeting jumping to the return address?
-    {
-      Argument = CI->getArgOperand(JumpsToReturnAddressIndex);
-      auto *ConstantOffset = dyn_cast<ConstantInt>(Argument);
-      if (ConstantOffset)
-        JumpsToReturnAddress = ConstantOffset->getSExtValue() == 0;
-    }
-
-    const efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI,
+    const efa::BasicBlock &Block = blockFromIndirectBranchInfo(Branch,
                                                                CFG,
                                                                Decoded);
 
     // Is this a tail call? If so, we are very interested in the FSO since
     // it's useful to determine the FSO of the caller
-    auto *CalledSymbolArgument = CI->getArgOperand(CalledSymbolIndex);
-    StringRef CalledSymbol = extractFromConstantStringPtr(CalledSymbolArgument);
-    auto &&[Summary, IsTailCall] = Oracle.getCallSite(OutlinedFunction->Address,
+    auto &&[Summary, IsTailCall] = Oracle.getCallSite(Address,
                                                       Block.ID(),
                                                       MetaAddress::invalid(),
-                                                      CalledSymbol);
+                                                      Branch.CalledSymbol);
 
-    Argument = CI->getArgOperand(StackPointerOffsetIndex);
-    auto *StackPointerOffset = dyn_cast<ConstantInt>(Argument);
-    if (StackPointerOffset != nullptr) {
-      int64_t FSO = StackPointerOffset->getSExtValue();
+    if (Branch.StackPointerOffset.has_value()) {
+      int64_t FSO = *Branch.StackPointerOffset;
       if (JumpsToReturnAddress) {
         if (FSO >= CallPushSize) {
           // We're jumping to the return address with a non-negative stack
@@ -878,10 +905,7 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
           TailCalls.emplace_back(CI, FSO + *Summary->ElectedFSO, Summary);
         }
       } else {
-        Argument = CI->getArgOperand(ReturnValuePreservedIndex);
-        auto *ReturnValuePreserved = dyn_cast<ConstantInt>(Argument);
-        if (ReturnValuePreserved != nullptr
-            and getLimitedValue(ReturnValuePreserved) == 0
+        if (Branch.ReturnAddressPreserved
             and Summary->ElectedFSO.has_value()) {
           // Here the stack pointer offset is known and the value of the
           // return address (in the link register/top of the stack) has been
@@ -904,20 +928,20 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
 
   if (Log.isEnabled()) {
     Log << "TailCalls:\n";
-    for (const auto &[Call, FSO, Summary] : TailCalls) {
-      Log << "  " << ::getName(Call) << " (FSO: " << FSO << ")\n";
+    for (const auto &[Branch, FSO, Summary] : TailCalls) {
+      Log << "  " << Branch->Block.toString() << " (FSO: " << FSO << ")\n";
     }
     Log << DoLog;
 
     Log << "MaybeReturns:\n";
-    for (const auto &[Call, FSO] : MaybeReturns) {
-      Log << "  " << ::getName(Call) << " (FSO: " << FSO << ")\n";
+    for (const auto &[Branch, FSO] : MaybeReturns) {
+      Log << "  " << Branch->Block.toString() << " (FSO: " << FSO << ")\n";
     }
     Log << DoLog;
 
     Log << "MaybeIndirectTailCalls:\n";
-    for (const auto &[Call, FSO, Summary] : MaybeIndirectTailCalls) {
-      Log << "  " << ::getName(Call) << " (FSO: " << FSO << ")\n";
+    for (const auto &[Branch, FSO, Summary] : MaybeIndirectTailCalls) {
+      Log << "  " << Branch->Block.toString() << " (FSO: " << FSO << ")\n";
     }
     Log << DoLog;
   }
@@ -940,13 +964,15 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     bool Different = false;
     for (auto &&[CI, FSO, Summary] : TailCalls) {
       if (FSO == *MaybeWinFSO) {
-        ClobberedRegisters.recordClobberedRegisters(CI);
+        ClobberedRegisters.recordClobberedRegisters(*CI);
         ClobberedRegisters.add(Summary->ClobberedRegisters);
       } else {
         // We found a tail call that leads to a FSO that's not coherent with
         // the elected one. Purge it turning it into a LongJmp.
         Different = true;
-        efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG, Decoded);
+        efa::BasicBlock &Block = blockFromIndirectBranchInfo(*CI,
+                                                             CFG,
+                                                             Decoded);
         revng_assert(Block.Successors().size() == 1);
         auto OldEdge = cast<efa::CallEdge>(Block.Successors().begin()->get());
         revng_assert(OldEdge->IsTailCall());
@@ -977,7 +1003,7 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     if (MaybeWinFSO.has_value() and FSO == *MaybeWinFSO) {
       // It's a return!
       IBIResult.emplace_back(CI, makeIndirectEdge(Return));
-      ClobberedRegisters.recordClobberedRegisters(CI);
+      ClobberedRegisters.recordClobberedRegisters(*CI);
     } else {
       // It's jumping to the return address but leaves the stack pointer in a
       // state not compatible with being a return instruction, it might be the
@@ -1001,10 +1027,9 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
       auto NewEdge = makeCall(MetaAddress::invalid());
       auto *Call = cast<efa::CallEdge>(NewEdge.get());
       Call->IsTailCall() = true;
-      auto *Argument = CI->getArgOperand(CalledSymbolIndex);
-      Call->DynamicFunction() = extractFromConstantStringPtr(Argument);
+      Call->DynamicFunction() = CI->CalledSymbol;
       IBIResult.emplace_back(CI, std::move(NewEdge));
-      ClobberedRegisters.recordClobberedRegisters(CI);
+      ClobberedRegisters.recordClobberedRegisters(*CI);
       ClobberedRegisters.add(Summary->ClobberedRegisters);
     } else {
       IBIResult.emplace_back(CI, makeIndirectEdge(LongJmp));
@@ -1028,8 +1053,8 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     Log << "}" << DoLog;
 
     Log << "IBIResults:\n";
-    for (const auto &[Call, Edge] : IBIResult) {
-      Log << "  " << ::getName(Call) << ":\n";
+    for (const auto &[Branch, Edge] : IBIResult) {
+      Log << "  " << Branch->Block.toString() << ":\n";
       serialize(Log, Edge);
     }
     Log << DoLog;
@@ -1039,12 +1064,10 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
   // Commit  IBIResults to the CFG
   //
   for (const auto &[CI, Edge] : IBIResult) {
-    efa::BasicBlock &Block = blockFromIndirectBranchInfo(CI, CFG, Decoded);
+    efa::BasicBlock &Block = blockFromIndirectBranchInfo(*CI, CFG, Decoded);
     revng_log(Log,
               "Committing the indirect branch of "
-                << BasicBlockID::fromValue(CI->getArgOperand(CallerBlockIDIndex))
-                     .toString()
-                << " to " << Block.ID().toString());
+                << CI->Block.toString() << " to " << Block.ID().toString());
     Block.Successors().insert(std::move(Edge));
   }
 
@@ -1134,37 +1157,25 @@ static std::string describeSize(const llvm::Function &F) {
          + " blocks)";
 }
 
-FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
-                                     PreliminaryAnalysisInputs *Inputs) {
+PreparedFunction CFGAnalyzer::prepare(const MetaAddress &Entry,
+                                      llvm::Task &T) {
   using namespace llvm;
   using llvm::BasicBlock;
 
-  revng_assert(UnboundedScanLimits::active());
-
   revng::IRBuilder Builder(M.getContext());
-
-  // Record what this analysis reads, here and through the oracle
-  Recording = Inputs;
-  Oracle.recordCallSitesIn(Inputs);
-  auto StopRecording = llvm::make_scope_exit([this]() {
-    Recording = nullptr;
-    Oracle.recordCallSitesIn(nullptr);
-  });
-
-  llvm::Task T(4, "Analyze function");
+  PreparedFunction Result;
+  OutlinedFunction &OutlinedFunction = Result.Outlined;
 
   // Detect function boundaries
   T.advance("Outline");
-  OutlinedFunction OutlinedFunction = outline(Entry);
+  OutlinedFunction = outline(Entry);
   T.advance("Prepare" + describeSize(*OutlinedFunction.Function));
 
   // Recover the control-flow graph of the function
-  DecodedInstructions Decoded;
-  SortedVector<efa::BasicBlock> CFG = collectDirectCFG(&OutlinedFunction,
-                                                       Decoded);
+  Result.CFG = collectDirectCFG(&OutlinedFunction, Result.Decoded);
 
   BasicBlock &FirstBlock = OutlinedFunction.Function->getEntryBlock();
-  if (CFG.size() == 0) {
+  if (Result.CFG.size() == 0) {
     // Handle the situation in which the entry block is not in root.
     // This can happen if a model::Function is a non-executable area.
 
@@ -1176,7 +1187,7 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
     revng_assert(none_of(instructions(OutlinedFunction.Function.get()),
                          IsCallToNewPC));
   } else {
-    revng_assert(CFG.size() > 0);
+    revng_assert(Result.CFG.size() > 0);
   }
 
   // The analysis aims at identifying the callee-saved registers of a
@@ -1208,15 +1219,42 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
   // constant-folded away by the optimization pipeline.
   materializePCValues(F, Builder);
 
-  // Execute the optimization pipeline over the outlined function
-  T.advance("Optimize" + describeSize(*F));
-  runOptimizationPipeline(F);
+  return Result;
+}
+
+FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
+                                     PreliminaryAnalysisInputs *Inputs) {
+  using namespace llvm;
+
+  revng_assert(UnboundedScanLimits::active());
+
+  // Record what this analysis reads, here and through the oracle
+  Recording = Inputs;
+  Oracle.recordCallSitesIn(Inputs);
+  auto StopRecording = llvm::make_scope_exit([this]() {
+    Recording = nullptr;
+    Oracle.recordCallSitesIn(nullptr);
+  });
+
+  llvm::Task T(4, "Analyze function");
+
+  // Outline and prepare the function, reading the oracle and the model
+  PreparedFunction Prepared = prepare(Entry, T);
+  Function &F = *Prepared.Outlined.Function;
+  Function &Marker = *Prepared.Outlined.IndirectBranchInfoMarker;
+
+  // Execute the optimization pipeline over the outlined function, which
+  // reads nothing but the function and its module
+  T.advance("Optimize" + describeSize(F));
+  runOptimizationPipeline(F, Globals.spReg(), *OutputIBI, *OutputAAWriter);
 
   // Squeeze out the results obtained from the optimization passes
-  T.advance("Collect results" + describeSize(*F));
-  auto FunctionInfo = milkInfo(&OutlinedFunction, std::move(CFG), Decoded);
-
-  return FunctionInfo;
+  T.advance("Collect results" + describeSize(F));
+  auto Branches = readIndirectBranchInfo(F, Marker);
+  return milkInfo(Prepared.Outlined.Address,
+                  std::move(Prepared.CFG),
+                  Prepared.Decoded,
+                  Branches);
 }
 
 CallSummarizer::CallSummarizer(llvm::Module *M,
