@@ -460,6 +460,7 @@ void DetectABI::preliminaryFunctionAnalysis() {
   // Process the queue
   //
 
+  UnboundedScanLimits Limits;
   WorklistTask Task(EntrypointsQueue.size(), "Analyze functions");
   revng::ConvergenceMonitor Convergence("preliminary function analysis");
   while (!EntrypointsQueue.empty()) {

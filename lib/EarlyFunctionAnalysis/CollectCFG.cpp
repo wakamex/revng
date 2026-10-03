@@ -100,7 +100,10 @@ void CollectCFG::runOnFunction(const model::Function &Function) {
   TupleTree<efa::FunctionBundle> New;
   efa::ControlFlowGraph &Main = New->MainFunction();
   Main.Entry() = EntryAddress;
-  Main.Blocks() = std::move(Analyzer.analyze(EntryAddress).CFG);
+  {
+    efa::UnboundedScanLimits Limits;
+    Main.Blocks() = std::move(Analyzer.analyze(EntryAddress).CFG);
+  }
 
   if (DebugNames) {
     auto Function = Binary.Functions().at(EntryAddress);
@@ -126,7 +129,10 @@ efa::ControlFlowGraph CollectCFG::analyzeFunction(const MetaAddress &Entry) {
 
   efa::ControlFlowGraph Result;
   Result.Entry() = Entry;
-  Result.Blocks() = std::move(Analyzer.analyze(Entry).CFG);
+  {
+    efa::UnboundedScanLimits Limits;
+    Result.Blocks() = std::move(Analyzer.analyze(Entry).CFG);
+  }
 
   if (DebugNames)
     Result.Name() = Binary.Functions().at(Entry).Name();

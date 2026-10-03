@@ -47,7 +47,6 @@
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/MetaAddress.h"
 #include "revng/Support/NewPC.h"
-#include "revng/Support/TemporaryLLVMOption.h"
 
 // This name is not present after `lift`.
 
@@ -160,6 +159,17 @@ streamFromOption(const opt<std::string> &Option) {
   } else {
     return std::make_unique<llvm::raw_null_ostream>();
   }
+}
+
+// Some LLVM passes used in the pipeline scan for cut-offs, meaning that further
+// computation may not be done when they are reached; making some optimizations
+// opportunities missed. Hence, we set the involved thresholds (e.g., the
+// maximum value that MemorySSA uses to take into account stores/phis) to have
+// initial unbounded value.
+UnboundedScanLimits::UnboundedScanLimits() :
+  MemorySSALimit("memssa-check-limit", UINT_MAX),
+  MemoryDependenceLimit("memdep-block-scan-limit", UINT_MAX) {
+  ++Active;
 }
 
 CFGAnalyzer::CFGAnalyzer(llvm::Module &M,
@@ -657,18 +667,6 @@ void CFGAnalyzer::materializePCValues(llvm::Function *F,
 void CFGAnalyzer::runOptimizationPipeline(llvm::Function *F) {
   using namespace llvm;
 
-  // Some LLVM passes used later in the pipeline scan for cut-offs, meaning that
-  // further computation may not be done when they are reached; making some
-  // optimizations opportunities missed. Hence, we set the involved thresholds
-  // (e.g., the maximum value that MemorySSA uses to take into account
-  // stores/phis) to have initial unbounded value.
-  static constexpr const char *MemSSALimit = "memssa-check-limit";
-  static constexpr const char *MemDepBlockLimit = "memdep-block-scan-limit";
-
-  using TemporaryUOption = TemporaryLLVMOption<unsigned>;
-  TemporaryUOption MemSSALimitOption(MemSSALimit, UINT_MAX);
-  TemporaryUOption MemDepBlockLimitOption(MemDepBlockLimit, UINT_MAX);
-
   // TODO: break it down in the future, and check if some passes can be dropped
   {
     FunctionPassManager FPM;
@@ -1140,6 +1138,8 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
                                      PreliminaryAnalysisInputs *Inputs) {
   using namespace llvm;
   using llvm::BasicBlock;
+
+  revng_assert(UnboundedScanLimits::active());
 
   revng::IRBuilder Builder(M.getContext());
 

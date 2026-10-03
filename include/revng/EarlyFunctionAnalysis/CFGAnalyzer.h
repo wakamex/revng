@@ -18,6 +18,7 @@
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/OpaqueFunctionsPool.h"
 #include "revng/Support/OpaqueRegisterUser.h"
+#include "revng/Support/TemporaryLLVMOption.h"
 
 class FunctionSummaryOracle;
 class PreliminaryAnalysisInputs;
@@ -65,6 +66,28 @@ public:
                           MetaAddress Block,
                           const CSVSet &ClobberedRegisters,
                           llvm::Value *SymbolNamePointer) final;
+};
+
+/// Lifts the scan limits of MemorySSA and of memory dependence analysis for as
+/// long as it lives, which the optimization pipeline of `CFGAnalyzer::analyze`
+/// needs. Hold one around a whole loop of analyses: setting a process-wide
+/// option around each pipeline run would race with the pipelines of other
+/// threads.
+class UnboundedScanLimits {
+private:
+  TemporaryLLVMOption<unsigned> MemorySSALimit;
+  TemporaryLLVMOption<unsigned> MemoryDependenceLimit;
+  static inline unsigned Active = 0;
+
+public:
+  UnboundedScanLimits();
+  ~UnboundedScanLimits() { --Active; }
+
+  UnboundedScanLimits(const UnboundedScanLimits &) = delete;
+  UnboundedScanLimits &operator=(const UnboundedScanLimits &) = delete;
+
+public:
+  static bool active() { return Active != 0; }
 };
 
 /// The instructions each CFG block decodes, as (block, instruction) pairs
@@ -115,7 +138,8 @@ public:
 
 public:
   /// Analyze the function at \p Entry. If \p Inputs is not null, record in
-  /// it every answer the analysis gets from the oracle and the model.
+  /// it every answer the analysis gets from the oracle and the model. The
+  /// caller must hold an `UnboundedScanLimits`.
   FunctionSummary analyze(const MetaAddress &Entry,
                           PreliminaryAnalysisInputs *Inputs = nullptr);
 
