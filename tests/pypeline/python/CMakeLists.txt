@@ -56,3 +56,25 @@ revng_add_test(
 set_tests_properties(
   test_pype PROPERTIES LABELS "pypeline" ENVIRONMENT
                        "PYTHONPATH=${CMAKE_BINARY_DIR}/${PYTHON_INSTALL_PATH}")
+
+revng_add_test(
+  NAME
+  test_pypeline_cache_version
+  COMMAND
+  "${Python3_EXECUTABLE}"
+  -m
+  pytest
+  -p
+  no:cacheprovider
+  -v
+  --rootdir
+  "${CMAKE_CURRENT_SOURCE_DIR}"
+  "${CMAKE_CURRENT_SOURCE_DIR}/test_cache_version.py")
+set_tests_properties(
+  test_pypeline_cache_version
+  PROPERTIES
+    LABELS
+    "pypeline"
+    ENVIRONMENT
+    "PYTHONPATH=${CMAKE_BINARY_DIR}/${PYTHON_INSTALL_PATH}:$ENV{PYTHONPATH};PYTHONDONTWRITEBYTECODE=1"
+)

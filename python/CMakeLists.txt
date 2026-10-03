@@ -516,6 +516,23 @@ python_module(
   MODULE_GENERATED_FILES
   revng/pypeline/utils/buffered_reader.py)
 
+# revng.pypeline._source_id identifies the source this build was made from; it
+# guards the storage providers' caches. It is recomputed at every build, so
+# editing the source without reconfiguring changes it, and its files are only
+# rewritten when it changes.
+set(SOURCE_ID_PATH revng/pypeline/_source_id.py)
+set(SOURCE_ID_OUTPUTS
+    "${CMAKE_BINARY_DIR}/${PYTHON_INSTALL_PATH}/${SOURCE_ID_PATH}"
+    "${CMAKE_BINARY_DIR}/build-wheel/pypeline/${SOURCE_ID_PATH}")
+add_custom_target(
+  pypeline-source-id ALL
+  COMMAND
+    "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/write-source-id.py"
+    "${CMAKE_SOURCE_DIR}" "${CMAKE_BINARY_DIR}" ${SOURCE_ID_OUTPUTS}
+  BYPRODUCTS ${SOURCE_ID_OUTPUTS})
+list(APPEND WHEEL_FILES_pypeline
+     "${CMAKE_BINARY_DIR}/build-wheel/pypeline/${SOURCE_ID_PATH}")
+
 configure_file(
   revng/pypeline/pipeline-description-schema.yml
   "${CMAKE_BINARY_DIR}/share/revng/pipeline/pipeline-description-schema.yml"

@@ -17,7 +17,7 @@ from pipebox import GeneratorPipeWithInvalidation, InPlacePipe, MyKind, MyObject
 from pipebox import PurgeAllAnalysis, PurgeOneAnalysis, RootDictContainer, SameKindPipe
 from pipebox import ToHigherKindPipe, ToLowerKindPipe
 
-from revng.pypeline import __version__ as pypeline_version
+from revng.pypeline import cache_version as pypeline_version
 from revng.pypeline import initialize_pypeline
 from revng.pypeline.container import ContainerDeclaration
 from revng.pypeline.model import ReadOnlyModel

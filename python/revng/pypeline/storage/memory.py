@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Iterable, Mapping
 
-from revng.pypeline import __version__ as version
+from revng.pypeline import cache_version as version
 from revng.pypeline.container import ContainerID
 from revng.pypeline.model import Model, ModelPathSet
 from revng.pypeline.object import ObjectID

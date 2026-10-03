@@ -25,7 +25,7 @@ from aiohttp import ClientSession
 from aiohttp.client import ClientTimeout
 from aiohttp.client_exceptions import ClientError
 
-from revng.pypeline import __version__ as version
+from revng.pypeline import cache_version as version
 from revng.pypeline.model import Model, ModelPathSet
 from revng.pypeline.object import ObjectID
 from revng.pypeline.pipeline import Pipeline

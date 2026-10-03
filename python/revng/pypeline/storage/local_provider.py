@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import yaml
 
-from revng.pypeline import __version__ as version
+from revng.pypeline import cache_version as version
 from revng.pypeline.model import Model, ModelDiff, ModelPathSet
 from revng.pypeline.object import ObjectID
 from revng.pypeline.pipeline import Pipeline

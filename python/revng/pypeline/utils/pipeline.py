@@ -30,7 +30,7 @@ def get_pipeline_description(pipeline: Pipeline) -> dict[str, Any]:
     sort_by_name = partial(sorted, key=lambda x: x["name"])
     # Build the pipeline description
     pipeline_description = {
-        "version": revng.pypeline.__version__,
+        "version": revng.pypeline.cache_version,
         "model": {
             "identifier": model_type.identifier,
             "name": model_type.model_name(),

@@ -71,7 +71,7 @@ def test_daemon(daemon_server: TestServer):
     assert "artifacts" in pipeline_data
     assert "analyses" in pipeline_data
     assert "analyses_lists" in pipeline_data
-    assert pipeline_data["version"] == revng.__version__
+    assert pipeline_data["version"] == revng.pypeline.cache_version
 
     # Validate model metadata
     model_metadata = pipeline_data["model"]

@@ -8,6 +8,17 @@
 
 __version__ = "@VERSION@"
 
+try:
+    from ._source_id import SOURCE_ID
+except ImportError:
+    SOURCE_ID = ""
+
+# The version that guards cached objects: storage providers discard every object
+# stored under a different cache version. SOURCE_ID identifies the source the
+# build was made from, so builds of the same source share caches; without it,
+# fall back to the package version, which changes with every configuration.
+cache_version = SOURCE_ID or __version__
+
 from .analysis import Analysis
 from .compression import Compression
 from .container import Container
