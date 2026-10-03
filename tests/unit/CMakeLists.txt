@@ -482,6 +482,21 @@ revng_add_test(NAME test_mfp COMMAND test_mfp)
 set_tests_properties(test_mfp PROPERTIES LABELS "unit;mfp")
 
 #
+# test_convergence_monitor
+#
+
+revng_add_test_executable(test_convergence_monitor
+                          "${SRC}/ConvergenceMonitor.cpp")
+target_compile_definitions(test_convergence_monitor
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_convergence_monitor
+                           PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_convergence_monitor revngSupport
+                      Boost::unit_test_framework ${LLVM_LIBRARIES})
+revng_add_test(NAME test_convergence_monitor COMMAND test_convergence_monitor)
+set_tests_properties(test_convergence_monitor PROPERTIES LABELS "unit")
+
+#
 # test_dla_step_manager
 #
 

@@ -48,6 +48,7 @@
 #include "revng/Model/Register.h"
 #include "revng/Support/BasicBlockID.h"
 #include "revng/Support/CommonOptions.h"
+#include "revng/Support/ConvergenceMonitor.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/FunctionCallMarker.h"
 #include "revng/Support/IRBuilder.h"
@@ -129,6 +130,43 @@ static bool isWritingToMemory(llvm::Instruction &I) {
 }
 
 using BasicBlockQueue = UniquedQueue<const BasicBlockNode *>;
+
+static void hashCSVs(llvm::hash_code &Hash, const efa::CSVSet &Set) {
+  Hash = llvm::hash_combine(Hash, Set.size());
+  for (const llvm::GlobalVariable *CSV : Set)
+    Hash = llvm::hash_combine(Hash, CSV->getName());
+}
+
+/// The part of a function summary that registerLocalFunction decides changes
+/// on, and that it only ever grows: attributes and clobbered registers, with
+/// the elected stack offset that the preliminary analysis replaces.
+static uint64_t summaryState(const efa::FunctionSummary &Summary) {
+  llvm::hash_code Hash = llvm::hash_combine(Summary.Attributes.size(),
+                                            Summary.ElectedFSO.has_value(),
+                                            Summary.ElectedFSO.value_or(0));
+  for (model::FunctionAttribute::Values Attribute : Summary.Attributes)
+    Hash = llvm::hash_combine(Hash, static_cast<int>(Attribute));
+  hashCSVs(Hash, Summary.ClobberedRegisters);
+  return Hash;
+}
+
+/// The register usage results of a function, which the ABI fixed point only
+/// ever grows.
+static uint64_t abiState(const efa::RUAResults &Results) {
+  llvm::hash_code Hash = llvm::hash_combine(Results.CallSites.size());
+  hashCSVs(Hash, Results.ArgumentsRegisters);
+  hashCSVs(Hash, Results.ReturnValuesRegisters);
+  for (const auto &[Block, CallSite] : Results.CallSites) {
+    // Indirect call sites have no callee address
+    const MetaAddress &Callee = CallSite.CalleeAddress;
+    Hash = llvm::hash_combine(Hash, Block, Callee.isValid());
+    if (Callee.isValid())
+      Hash = llvm::hash_combine(Hash, Callee);
+    hashCSVs(Hash, CallSite.ArgumentsRegisters);
+    hashCSVs(Hash, CallSite.ReturnValuesRegisters);
+  }
+  return Hash;
+}
 
 /// A task with one step per element of a worklist, whose total follows the
 /// worklist as it grows.
@@ -370,6 +408,7 @@ void DetectABI::preliminaryFunctionAnalysis() {
   //
 
   WorklistTask Task(EntrypointsQueue.size(), "Analyze functions");
+  revng::ConvergenceMonitor Convergence("preliminary function analysis");
   while (!EntrypointsQueue.empty()) {
     const BasicBlockNode *EntryNode = EntrypointsQueue.pop();
     MetaAddress EntryPointAddress = EntryNode->Address;
@@ -398,13 +437,19 @@ void DetectABI::preliminaryFunctionAnalysis() {
     revng_assert(AnalysisResult.CFG.size() > 0);
 
     if (not Binary->Functions()[EntryPointAddress].Prototype().isEmpty()) {
-      Oracle.getLocalFunction(EntryPointAddress)
-        .CFG = std::move(AnalysisResult.CFG);
+      auto &Summary = Oracle.getLocalFunction(EntryPointAddress);
+      Summary.CFG = std::move(AnalysisResult.CFG);
+      Convergence.visit(EntryPointAddress.toString(),
+                        summaryState(Summary),
+                        false);
       continue;
     }
 
     bool Changed = Oracle.registerLocalFunction(EntryPointAddress,
                                                 std::move(AnalysisResult));
+    Convergence.visit(EntryPointAddress.toString(),
+                      summaryState(Oracle.getLocalFunction(EntryPointAddress)),
+                      Changed);
 
     revng_assert(Oracle.getLocalFunction(EntryPointAddress).CFG.size() > 0);
 
@@ -640,6 +685,7 @@ void DetectABI::analyzeABI() {
   }
 
   unsigned Runs = 0;
+  revng::ConvergenceMonitor Convergence("ABI fixed point");
   while (not ToAnalyze.empty()) {
     model::Function &Function = *ToAnalyze.pop();
     revng_log(Log, "Analyzing " << Function.Entry().toString());
@@ -648,6 +694,10 @@ void DetectABI::analyzeABI() {
     Changes Changes = analyzeFunctionABI(Function,
                                          OutlinedFunction,
                                          RegisterUser);
+    const auto &Summary = Oracle.getLocalFunction(Function.Entry());
+    Convergence.visit(Function.Entry().toString(),
+                      abiState(Summary.ABIResults),
+                      Changes.Function);
 
     if (Changes.Function) {
       revng_log(Log, "The function has changed, re-enqueing all callers:");

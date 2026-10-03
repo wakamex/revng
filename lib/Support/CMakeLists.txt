@@ -12,6 +12,7 @@ revng_add_library_internal(
   CDataModel.cpp
   CommandLine.cpp
   CommonOptions.cpp
+  ConvergenceMonitor.cpp
   CustomizedLLVMPasses.cpp
   Debug.cpp
   DropRedundantPtrIntCasts.cpp
