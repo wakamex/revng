@@ -441,6 +441,7 @@ set(FILECHECK_TESTS
     detect-abi/trap-fallthrough.S
     detect-abi/trap-kinds.S
     lift/gvec-equality.S
+    lift/helper-abort-message.S
     lift/jump-table-extent.S
     lift/trace-type-shrinking.S
     llvm-passes/arithmetic-to-gep.ll
@@ -462,6 +463,7 @@ set(FILECHECK_TESTS
     llvm-passes/remove-extractvalues.ll
     llvm-passes/scope-graph-dumper.ll
     llvm-passes/select-scope.ll
+    llvm-passes/slim-down-helpers-module-constants.ll
     llvm-passes/split-exponential-dataflow.ll
     llvm-passes/split-struct-phis.ll
     llvm-passes/switch-to-statements.ll

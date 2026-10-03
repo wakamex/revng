@@ -17,6 +17,13 @@
 
 using namespace llvm;
 
+/// Whether every module can hold its own copy of \p GV without changing
+/// what the program does
+static bool isInterchangeableConstant(const GlobalVariable &GV) {
+  return GV.isConstant()
+         and (GV.hasLinkOnceODRLinkage() or GV.hasGlobalUnnamedAddr());
+}
+
 class SlimDownHelpersModule : public llvm::ModulePass {
 public:
   static char ID;
@@ -54,6 +61,13 @@ public:
     // * CSVs we want to keep only the ones used by the `revng_inline`
     //   functions, so we set their linkage temporarily to internal, run
     //   `globaldce` and then restore them to their original linkage
+    // * Constants whose copies are interchangeable keep their initializer and
+    //   linkage: the `linkonce_odr` strings `getUniqueString` makes, such as
+    //   the message an `emitAbort` in a helper passes to `revng_abort`, and the
+    //   compiler's `unnamed_addr` constants, such as the strings of an
+    //   `assert`. An inlined helper passes their address on, and the C emitted
+    //   for the function it is inlined into prints their content, which a
+    //   declaration does not have. `globaldce` removes the unused ones
     // * The rest (QEMU globals) do not need their initializer, so it's removed
     //   and their linkage is set to external. `globaldce` will also remove
     //   them if they are unused
@@ -67,8 +81,8 @@ public:
         // Save linkage to be restored after we run globaldce
         GlobalLinkageBackup[GV.getName()] = GV.getLinkage();
         GV.setLinkage(GlobalValue::InternalLinkage);
-      } else {
-        // Blank out initializers for any non-CSV GlobalVariable
+      } else if (not isInterchangeableConstant(GV)) {
+        // Blank out initializers for any other non-CSV GlobalVariable
         GV.setInitializer(nullptr);
         GV.setLinkage(GlobalValue::ExternalLinkage);
       }
