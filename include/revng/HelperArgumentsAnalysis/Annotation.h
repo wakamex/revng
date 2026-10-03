@@ -5,9 +5,8 @@
 //
 
 #include <optional>
+#include <set>
 #include <tuple>
-
-#include "llvm/ADT/DenseSet.h"
 
 namespace llvm {
 class MDNode;
@@ -25,7 +24,10 @@ private:
   static constexpr const char *MetadataKind = "revng.csua";
 
 public:
-  using OffsetAndSizeSet = llvm::DenseSet<OffsetAndSize>;
+  // Ordered, so that everything built by iterating the set (metadata,
+  // switch cases, the order CSVs are created in) depends only on its
+  // content and not on the order the analysis inserted the offsets in.
+  using OffsetAndSizeSet = std::set<OffsetAndSize>;
 
 public:
   bool Escapes = false;

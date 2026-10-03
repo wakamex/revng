@@ -593,7 +593,8 @@ target_compile_definitions(test_deterministic_order
 target_include_directories(test_deterministic_order
                            PRIVATE "${CMAKE_SOURCE_DIR}")
 target_link_libraries(
-  test_deterministic_order revngEarlyFunctionAnalysis revngModel revngSupport
-  revngUnitTestHelpers Boost::unit_test_framework ${LLVM_LIBRARIES})
+  test_deterministic_order revngEarlyFunctionAnalysis
+  revngHelperArgumentsAnalysis revngModel revngSupport revngUnitTestHelpers
+  Boost::unit_test_framework ${LLVM_LIBRARIES})
 revng_add_test(NAME test_deterministic_order COMMAND test_deterministic_order)
 set_tests_properties(test_deterministic_order PROPERTIES LABELS "unit")
