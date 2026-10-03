@@ -623,7 +623,6 @@ std::pair<bool, Value *> VariableManager::getOrCreate(LibTcgArgument *Argument,
     default:
       revng_unreachable("unhandled libtcg temp kind");
     }
-    break;
   default:
     revng_unreachable("unhandled libtcg arg kind");
   }
