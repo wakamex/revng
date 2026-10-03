@@ -15,6 +15,8 @@ class CSVGlobals;
 
 namespace efa {
 
+class PreliminaryAnalysisInputs;
+
 using AttributesSet = MutableSet<model::FunctionAttribute::Values>;
 
 /// A summary of the analysis of a function.
@@ -157,6 +159,9 @@ private:
   /// Default
   std::optional<FunctionSummary> Default;
 
+  /// Where the answers `getCallSite` gives are recorded, if anywhere
+  PreliminaryAnalysisInputs *Recorder = nullptr;
+
 public:
   FunctionSummaryOracle() = delete;
   FunctionSummaryOracle(const model::Binary &Binary,
@@ -211,6 +216,12 @@ public:
   bool registerDynamicFunction(llvm::StringRef Name, FunctionSummary &&New);
 
   void setDefault(FunctionSummary &&Summary) { Default = std::move(Summary); }
+
+  /// Record what `getCallSite` answers in \p Inputs, until called again with
+  /// nullptr
+  void recordCallSitesIn(PreliminaryAnalysisInputs *Inputs) {
+    Recorder = Inputs;
+  }
 
   const FunctionSummary &getDynamicFunction(llvm::StringRef Name) const {
     return DynamicFunctions.at(Name.str());

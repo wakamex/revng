@@ -20,6 +20,7 @@
 #include "revng/Support/OpaqueRegisterUser.h"
 
 class FunctionSummaryOracle;
+class PreliminaryAnalysisInputs;
 
 namespace llvm {
 class Module;
@@ -96,6 +97,9 @@ private:
   std::unique_ptr<llvm::raw_ostream> OutputAAWriter;
   std::unique_ptr<llvm::raw_ostream> OutputIBI;
 
+  /// Where `analyze` records what it reads from the oracle and the model
+  PreliminaryAnalysisInputs *Recording = nullptr;
+
 public:
   CFGAnalyzer(llvm::Module &M,
               RootFunction &Root,
@@ -110,7 +114,10 @@ public:
   const auto &abiCSVs() const { return ABICSVs; }
 
 public:
-  FunctionSummary analyze(const MetaAddress &Entry);
+  /// Analyze the function at \p Entry. If \p Inputs is not null, record in
+  /// it every answer the analysis gets from the oracle and the model.
+  FunctionSummary analyze(const MetaAddress &Entry,
+                          PreliminaryAnalysisInputs *Inputs = nullptr);
 
   OutlinedFunction outline(const MetaAddress &Entry);
 

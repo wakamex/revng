@@ -18,6 +18,7 @@ revng_add_analyses_library_internal(
   IgnorePreservedBits.cpp
   IndirectBranchInfoPrinterPass.cpp
   Outliner.cpp
+  PreliminaryAnalysisCache.cpp
   PromoteGlobalToLocalVars.cpp
   SegregateDirectStackAccesses.cpp
   ${GENERATED_IMPLS})

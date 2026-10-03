@@ -6,6 +6,7 @@
 #include <string>
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/ScopedNoAliasAA.h"
@@ -35,6 +36,7 @@
 #include "revng/EarlyFunctionAnalysis/FunctionEdgeType.h"
 #include "revng/EarlyFunctionAnalysis/IndirectBranchInfo.h"
 #include "revng/EarlyFunctionAnalysis/IndirectBranchInfoPrinterPass.h"
+#include "revng/EarlyFunctionAnalysis/PreliminaryAnalysisCache.h"
 #include "revng/EarlyFunctionAnalysis/PromoteGlobalToLocalVars.h"
 #include "revng/EarlyFunctionAnalysis/SegregateDirectStackAccesses.h"
 #include "revng/Model/FunctionAttribute.h"
@@ -192,6 +194,8 @@ CFGAnalyzer::CFGAnalyzer(llvm::Module &M,
 
 OutlinedFunction CFGAnalyzer::outline(const MetaAddress &Entry) {
   auto &CFG = Oracle.getLocalFunction(Entry).CFG;
+  if (Recording != nullptr)
+    Recording->recordOwnCFG(CFG);
   bool HasCFG = CFG.size() != 0;
   llvm::SmallSet<MetaAddress, 4> ReturnBlocks;
 
@@ -273,6 +277,8 @@ CFGAnalyzer::handleCall(llvm::CallInst *PreCallHookCall) {
   auto Address = BasicBlockID::fromValue(CalleePC).notInlinedAddress();
   if (Address.isValid()) {
     IsDirectCall = Binary->Functions().count(Address) != 0;
+    if (Recording != nullptr)
+      Recording->recordIsFunction(Address, IsDirectCall);
     if (IsDirectCall)
       CalleeAddress = Address;
   }
@@ -765,19 +771,29 @@ static std::optional<int64_t> electFSO(const auto &MaybeReturns) {
 
 static bool isNoReturn(const model::Binary &Binary,
                        FunctionSummaryOracle &Oracle,
-                       const efa::CallEdge &Edge) {
-  if (Edge.Attributes().contains(model::FunctionAttribute::NoReturn))
+                       const efa::CallEdge &Edge,
+                       PreliminaryAnalysisInputs *Recording) {
+  using namespace model::FunctionAttribute;
+  if (Edge.Attributes().contains(NoReturn))
     return true;
 
-  if (not Edge.DynamicFunction().empty())
-    return Binary.ImportedDynamicFunctions()
-      .at(Edge.DynamicFunction())
-      .Attributes()
-      .contains(model::FunctionAttribute::NoReturn);
+  if (not Edge.DynamicFunction().empty()) {
+    bool Result = Binary.ImportedDynamicFunctions()
+                    .at(Edge.DynamicFunction())
+                    .Attributes()
+                    .contains(NoReturn);
+    if (Recording != nullptr)
+      Recording->recordDynamicNoReturn(Edge.DynamicFunction(), Result);
+    return Result;
+  }
 
-  if (Edge.Destination().isValid())
-    return Oracle.getLocalFunction(Edge.Destination().notInlinedAddress())
-      .Attributes.contains(model::FunctionAttribute::NoReturn);
+  if (Edge.Destination().isValid()) {
+    MetaAddress Callee = Edge.Destination().notInlinedAddress();
+    bool Result = Oracle.getLocalFunction(Callee).Attributes.contains(NoReturn);
+    if (Recording != nullptr)
+      Recording->recordLocalNoReturn(Callee, Result);
+    return Result;
+  }
 
   return false;
 }
@@ -1046,7 +1062,7 @@ FunctionSummary CFGAnalyzer::milkInfo(OutlinedFunction *OutlinedFunction,
     if (Edge->Type() == Return) {
       FoundReturn = true;
     } else if (Call != nullptr and Call->IsTailCall()
-               and not isNoReturn(*Binary, Oracle, *Call)) {
+               and not isNoReturn(*Binary, Oracle, *Call, Recording)) {
       FoundReturn = true;
     } else if (Edge->Type() == BrokenReturn) {
       FoundBrokenReturn = true;
@@ -1120,11 +1136,20 @@ static std::string describeSize(const llvm::Function &F) {
          + " blocks)";
 }
 
-FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry) {
+FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
+                                     PreliminaryAnalysisInputs *Inputs) {
   using namespace llvm;
   using llvm::BasicBlock;
 
   revng::IRBuilder Builder(M.getContext());
+
+  // Record what this analysis reads, here and through the oracle
+  Recording = Inputs;
+  Oracle.recordCallSitesIn(Inputs);
+  auto StopRecording = llvm::make_scope_exit([this]() {
+    Recording = nullptr;
+    Oracle.recordCallSitesIn(nullptr);
+  });
 
   llvm::Task T(4, "Analyze function");
 

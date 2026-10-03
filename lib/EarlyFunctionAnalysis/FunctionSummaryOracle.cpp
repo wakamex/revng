@@ -9,6 +9,7 @@
 #include "revng/ADT/STLExtras.h"
 #include "revng/BasicAnalyses/CSVGlobals.h"
 #include "revng/EarlyFunctionAnalysis/FunctionSummaryOracle.h"
+#include "revng/EarlyFunctionAnalysis/PreliminaryAnalysisCache.h"
 #include "revng/Model/Register.h"
 
 static Logger Log("efa-import-model");
@@ -74,17 +75,30 @@ FunctionSummaryOracle::getCallSite(MetaAddress Function,
                                    BasicBlockID CallerBlockAddress,
                                    MetaAddress CalledLocalFunction,
                                    llvm::StringRef CalledSymbol) {
-  auto &&[Summary, IsTailCall] = getExactCallSite(Function, CallerBlockAddress);
-  if (Summary != nullptr) {
-    return { Summary, IsTailCall };
-  } else if (not CalledSymbol.empty()) {
-    return { &getDynamicFunction(CalledSymbol), false };
-  } else if (CalledLocalFunction.isValid()
-             and Binary.Functions().contains(CalledLocalFunction)) {
-    return { &getLocalFunction(CalledLocalFunction), false };
-  } else {
-    return { &getDefault(), false };
-  }
+  auto Select = [&]() -> std::pair<const FunctionSummary *, bool> {
+    auto &&[Summary, IsTailCall] = getExactCallSite(Function,
+                                                    CallerBlockAddress);
+    if (Summary != nullptr) {
+      return { Summary, IsTailCall };
+    } else if (not CalledSymbol.empty()) {
+      return { &getDynamicFunction(CalledSymbol), false };
+    } else if (CalledLocalFunction.isValid()
+               and Binary.Functions().contains(CalledLocalFunction)) {
+      return { &getLocalFunction(CalledLocalFunction), false };
+    } else {
+      return { &getDefault(), false };
+    }
+  };
+
+  auto Result = Select();
+  if (Recorder != nullptr)
+    Recorder->recordCallSite({ Function,
+                               CallerBlockAddress,
+                               CalledLocalFunction,
+                               CalledSymbol.str() },
+                             *Result.first,
+                             Result.second);
+  return Result;
 }
 
 bool FunctionSummaryOracle::registerCallSite(MetaAddress Function,

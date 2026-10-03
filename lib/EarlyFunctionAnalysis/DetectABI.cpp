@@ -37,6 +37,7 @@
 #include "revng/EarlyFunctionAnalysis/FunctionEdgeBase.h"
 #include "revng/EarlyFunctionAnalysis/FunctionSummaryOracle.h"
 #include "revng/EarlyFunctionAnalysis/IgnorePreservedBits.h"
+#include "revng/EarlyFunctionAnalysis/PreliminaryAnalysisCache.h"
 #include "revng/EarlyFunctionAnalysis/PromoteGlobalToLocalVars.h"
 #include "revng/InlineHelpers/InlineHelpers.h"
 #include "revng/InlineHelpers/LinkHelpersToInline.h"
@@ -103,7 +104,22 @@ static opt<std::string> DumpPostInline("detect-abi-dump-post-helpers-inlining",
                                             "debugging and testing)"),
                                        init(""));
 
+static opt<bool> ReusePreliminary("detect-abi-reuse-preliminary",
+                                  desc("Reuse the previous preliminary "
+                                       "analysis of a function when "
+                                       "everything it read from the oracle "
+                                       "and the model is unchanged"),
+                                  init(true));
+
+static opt<bool> CheckReuse("detect-abi-check-reuse",
+                            desc("Analyze a function even when its previous "
+                                 "preliminary analysis could be reused, use "
+                                 "the new result and log whether the two "
+                                 "differ (for testing)"),
+                            init(false));
+
 static Logger Log("detect-abi");
+static Logger ReuseLog("detect-abi-reuse");
 
 struct Changes {
   bool Function = false;
@@ -197,6 +213,7 @@ private:
   TupleTree<model::Binary> &Binary;
   FunctionSummaryOracle &Oracle;
   CFGAnalyzer &Analyzer;
+  PreliminaryAnalysisCache &Analyses;
 
   CallGraph ApproximateCallGraph;
   BasicBlockToNodeMap BasicBlockNodeMap;
@@ -208,7 +225,8 @@ public:
             ControlFlowGraphCache &FMC,
             TupleTree<model::Binary> &Binary,
             FunctionSummaryOracle &Oracle,
-            CFGAnalyzer &Analyzer) :
+            CFGAnalyzer &Analyzer,
+            PreliminaryAnalysisCache &Analyses) :
     M(M),
     Context(M.getContext()),
     Root(Root),
@@ -216,7 +234,8 @@ public:
     FMC(FMC),
     Binary(Binary),
     Oracle(Oracle),
-    Analyzer(Analyzer) {}
+    Analyzer(Analyzer),
+    Analyses(Analyses) {}
 
 public:
   void run() {
@@ -256,6 +275,7 @@ public:
 private:
   void computeApproximateCallGraph();
   void preliminaryFunctionAnalysis();
+  FunctionSummary analyzeOrReuse(const MetaAddress &Entry);
   void analyzeABI();
   Changes analyzeFunctionABI(const model::Function &Function,
                              OutlinedFunction &OutlinedFunction,
@@ -378,6 +398,39 @@ void DetectABI::computeApproximateCallGraph() {
   }
 }
 
+/// Analyze the function at \p Entry, unless its latest analysis read only
+/// answers that are still the same, in which case it would compute the same
+/// result again.
+///
+/// The second run of DetectABI over a module starts from a new oracle that
+/// imports the prototypes the first run wrote to the model, and analyzes every
+/// function again, mostly with the same answers.
+FunctionSummary DetectABI::analyzeOrReuse(const MetaAddress &Entry) {
+  if (not ReusePreliminary)
+    return Analyzer.analyze(Entry);
+
+  if (auto Previous = Analyses.reusable(Entry, Oracle, *Binary)) {
+    llvm::Task Task(1, "Reuse the previous analysis");
+    if (CheckReuse) {
+      FunctionSummary Fresh = Analyzer.analyze(Entry);
+      bool Equal = Fresh == *Previous;
+      revng_log(ReuseLog,
+                "Checked the reuse of " << Entry.toString() << ": "
+                                        << (Equal ? "equal" : "DIFFERENT"));
+      return Fresh;
+    }
+
+    revng_log(ReuseLog, "Reusing the analysis of " << Entry.toString());
+    return std::move(*Previous);
+  }
+
+  revng_log(ReuseLog, "Analyzing " << Entry.toString());
+  PreliminaryAnalysisInputs Inputs = Analyses.newInputs();
+  FunctionSummary Result = Analyzer.analyze(Entry, &Inputs);
+  Analyses.record(Entry, std::move(Inputs), Result);
+  return Result;
+}
+
 void DetectABI::preliminaryFunctionAnalysis() {
   revng_log(Log, "Running the preliminary function analysis");
   LoggerIndent LodIndent(Log);
@@ -416,7 +469,7 @@ void DetectABI::preliminaryFunctionAnalysis() {
     revng_log(Log, "Analyzing " << EntryPointAddress.toString());
     LoggerIndent Indent(Log);
 
-    FunctionSummary AnalysisResult = Analyzer.analyze(EntryNode->Address);
+    FunctionSummary AnalysisResult = analyzeOrReuse(EntryPointAddress);
 
     if (Log.isEnabled()) {
       AnalysisResult.dump(Log);
@@ -1425,7 +1478,8 @@ static void runDetectABI(Module &M,
                          RootFunction &Root,
                          const CSVGlobals &Globals,
                          ControlFlowGraphCache &FMC,
-                         TupleTree<model::Binary> &Binary) {
+                         TupleTree<model::Binary> &Binary,
+                         PreliminaryAnalysisCache &Analyses) {
   using FSOracle = FunctionSummaryOracle;
   llvm::Task Task(2, "Prepare the ABI detection");
   Task.advance("Import prototypes");
@@ -1433,7 +1487,14 @@ static void runDetectABI(Module &M,
   Task.advance("Create the CFG analyzer");
   CFGAnalyzer Analyzer(M, Root, Globals, Binary, Oracle);
   Task.complete();
-  DetectABI ABIDetector(M, Root, Globals, FMC, Binary, Oracle, Analyzer);
+  DetectABI ABIDetector(M,
+                        Root,
+                        Globals,
+                        FMC,
+                        Binary,
+                        Oracle,
+                        Analyzer,
+                        Analyses);
   ABIDetector.run();
 }
 
@@ -1461,13 +1522,17 @@ llvm::Error DetectABI::run(Model &Model,
     PM.run(Module);
   }
 
+  // The second run repeats the preliminary analysis of every function the
+  // first one analyzed, and can reuse the results whose inputs did not change
+  efa::PreliminaryAnalysisCache Analyses;
+
   efa::collectFunctionsFromCallees(Module, Binary);
-  efa::runDetectABI(Module, Root, Globals, FMC, TupleModel);
+  efa::runDetectABI(Module, Root, Globals, FMC, TupleModel, Analyses);
   {
     llvm::Task Task(1, "Collect functions from unused addresses");
     collectFunctionsFromUnusedAddresses(Module, Root, Binary, FMC);
   }
-  efa::runDetectABI(Module, Root, Globals, FMC, TupleModel);
+  efa::runDetectABI(Module, Root, Globals, FMC, TupleModel, Analyses);
 
   return llvm::Error::success();
 }
