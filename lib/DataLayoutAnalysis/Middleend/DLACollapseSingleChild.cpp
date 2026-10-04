@@ -105,6 +105,9 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
         PredIt = Next;
       }
 
+      // The old offset-zero bytes become padding outside the collapsed node.
+      // Only the child's annotation belongs at the new offset zero.
+      Node->HasUnknownPointee = false;
       TS.mergeNodes({ /*Into=*/Node, /*From=*/Child });
       Node->Size = ChildSize;
 

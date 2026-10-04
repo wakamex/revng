@@ -15,6 +15,10 @@ bool init_unit_test();
 
 #include "boost/test/unit_test.hpp"
 
+#include "llvm/IR/Argument.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Module.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -25,7 +29,10 @@ bool init_unit_test();
 #include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
+#include "revng/LocalVariables/LocalVariableHelpers.h"
+#include "revng/Model/IRHelpers.h"
 
+#include "lib/DataLayoutAnalysis/Backend/DLAMakeModelTypes.h"
 #include "lib/DataLayoutAnalysis/Middleend/DLAStep.h"
 #include "lib/DataLayoutAnalysis/Middleend/FieldSizeComputation.h"
 #include "lib/DataLayoutAnalysis/Middleend/RemoveBackedges.h"
@@ -2912,4 +2919,141 @@ BOOST_AUTO_TEST_CASE(ResolveLeafUnionsStillSimplifiesContainedPointees) {
 
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, General), 1);
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 0);
+}
+
+BOOST_AUTO_TEST_CASE(PruningRetainsPointerAlternativeWithoutChangingLayout) {
+  for (bool FromModel : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Root = createRoot(TS, 16);
+    addInstanceAtOffset(TS, Root, 0, 8);
+    auto *Access = addInstanceAtOffset(TS, Root, 8, 8);
+    Access->NonScalar = FromModel;
+    auto *Unknown = createRoot(TS);
+    unsigned UnknownID = Unknown->ID;
+    TS.addPointerLink(Access, Unknown);
+
+    PruneLayoutNodesWithoutLayout Prune;
+    BOOST_CHECK(Prune.runOnTypeSystem(TS));
+    BOOST_CHECK(TS.getEqClasses().isRemoved(UnknownID));
+    BOOST_CHECK(not Prune.runOnTypeSystem(TS));
+    BOOST_CHECK(TS.verifyConsistency() and TS.verifyLeafs());
+    BOOST_REQUIRE(Access->Successors.empty());
+    BOOST_CHECK(Access->HasUnknownPointee);
+    ComputeUpperMemberAccesses().runOnTypeSystem(TS);
+    SimplifyInstanceAtOffset0().runOnTypeSystem(TS);
+    DeduplicateFields().runOnTypeSystem(TS);
+    PushDownPointers().runOnTypeSystem(TS);
+    ResolveLeafUnions().runOnTypeSystem(TS);
+    ComputeNonInterferingComponents().runOnTypeSystem(TS);
+    TS.getEqClasses().compress();
+
+    llvm::LLVMContext Context;
+    llvm::Argument Argument(llvm::Type::getInt64Ty(Context));
+    LayoutTypePtrVect Values{ LayoutTypePtr(&Argument) };
+    TupleTree<model::Binary> Model;
+    Model->Architecture() = model::Architecture::x86_64;
+    auto Types = makeModelTypes(TS, Values, Model);
+    auto *Struct = llvm::dyn_cast<model::StructDefinition>(
+      Types.at(Values[0])->tryGetAsDefinition());
+    BOOST_REQUIRE(Struct);
+    BOOST_CHECK_EQUAL(Struct->Size(), 16);
+    bool Capacity = false;
+    bool Allocation = false;
+    for (const auto &Field : Struct->Fields()) {
+      if (Field.Offset() == 0) {
+        Capacity = llvm::isa<model::PrimitiveType>(Field.Type().get());
+        BOOST_CHECK_EQUAL(*Field.Type()->size(), 8);
+      } else if (Field.Offset() == 8) {
+        auto *Union = llvm::dyn_cast<model::UnionDefinition>(
+          Field.Type()->tryGetAsDefinition());
+        BOOST_REQUIRE(Union);
+        bool Scalar = false;
+        for (const auto &Alternative : Union->Fields()) {
+          const auto *Type = Alternative.Type().get();
+          Scalar |= llvm::isa<model::PrimitiveType>(Type)
+                    or (FromModel and Type->tryGetAsDefinition());
+          if (auto *Pointer = llvm::dyn_cast<model::PointerType>(Type)) {
+            auto *Pointee = llvm::dyn_cast<model::PrimitiveType>(
+              Pointer->PointeeType().get());
+            BOOST_REQUIRE(Pointee);
+            BOOST_CHECK(Pointee->PrimitiveKind() == model::PrimitiveKind::Void);
+            BOOST_CHECK_EQUAL(Pointer->PointerSize(), 8);
+            Allocation = true;
+          }
+        }
+        BOOST_CHECK(Scalar);
+      }
+    }
+    BOOST_CHECK(Capacity and Allocation);
+    BOOST_CHECK(Model->verify());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(PruningKeepsKnownPointees) {
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 8);
+  auto *Pointer = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Known = createRoot(TS, 4);
+  TS.addPointerLink(Pointer, Known);
+  BOOST_CHECK(not PruneLayoutNodesWithoutLayout().runOnTypeSystem(TS));
+  BOOST_CHECK(not Pointer->HasUnknownPointee);
+  BOOST_REQUIRE_EQUAL(Pointer->Successors.size(), 1);
+  BOOST_CHECK(Pointer->Successors.begin()->first == Known);
+}
+
+BOOST_AUTO_TEST_CASE(StackFrameClippingPreservesSharedUnion) {
+  TupleTree<model::Binary> Model;
+  Model->Architecture() = model::Architecture::x86_64;
+  auto &&[Large, LargeType] = Model->makeStructDefinition();
+  Large.Size() = 24;
+  Large.addField(0, model::PrimitiveType::make(model::PrimitiveKind::Generic, 8));
+  auto &&[Shared, SharedType] = Model->makeUnionDefinition();
+  Shared.addField(LargeType.copy());
+  Shared.addField(model::PointerType::make(model::PrimitiveType::makeVoid(),
+                                         Model->Architecture()));
+  auto &&[Stack, StackType] = Model->makeStructDefinition();
+  Stack.Size() = 8;
+  auto &&[Prototype, PrototypeType] = Model->makeRawFunctionDefinition();
+  Prototype.Architecture() = Model->Architecture();
+  Prototype.FinalStackOffset() = 8;
+  Prototype.addArgument(model::Register::rdi_x86_64,
+                        model::PrimitiveType::make(model::PrimitiveKind::Generic,
+                                                   8));
+  auto Entry = MetaAddress::fromPC(Model->Architecture(), 0x1000);
+  model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
+                                                   0x1000));
+  Segment.VirtualSize() = 0x100;
+  Segment.FileSize() = 0x100;
+  Segment.IsExecutable() = true;
+  Model->Segments().insert(std::move(Segment));
+  auto &Function = Model->Functions()[Entry];
+  Function.Prototype() = PrototypeType.copy();
+  Function.StackFrame().Type() = StackType.copy();
+
+  llvm::LLVMContext Context;
+  llvm::Module Module("shared-union", Context);
+  auto *FunctionType = llvm::FunctionType::get(llvm::Type::getVoidTy(Context),
+                                              { llvm::Type::getInt64Ty(Context) },
+                                              false);
+  auto *LLVMFunction = llvm::Function::Create(FunctionType,
+                                             llvm::GlobalValue::ExternalLinkage,
+                                             "shared_union",
+                                             Module);
+  setMetaAddressMetadata(LLVMFunction, FunctionEntryMDName, Entry);
+  auto *Block = llvm::BasicBlock::Create(Context, "entry", LLVMFunction);
+  llvm::IRBuilder<> Builder(Block);
+  auto *Allocation = Builder.CreateAlloca(Builder.getInt64Ty());
+  setStackFrameMetadata(Allocation);
+  Builder.CreateRetVoid();
+  TypeMapT Types;
+  Types.emplace(LayoutTypePtr(LLVMFunction->getArg(0)), SharedType.copy());
+  Types.emplace(LayoutTypePtr(Allocation), SharedType.copy());
+
+  BOOST_REQUIRE(Model->verify(true));
+  BOOST_CHECK(updateFuncSignatures(Module, Model, Types));
+  BOOST_CHECK_EQUAL(Shared.Fields().size(), 2);
+  BOOST_CHECK_EQUAL(*Shared.size(), 24);
+  BOOST_REQUIRE_EQUAL(Stack.Fields().size(), 1);
+  BOOST_CHECK_EQUAL(*Stack.Fields().begin()->Type()->size(), 8);
+  BOOST_CHECK(Model->verify());
 }

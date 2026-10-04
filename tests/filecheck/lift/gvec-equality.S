@@ -23,10 +23,10 @@
 #
 # The unfixed output loses the left-hand loads, returns a constant comparison
 # result, and reports an extra XMM return value. Check the recovered inputs and
-# their comparisons directly, without compiling the decompiler's output.
+# their comparisons directly, allowing the scalar member of a recovered union.
 # C-LABEL: generic64_t entry({{.*}}*argument_0, {{.*}}*argument_1)
-# C: argument_0->offset_0 == (generic8_t) argument_1->offset_0
-# C: argument_0->offset_8 == (generic8_t) argument_1->offset_8
+# C: argument_0->offset_0{{(\.member_[0-9]+)?}} == (generic8_t) argument_1->offset_0{{(\.member_[0-9]+)?}}
+# C: argument_0->offset_8{{(\.member_[0-9]+)?}} == (generic8_t) argument_1->offset_8{{(\.member_[0-9]+)?}}
 # C: argument_0->offset_16 == (generic8_t) argument_1->offset_16
 # C: return {{.*}}== 0xFFFFUL
 

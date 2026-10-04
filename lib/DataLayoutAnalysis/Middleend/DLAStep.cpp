@@ -154,7 +154,10 @@ static void logDigest(const LayoutTypeSystem &TS, llvm::StringRef When) {
     ++Nodes;
     Edges += N->Successors.size();
     OS << N->ID << " " << N->Size << " " << N->InterferingInfo << " "
-       << N->NonScalar << " >";
+       << N->NonScalar;
+    if (N->HasUnknownPointee)
+      OS << " unknown-pointee";
+    OS << " >";
     for (const auto &L : N->Successors)
       PrintLink(L);
     OS << " <";

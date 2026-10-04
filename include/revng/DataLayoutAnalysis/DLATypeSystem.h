@@ -207,6 +207,9 @@ struct LayoutTypeSystemNode {
   uint64_t Size{};
   InterferingChildrenInfo InterferingInfo{ Unknown };
   bool NonScalar{ false };
+  // A pointer interpretation at offset zero whose pointee layout was pruned.
+  // This does not add containment constraints to the layout graph.
+  bool HasUnknownPointee{ false };
 
   LayoutTypeSystemNode(uint64_t I) : ID(I) {}
 
