@@ -14,6 +14,7 @@
 #include "revng/PipeboxCommon/LLVMContainer.h"
 #include "revng/PipeboxCommon/Model.h"
 #include "revng/SegmentReferences/SegmentUsesEnumerator.h"
+#include "revng/Support/MetaAddress/MetaAddressRange.h"
 #include "revng/Support/Generator.h"
 #include "revng/Support/Unicode.h"
 
@@ -69,13 +70,17 @@ private:
   SegmentUsesEnumerator SegmentUses;
   RawBinaryView &BinaryView;
   model::GlobalVariableBuilder GlobalBuilder;
+
+  /// The bytes the lift may decode as code
+  MetaAddressRangeSet Code;
   CandidateList Candidates;
 
 public:
   DetectCStrings(model::Binary &Binary, RawBinaryView &BinaryView) :
     SegmentUses(Binary, SegmentUsesEnumerator::SegmentAccess::ReadOnly),
     BinaryView(BinaryView),
-    GlobalBuilder(Binary) {}
+    GlobalBuilder(Binary),
+    Code(Binary.executableRanges()) {}
 
 public:
   void run(llvm::Module &M, llvm::Function *LimitTo = nullptr);

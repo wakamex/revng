@@ -193,6 +193,15 @@ void DetectCStrings::commit() {
     if (Winner == nullptr)
       continue;
 
+    // A string in bytes the lift decodes as code is a value that happens to
+    // point into code: claiming the bytes would make them data and take them
+    // from the lift
+    MetaAddress End = Winner->Address + Winner->String.data().size();
+    if (Code.overlaps(Winner->Address, End)) {
+      logCandidate("Discarded (in code)", *Winner);
+      continue;
+    }
+
     // Create a uint8_t array of the size of the string (including the NUL byte)
     unsigned CharSize = Winner->String.charSize();
     auto Character = model::PrimitiveType::makeConstUnsigned(CharSize);
