@@ -35,6 +35,11 @@ private:
   llvm::Module &TheModule;
   const TupleTree<model::Binary> &Model;
 
+  /// The backward visit of the last inflateValueMaterializerWhitelist: the
+  /// whitelisted blocks it started from and the blocks it visited.
+  size_t InflationSeeds = 0;
+  size_t InflationVisited = 0;
+
 public:
   RootAnalyzer(JumpTargetManager &JTM);
 

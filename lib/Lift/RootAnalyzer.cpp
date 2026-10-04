@@ -61,6 +61,7 @@ RunningStatistics LoadAddressStatistics("load-address");
 Logger NewEdgesLog("new-edges");
 static Logger Log("root-analyzer");
 static Logger JumpTableExtentLog("jump-table-extent");
+static Logger HarvestRegionLog("harvest-region");
 
 // NOTE: Setting this to 1 gives us performance improvement. We have tested and
 // realized that there is an impact on performance if setting it to 2.
@@ -428,6 +429,7 @@ RootAnalyzer::RootAnalyzer(JumpTargetManager &JTM) :
 
 RootAnalyzer::MetaAddressSet RootAnalyzer::inflateValueMaterializerWhitelist() {
   MetaAddressSet Result;
+  InflationSeeds = 0;
 
   // We start from all the new basic blocks (i.e., those in
   // ValueMaterializerPCWhiteList) and proceed backward in the CFG in order to
@@ -449,6 +451,7 @@ RootAnalyzer::MetaAddressSet RootAnalyzer::inflateValueMaterializerWhitelist() {
     if (WhitelistedMA.isValid()) {
       if (JTM.isInValueMaterializerPCWhitelist(WhitelistedMA)) {
         BasicBlock *BB = I->getParent();
+        ++InflationSeeds;
         auto VisitRange = inverse_depth_first_ext(BB, VisitSet);
         for (const BasicBlock *Reachable : VisitRange) {
           auto MA = getBasicBlockAddress(Reachable);
@@ -460,6 +463,7 @@ RootAnalyzer::MetaAddressSet RootAnalyzer::inflateValueMaterializerWhitelist() {
     }
   }
 
+  InflationVisited = VisitSet.size();
   return Result;
 }
 
@@ -552,6 +556,8 @@ Function *RootAnalyzer::createTemporaryRoot(Function *TheFunction,
   }
 
   // Compute ValueMaterializerJumpTargetWhitelist
+  JumpTargetManager::WhitelistOriginCounts Origins = JTM.whitelistOrigins();
+  size_t WhitelistedPCs = JTM.whitelistSize();
   auto
     ValueMaterializerJumpTargetWhitelist = inflateValueMaterializerWhitelist();
 
@@ -575,6 +581,24 @@ Function *RootAnalyzer::createTemporaryRoot(Function *TheFunction,
   llvm::DenseSet<BasicBlock *> UnreachableBBs = JTM.computeUnreachable();
   for (BasicBlock *UnreachableBB : UnreachableBBs)
     UnreachableBB->removeFromParent();
+
+  // Report what the temporary root is made of: the whitelist by origin, the
+  // backward visit from it, the jump targets it whitelists, and how much of
+  // the root stays reachable from them.
+  revng_log(HarvestRegionLog,
+            "whitelist " << WhitelistedPCs << " (new targets "
+                         << Origins.NewTargets << ", new branches "
+                         << Origins.NewBranches << ", invalidated "
+                         << Origins.Invalidated << "), seeds "
+                         << InflationSeeds << ", backward visited "
+                         << InflationVisited << ", whitelisted targets "
+                         << ValueMaterializerJumpTargetWhitelist.size()
+                         << " of " << JTM.jumpTargetsCount()
+                         << ", detached fallthroughs "
+                         << DetachedFallthroughs.size() << ", invalidated "
+                         << Invalidated.size() << ", root blocks "
+                         << TheFunction->size() << ", unreachable "
+                         << UnreachableBBs.size());
 
   // Clone the function
   OptimizedFunction = CloneFunction(TheFunction, OldToNew);

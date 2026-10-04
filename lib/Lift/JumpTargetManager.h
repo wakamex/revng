@@ -248,8 +248,9 @@ public:
         Changed = DetachedFallthroughs.insert(Address).second or Changed;
 
     if (Changed) {
-      ValueMaterializerPCWhiteList.insert(InvalidatedBranches.begin(),
-                                          InvalidatedBranches.end());
+      for (const MetaAddress &Address : InvalidatedBranches)
+        if (ValueMaterializerPCWhiteList.insert(Address).second)
+          ++WhitelistOrigins.Invalidated;
     }
   }
 
@@ -429,7 +430,9 @@ public:
 
   /// Increment the counter of emitted branches since the last reset
   void recordNewBranches(llvm::BasicBlock *Source, size_t Count) {
-    ValueMaterializerPCWhiteList.insert(getPC(Source->getTerminator()).first);
+    if (ValueMaterializerPCWhiteList.insert(getPC(Source->getTerminator()).first)
+          .second)
+      ++WhitelistOrigins.NewBranches;
     NewBranches += Count;
   }
 
@@ -439,7 +442,25 @@ public:
 
   void clearValueMaterializerPCWhitelist() {
     ValueMaterializerPCWhiteList.clear();
+    WhitelistOrigins = {};
   }
+
+  /// How the entries of the whitelist got there since it was last cleared:
+  /// new jump targets, the sources of newly emitted branches, and indirect
+  /// branches invalidated by newly detached noreturn fallthroughs.
+  struct WhitelistOriginCounts {
+    size_t NewTargets = 0;
+    size_t NewBranches = 0;
+    size_t Invalidated = 0;
+  };
+
+  const WhitelistOriginCounts &whitelistOrigins() const {
+    return WhitelistOrigins;
+  }
+
+  size_t whitelistSize() const { return ValueMaterializerPCWhiteList.size(); }
+
+  size_t jumpTargetsCount() const { return JumpTargets.size(); }
 
   /// Finalizes information about the jump targets
   ///
@@ -616,6 +637,7 @@ private:
   ProgramCounterHandler *PCH = nullptr;
 
   MetaAddressSet ValueMaterializerPCWhiteList;
+  WhitelistOriginCounts WhitelistOrigins;
   std::set<MetaAddress> DetachedFallthroughs;
   const TupleTree<model::Binary> &Model;
   const RawBinaryView &BinaryView;

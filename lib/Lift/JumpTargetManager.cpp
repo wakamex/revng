@@ -1140,7 +1140,8 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
     NewJumpTarget.setReason(JumpTargetReason::DependsOnModelFunction);
 
   // PC was not a jump target, record it as new
-  ValueMaterializerPCWhiteList.insert(PC);
+  if (ValueMaterializerPCWhiteList.insert(PC).second)
+    ++WhitelistOrigins.NewTargets;
 
   return NewBlock;
 }
