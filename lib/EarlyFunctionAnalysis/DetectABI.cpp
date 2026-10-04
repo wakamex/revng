@@ -142,7 +142,7 @@ static opt<unsigned> AnalysesAhead("detect-abi-analyses-ahead",
                                         "function analysis prepares ahead "
                                         "of the one it commits next, with "
                                         "-detect-abi-jobs above one (0: "
-                                        "four per job)"),
+                                        "sixteen per job)"),
                                    init(0));
 
 static opt<size_t> WorkerInstructions("detect-abi-worker-instructions",
@@ -671,7 +671,7 @@ void DetectABI::preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
     return Callees;
   };
 
-  unsigned Ahead = AnalysesAhead != 0 ? AnalysesAhead : 4 * Workers;
+  unsigned Ahead = AnalysesAhead != 0 ? AnalysesAhead : 16 * Workers;
   ToAnalyze.run(C, Workers, Ahead, WorkerInstructions);
 
   const auto &Statistics = ToAnalyze.statistics();
