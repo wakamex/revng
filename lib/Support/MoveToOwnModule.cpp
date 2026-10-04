@@ -5,6 +5,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/Support/Progress.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SetVector.h"
@@ -153,7 +154,10 @@ static void verify(const Module &M) {
 MovedFunction moveToOwnModule(Function &F, ArrayRef<GlobalValue *> Extra) {
   Module &Source = *F.getParent();
   MovedFunction Result;
+  Task T(2, "Move to own module");
+  T.advance("Record use-list order");
   Result.Order = recordUseListOrder(F);
+  T.advance("Move");
   Result.Module = std::make_unique<Module>(F.getName(), F.getContext());
   Module &New = *Result.Module;
   New.setDataLayout(Source.getDataLayout());
@@ -274,10 +278,14 @@ ShippedFunction shipFunction(Function &F, ArrayRef<GlobalValue *> Extra) {
   ShippedFunction Result;
   Result.Name = F.getName().str();
 
+  Task T(3, "Ship function");
+  T.advance("Move to own module");
   MovedFunction Moved = moveToOwnModule(F, Extra);
   Result.Order = std::move(Moved.Order);
+  T.advance("Write bitcode");
   raw_svector_ostream Stream(Result.Bitcode);
   WriteBitcodeToFile(*Moved.Module, Stream);
+  T.advance("Destroy module");
 
   // Constants built on the new globals live in the context: destroy them
   // with the module rather than leave them pointing to deleted globals

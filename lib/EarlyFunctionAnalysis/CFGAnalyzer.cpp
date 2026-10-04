@@ -1295,7 +1295,7 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
     Oracle.recordCallSitesIn(nullptr);
   });
 
-  llvm::Task T(RoundTrip ? 6 : 4, "Analyze function");
+  llvm::Task T(RoundTrip ? 7 : 4, "Analyze function");
 
   // Outline and prepare the function, reading the oracle and the model
   PreparedFunction Prepared = prepare(Entry, T);
@@ -1306,10 +1306,11 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
     // Move the function to a module of its own and through bitcode, then run
     // the pipeline on a copy in a context of its own
     Function *F = Prepared.Outlined.releaseFunction();
-    T.advance("Extract" + describeSize(*F));
+    T.advance("Collect helper CSVs" + describeSize(*F));
     // The marker comes along even when the function has no indirect branch
     std::vector<GlobalValue *> Extra = helperCSVs(*F);
     Extra.push_back(&Marker);
+    T.advance("Extract" + describeSize(*F));
     ShippedFunction Shipped = shipFunction(*F, Extra);
     Branches = work(Shipped,
                     Marker.getName(),
