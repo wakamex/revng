@@ -154,11 +154,10 @@ static std::vector<Commit> speculative(const Program &P,
     R.commit(F, Final, [&](unsigned Caller) { Worklist.insert(Caller); });
     return true;
   };
-  C.DependsOn = [&](unsigned F, unsigned Earlier) {
+  C.Reads = [&](unsigned F) {
     if (not UseDependencies)
-      return false;
-    const auto &Callees = P.Callees[F];
-    return std::find(Callees.begin(), Callees.end(), Earlier) != Callees.end();
+      return std::vector<unsigned>();
+    return P.Callees[F];
   };
 
   Worklist.run(C, Workers, Window, Budget);

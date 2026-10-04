@@ -7,7 +7,9 @@
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -61,10 +63,10 @@ public:
                        std::optional<ResultT> &Result)>
       Commit;
 
-    /// Whether preparing \p Item reads what committing \p Earlier writes. An
-    /// item is not prepared ahead of an earlier item it depends on, since its
-    /// preparation would most likely have to be repeated.
-    std::function<bool(ItemT Item, ItemT Earlier)> DependsOn;
+    /// The items whose commits preparing \p Item reads. An item is not
+    /// prepared ahead of an earlier one among them, since its preparation
+    /// would most likely have to be repeated.
+    std::function<std::vector<ItemT>(ItemT Item)> Reads;
   };
 
   struct Statistics {
@@ -78,12 +80,15 @@ private:
 
   struct Entry {
     ItemT Item;
+    size_t Position = 0;
+    std::vector<ItemT> Reads;
     State Status = State::Waiting;
     std::optional<TicketT> Ticket;
     std::optional<ResultT> Result;
     size_t Cost = 0;
 
-    explicit Entry(ItemT Item) : Item(Item) {}
+    Entry(ItemT Item, size_t Position, std::vector<ItemT> &&Reads) :
+      Item(Item), Position(Position), Reads(std::move(Reads)) {}
   };
 
 private:
@@ -124,6 +129,8 @@ public:
       Threads.emplace_back([this, &C]() { work(C); });
 
     std::deque<std::unique_ptr<Entry>> Ahead;
+    std::map<ItemT, size_t> PositionAhead;
+    size_t NextPosition = 0;
     size_t InFlight = 0;
     size_t InFlightCost = 0;
 
@@ -164,8 +171,12 @@ public:
 
     while (not Pending.empty() or not Ahead.empty()) {
       while (Ahead.size() < Window and not Pending.empty()) {
-        Ahead.push_back(std::make_unique<Entry>(Pending.front()));
+        ItemT Item = Pending.front();
         Pending.pop_front();
+        PositionAhead[Item] = NextPosition;
+        Ahead.push_back(std::make_unique<Entry>(Item,
+                                                NextPosition++,
+                                                C.Reads(Item)));
       }
 
       // Commit the head as soon as it is done
@@ -179,6 +190,7 @@ public:
         Release(Head);
         if (Accepted) {
           ++Stats.Committed;
+          PositionAhead.erase(Head.Item);
           Ahead.pop_front();
         } else {
           Members.insert(Head.Item);
@@ -201,10 +213,11 @@ public:
           if (StatusOf(E) != State::Waiting)
             continue;
 
-          bool Blocked = false;
-          for (size_t J = 0; J < I and not Blocked; ++J)
-            Blocked = C.DependsOn(E.Item, Ahead[J]->Item);
-          if (Blocked)
+          auto IsEarlier = [&](ItemT Read) {
+            auto It = PositionAhead.find(Read);
+            return It != PositionAhead.end() and It->second < E.Position;
+          };
+          if (std::any_of(E.Reads.begin(), E.Reads.end(), IsEarlier))
             continue;
 
           Prepare(E, false);

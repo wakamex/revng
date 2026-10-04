@@ -664,8 +664,11 @@ void DetectABI::preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
   };
 
   // Shipping a function reads the summaries of its callees
-  C.DependsOn = [](const BasicBlockNode *Node, const BasicBlockNode *Earlier) {
-    return llvm::is_contained(Node->successors(), Earlier);
+  C.Reads = [](const BasicBlockNode *Node) {
+    std::vector<const BasicBlockNode *> Callees;
+    for (const BasicBlockNode *Callee : Node->successors())
+      Callees.push_back(Callee);
+    return Callees;
   };
 
   unsigned Ahead = AnalysesAhead != 0 ? AnalysesAhead : 4 * Workers;
