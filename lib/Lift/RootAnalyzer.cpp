@@ -63,6 +63,15 @@ static Logger Log("root-analyzer");
 static Logger JumpTableExtentLog("jump-table-extent");
 static Logger HarvestRegionLog("harvest-region");
 
+static cl::opt<bool> StopAtFunctionEntries("harvest-stop-at-function-entries",
+                                           cl::desc("When choosing the part "
+                                                    "of root a harvest round "
+                                                    "optimizes, do not walk "
+                                                    "backward past a callee "
+                                                    "or a function symbol "
+                                                    "(experimental)"),
+                                           cl::init(false));
+
 // NOTE: Setting this to 1 gives us performance improvement. We have tested and
 // realized that there is an impact on performance if setting it to 2.
 constexpr unsigned InstCombineMaxIterations = 1;
@@ -452,6 +461,30 @@ RootAnalyzer::MetaAddressSet RootAnalyzer::inflateValueMaterializerWhitelist() {
       if (JTM.isInValueMaterializerPCWhitelist(WhitelistedMA)) {
         BasicBlock *BB = I->getParent();
         ++InflationSeeds;
+        if (StopAtFunctionEntries) {
+          // The same visit, except that the predecessors of a function entry
+          // are not visited: they reach it through a tail call
+          SmallVector<BasicBlock *, 16> Worklist;
+          if (VisitSet.insert(BB).second)
+            Worklist.push_back(BB);
+          while (not Worklist.empty()) {
+            BasicBlock *Reachable = Worklist.pop_back_val();
+            auto MA = getBasicBlockAddress(Reachable);
+            bool IsEntry = false;
+            if (MA.isValid() and JTM.isJumpTarget(MA)) {
+              Result.insert(MA);
+              const auto &Target = JTM.at(MA);
+              IsEntry = Target.hasReason(JumpTargetReason::Callee)
+                        or Target.hasReason(JumpTargetReason::FunctionSymbol);
+            }
+            if (IsEntry)
+              continue;
+            for (BasicBlock *Predecessor : predecessors(Reachable))
+              if (VisitSet.insert(Predecessor).second)
+                Worklist.push_back(Predecessor);
+          }
+          continue;
+        }
         auto VisitRange = inverse_depth_first_ext(BB, VisitSet);
         for (const BasicBlock *Reachable : VisitRange) {
           auto MA = getBasicBlockAddress(Reachable);
