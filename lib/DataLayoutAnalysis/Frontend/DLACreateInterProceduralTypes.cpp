@@ -91,6 +91,8 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
 
     // Create the Function's return types
     auto FRetTypes = getOrCreateLayoutTypes(F);
+    for (auto [ReturnNode, Created] : FRetTypes)
+      ReturnNode->IsTypeRoot = true;
 
     // Unify declarations of the same function, including copies in callers.
     const auto [It,
@@ -119,6 +121,7 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
                    or isa<PointerType>(ArgVal.getType()));
       auto &&[ArgNode, _] = getOrCreateLayoutType(&ArgVal);
       revng_assert(ArgNode);
+      ArgNode->IsTypeRoot = true;
 
       model::UpcastableType ArgumentModelType;
       if (RFT) {

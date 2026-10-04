@@ -3173,6 +3173,9 @@ BOOST_AUTO_TEST_CASE(FunctionIdentitySeparatesSharedPrototypeLayouts) {
     revng_assert(It != Values.end());
     return static_cast<unsigned>(std::distance(Values.begin(), It));
   };
+  for (auto *Node : TS.getLayoutsRange())
+    if (Node->ID == ID(First->getArg(0)) or Node->ID == ID(First))
+      BOOST_CHECK(Node->IsTypeRoot);
   unsigned FirstArg = ID(First->getArg(0)), OtherArg = ID(Other->getArg(0));
   unsigned CopyArg = ID(Copy->getArg(0)), Constant = ID(IR.getInt64(8));
   unsigned FirstReturn = ID(First), OtherReturn = ID(Other);
@@ -3187,4 +3190,54 @@ BOOST_AUTO_TEST_CASE(FunctionIdentitySeparatesSharedPrototypeLayouts) {
   BOOST_CHECK(Eq.haveSameEqClass(FirstReturn, DirectReturn));
   BOOST_CHECK(not Eq.haveSameEqClass(FirstReturn, OtherReturn));
   BOOST_CHECK(not Eq.haveSameEqClass(FirstReturn, IndirectReturn));
+}
+
+BOOST_AUTO_TEST_CASE(StructuralSimplificationPreservesFunctionSubobjectLayout) {
+  for (bool Arrange : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Parent = TS.createArtificialLayoutType();
+    auto *Argument = TS.createArtificialLayoutType();
+    auto *Low = TS.createArtificialLayoutType();
+    auto *High = TS.createArtificialLayoutType();
+    auto *Tail = TS.createArtificialLayoutType();
+    Argument->IsTypeRoot = true;
+    Low->Size = High->Size = 4;
+    Tail->Size = 8;
+    TS.addInstanceLink(Parent, Argument, OffsetExpression{ 0 });
+    TS.addInstanceLink(Parent, Tail, OffsetExpression{ 8 });
+    TS.addInstanceLink(Argument, Low, OffsetExpression{ 0 });
+    TS.addInstanceLink(Argument, High, OffsetExpression{ 4 });
+    unsigned ArgumentID = Argument->ID, ParentID = Parent->ID;
+    if (Arrange) {
+      ComputeUpperMemberAccesses().runOnTypeSystem(TS);
+      ArrangeAccessesHierarchically().runOnTypeSystem(TS);
+    } else {
+      SimplifyInstanceAtOffset0().runOnTypeSystem(TS);
+      ComputeUpperMemberAccesses().runOnTypeSystem(TS);
+    }
+    bool Distinct = not TS.getEqClasses().haveSameEqClass(ArgumentID, ParentID);
+    BOOST_CHECK(Distinct);
+    if (Distinct) {
+      BOOST_CHECK_EQUAL(Argument->Size, 8);
+      BOOST_CHECK_EQUAL(Parent->Size, 16);
+    }
+    BOOST_CHECK(TS.verifyDAG());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(SingleChildPreservesFunctionArgumentOrigin) {
+  LayoutTypeSystem TS;
+  auto *Argument = TS.createArtificialLayoutType();
+  auto *Caller = TS.createArtificialLayoutType();
+  auto *Access = TS.createArtificialLayoutType();
+  Caller->Size = Argument->Size = 16;
+  Argument->IsTypeRoot = true;
+  Access->Size = 8;
+  TS.addInstanceLink(Caller, Argument, OffsetExpression{ 0 });
+  TS.addInstanceLink(Argument, Access, OffsetExpression{ 8 });
+  unsigned ArgumentID = Argument->ID, AccessID = Access->ID;
+  CollapseSingleChild().runOnTypeSystem(TS);
+  BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(ArgumentID, AccessID));
+  BOOST_CHECK_EQUAL(Caller->Size, 16);
+  BOOST_CHECK(Caller->IsTypeRoot);
 }

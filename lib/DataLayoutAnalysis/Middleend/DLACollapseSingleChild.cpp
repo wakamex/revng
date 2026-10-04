@@ -68,7 +68,8 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
       Changed = true;
       Merged = true;
 
-    } else if (isPointerRoot(Node) and not isInstanceRoot(Node)) {
+    } else if (not Node->IsTypeRoot and isPointerRoot(Node)
+               and not isInstanceRoot(Node)) {
       // If the node doesn't have incoming pointer nodes, we can try to absorbe
       // even instance edges with offset different than zero, pushing the
       // padding out of the parent Node.

@@ -122,10 +122,13 @@ static bool canBeCollapsed(ReachabilityCache Cache,
   // If the parent has other children, Child cannot be collapsed in it, because
   // that would mean that all other types that contain an instance of Child
   // would start also containing instances of subtypes of Node.
-  // The only case where it is allowed is when the only predecessor of Child is
+  // A function argument or return also exposes its own layout, even when it
+  // has only one predecessor. Keep that boundary when Node has other fields.
+  // Otherwise it is allowed when the only predecessor of Child is
   // Node, because in that case we there is no risk of other predecessors of
   // Child to see other nodes that were originally other children of Node.
-  if (Node->Successors.size() > 1 and Child->Predecessors.size() > 1) {
+  if (Node->Successors.size() > 1
+      and (Child->IsTypeRoot or Child->Predecessors.size() > 1)) {
     revng_log(Log, "parent has other children");
     return false;
   }
