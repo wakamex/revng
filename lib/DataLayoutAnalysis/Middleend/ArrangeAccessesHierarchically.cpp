@@ -354,6 +354,26 @@ canPushThrough(const LayoutTypeSystemNode *Parent,
     return std::nullopt;
   }
 
+  // A partially overlapping access does not establish a field of a function
+  // subobject. Keep it in the containing object instead of spreading it to
+  // every caller of the function. Exact and contained accesses remain valid.
+  if (Outer->IsTypeRoot) {
+    for (const auto &[Field, Tag] : Outer->Successors) {
+      if (not isInstanceEdge({ Field, Tag }))
+        continue;
+      const auto &OE = Tag->getOffsetExpr();
+      if (not OE.Strides.empty() or OE.Offset > Outer->Size
+          or Field->Size > Outer->Size - OE.Offset)
+        continue;
+      uint64_t FieldEnd = OE.Offset + Field->Size;
+      bool Overlaps = OffsetInElem < FieldEnd and OE.Offset < EndByteInElem;
+      bool Inside = OffsetInElem >= OE.Offset and EndByteInElem <= FieldEnd;
+      bool Contains = OffsetInElem <= OE.Offset and EndByteInElem >= FieldEnd;
+      if (Overlaps and not Inside and not Contains)
+        return std::nullopt;
+    }
+  }
+
   return PushThroughComparisonResult{
     .ToPush = InnerIt,
     .Through = OuterIt,

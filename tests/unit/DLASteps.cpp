@@ -3354,3 +3354,31 @@ BOOST_AUTO_TEST_CASE(DeduplicateFunctionViewsPreservesContainment) {
   BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(SparseID, CompleteID));
   BOOST_CHECK(TS.verifyDAG());
 }
+
+BOOST_AUTO_TEST_CASE(ArrangeKeepsCrossFieldAccessOutsideFunctionView) {
+  LayoutTypeSystem TS;
+  auto *Object = createRoot(TS, 32);
+  auto *View = addInstanceAtOffset(TS, Object, 0, 16);
+  View->IsTypeRoot = true;
+  addInstanceAtOffset(TS, View, 0, 8);
+  addInstanceAtOffset(TS, View, 8, 8);
+  auto *Access = addInstanceAtOffset(TS, Object, 5, 8);
+  ArrangeAccessesHierarchically().runOnTypeSystem(TS);
+  BOOST_CHECK_EQUAL(countInstanceEdges(View, Access), 0);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Object, Access), 1);
+  BOOST_CHECK(TS.verifyDAG());
+}
+
+BOOST_AUTO_TEST_CASE(ArrangePropagatesMissingFunctionField) {
+  LayoutTypeSystem TS;
+  auto *Object = createRoot(TS, 32);
+  auto *View = addInstanceAtOffset(TS, Object, 0, 24);
+  View->IsTypeRoot = true;
+  addInstanceAtOffset(TS, View, 8, 8);
+  addInstanceAtOffset(TS, View, 16, 8);
+  auto *Access = addInstanceAtOffset(TS, Object, 0, 8);
+  ArrangeAccessesHierarchically().runOnTypeSystem(TS);
+  BOOST_CHECK_EQUAL(countInstanceEdges(View, Access), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Object, Access), 0);
+  BOOST_CHECK(TS.verifyDAG());
+}
