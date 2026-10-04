@@ -92,19 +92,20 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
     // Create the Function's return types
     auto FRetTypes = getOrCreateLayoutTypes(F);
 
-    // Check if a function with the same prototype has already been visited
-    const auto [It, NewPrototype] = VisitedPrototypes.insert({ Prototype, &F });
+    // Unify declarations of the same function, including copies in callers.
+    const auto [It,
+                NewFunction] = VisitedFunctions.insert({ { Prototype,
+                                                           F.getName().str() },
+                                                         &F });
 
-    // If it wasn't inserted, it means that we already have a function with the
-    // same Prototype. In that case we need to mark return types and argument
-    // types as equal, connecting them with equality links.
-    FuncOrCallInst FuncWithSameProto;
-    if (not NewPrototype) {
-      FuncWithSameProto = It->second;
-      revng_assert(not FuncWithSameProto.isNull());
-      revng_assert(F.arg_size() == FuncWithSameProto.arg_size());
+    // The canonical declaration supplies the shared argument and return nodes.
+    FuncOrCallInst SameFunction;
+    if (not NewFunction) {
+      SameFunction = It->second;
+      revng_assert(not SameFunction.isNull());
+      revng_assert(F.arg_size() == SameFunction.arg_size());
 
-      auto OtherRetVals = getLayoutTypes(*FuncWithSameProto.getVal());
+      auto OtherRetVals = getLayoutTypes(*SameFunction.getVal());
       revng_assert(FRetTypes.size() == OtherRetVals.size());
       for (auto &&[N1, N2] : llvm::zip(OtherRetVals, FRetTypes))
         TS.addEqualityLink(N1, N2.first);
@@ -160,10 +161,9 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
         }
       }
 
-      // If there is already a Function with the same prototype, add equality
-      // edges between args
-      if (not FuncWithSameProto.isNull()) {
-        auto &OtherArg = *(FuncWithSameProto.getArg(ArgIndex));
+      // Connect arguments of declarations referring to the same function.
+      if (not SameFunction.isNull()) {
+        auto &OtherArg = *(SameFunction.getArg(ArgIndex));
         auto *OtherArgNode = getLayoutType(&OtherArg);
         revng_assert(OtherArgNode);
         TS.addEqualityLink(ArgNode, OtherArgNode);

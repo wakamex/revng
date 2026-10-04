@@ -92,8 +92,8 @@ public:
 class DLATypeSystemLLVMBuilder {
 public:
   using VisitedMapT = std::map<LayoutTypePtr, LayoutTypeSystemNode *>;
-  using PrototypesMapT = std::map<const model::TypeDefinition *,
-                                  FuncOrCallInst>;
+  using FunctionsMapT = std::
+    map<std::pair<const model::TypeDefinition *, std::string>, FuncOrCallInst>;
   using SegmentNodeMapT = std::map<const model::Segment *,
                                    LayoutTypeSystemNode *>;
 
@@ -114,9 +114,9 @@ private:
   /// Reverse map between `llvm::Value`s and Nodes
   VisitedMapT VisitedValues;
 
-  /// Associate each indirect call's prototype in the model with the
-  /// first `llvm::CallInst` found with that prototype,
-  PrototypesMapT VisitedPrototypes;
+  /// Canonical declarations of the same function across modules. A shared
+  /// signature alone does not identify a shared object layout.
+  FunctionsMapT VisitedFunctions;
 
 private:
   LayoutTypeSystemNode *getLayoutType(const llvm::Value *V, unsigned Id);
@@ -139,9 +139,10 @@ private:
   llvm::SmallVector<std::pair<LayoutTypeSystemNode *, bool>, 2>
   getOrCreateLayoutTypes(const llvm::Value &V);
 
-  /// Returns a function whose type on the model is \p Prototype, if any
+  /// Return the canonical direct callee when its model prototype matches.
   const llvm::Function *
-  getFunctionWithPrototype(const model::TypeDefinition *Prototype) const;
+  getCanonicalCallee(const model::TypeDefinition *Prototype,
+                     const llvm::Function *Callee) const;
 
 private:
   /// Create one shared artificial node per model segment.
@@ -176,7 +177,7 @@ public:
   /// corresponds to the ID of the corresponding LayoutTypeSystemNode generated
   ///
   /// \p Modules is a multipass range of `llvm::Module *`. VisitedValues and
-  /// VisitedPrototypes are kept alive across all the modules, so that values
+  /// VisitedFunctions are kept alive across all the modules, so that values
   /// and prototypes shared between modules converge on the same nodes.
   /// \p ModuleNames names each module in the progress steps.
   template<typename ModuleRange>
@@ -220,15 +221,8 @@ public:
     T.advance("Create values list");
     createValuesList();
     VisitedValues.clear();
-    VisitedPrototypes.clear();
+    VisitedFunctions.clear();
   }
-
-  /// Given an indirect Call instruction, check if it shares the model
-  /// prototype with another function. If it does, connect the nodes
-  /// corresponding to the types of the return values and arguments of this Call
-  /// with the types of the return values and arguments of the function sharing
-  /// the same prototype, using equality links.
-  bool connectToFuncsWithSamePrototype(const llvm::CallInst *Call);
 };
 
 } // namespace dla

@@ -479,18 +479,10 @@ public:
           const auto *Prototype = getCallSitePrototype(Model, C);
           revng_assert(Prototype);
 
-          // Let's see if there is a function with the call site's prototype.
-          // Let's call this callee, even if strictly speaking it may not be the
-          // callee but just another function whose model type matches the call
-          // site's prototype.
-          // If Callee is null here it means that there is no isolated function
-          // with the exact prototype of the call site.
-          // This can happen is the call site is indirect, or if it was indirect
-          // but was at some point devirtualized without updating the call site
-          // metadata. If the latter happens we have no way of mapping the call
-          // site prototype arguments and return types to the callee return type
-          // and in some cases we have to bail out.
-          const Function *Callee = Builder.getFunctionWithPrototype(Prototype);
+          // Use the actual direct target. Sharing a signature does not make
+          // another function a valid source of return-layout constraints.
+          const Function *Callee = Builder.getCanonicalCallee(Prototype,
+                                                              getCallee(C));
           revng_assert(not Callee or not Callee->isVarArg());
 
           // Add entry in SCEVToLayoutType map for actual arguments of CallInst.
@@ -735,62 +727,6 @@ public:
 };
 
 using Builder = DLATypeSystemLLVMBuilder;
-
-bool Builder::connectToFuncsWithSamePrototype(const llvm::CallInst *Call) {
-  revng_assert(Call);
-  // This procedure for regular functions (i.e. those that are used in direct
-  // calls) is done separately by `CreateInterProceduralTypes`
-  revng_assert(Call->isIndirectCall());
-  bool Changed = false;
-
-  const auto *Prototype = getCallSitePrototype(Model, Call);
-  if (Prototype == nullptr)
-    return false;
-
-  const auto [It, NewPrototype] = VisitedPrototypes.insert({ Prototype, Call });
-  if (NewPrototype)
-    return Changed;
-
-  FuncOrCallInst OtherCall = It->second;
-  revng_assert(not OtherCall.isNull());
-
-  bool ReturnsVoid = OtherCall.getRetType()->isVoidTy();
-  revng_assert(Call->getType()->isVoidTy() == ReturnsVoid);
-
-  if (not ReturnsVoid) {
-    // Connect return values
-    auto OtherRetVals = getLayoutTypes(*OtherCall.getVal());
-    auto RetVals = getLayoutTypes(*Call);
-    revng_assert(RetVals.size() == OtherRetVals.size());
-    for (auto &&[N1, N2] : llvm::zip(OtherRetVals, RetVals)) {
-      Changed = true;
-      TS.addEqualityLink(N1, N2);
-    }
-  }
-
-  // Connect arguments
-  for (const auto &ArgIt : llvm::enumerate(Call->args())) {
-    // Arguments can only be integers and pointers
-    const Value *Arg1 = ArgIt.value();
-    const Value *Arg2 = OtherCall.getArg(ArgIt.index());
-    revng_assert(Arg1->getType()->isIntOrPtrTy()
-                 and Arg2->getType()->isIntOrPtrTy());
-
-    // Avoid creating layouts for pointers to functions.
-    if (isPointerToFunctionExpression(Arg1))
-      continue;
-    if (isPointerToFunctionExpression(Arg2))
-      continue;
-
-    auto *Arg1Node = getLayoutType(Arg1);
-    auto *Arg2Node = getLayoutType(Arg2);
-
-    Changed = true;
-    TS.addEqualityLink(Arg1Node, Arg2Node);
-  }
-
-  return Changed;
-}
 
 bool Builder::createIntraproceduralTypes(llvm::Module &M) {
   bool Changed = false;
@@ -1039,14 +975,6 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
                                                           PointerVal,
                                                           *B);
         }
-
-        // For indirect calls, we want to enforce the following: if this call
-        // shares the prototype with another function in the model, their return
-        // values and arguments must have the same layout. This is done by
-        // adding equality links between these nodes.
-        if (auto *Call = dyn_cast<CallInst>(&I))
-          if (Call->isIndirectCall())
-            Changed |= connectToFuncsWithSamePrototype(Call);
       }
     }
   }

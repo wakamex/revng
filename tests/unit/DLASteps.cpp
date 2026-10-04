@@ -15,17 +15,17 @@ bool init_unit_test();
 
 #include "boost/test/unit_test.hpp"
 
-#include "llvm/IR/Argument.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
-#include "llvm/ADT/SetVector.h"
+#include "llvm/IR/Argument.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
@@ -33,6 +33,7 @@ bool init_unit_test();
 #include "revng/Model/IRHelpers.h"
 
 #include "lib/DataLayoutAnalysis/Backend/DLAMakeModelTypes.h"
+#include "lib/DataLayoutAnalysis/Frontend/DLATypeSystemBuilder.h"
 #include "lib/DataLayoutAnalysis/Middleend/DLAStep.h"
 #include "lib/DataLayoutAnalysis/Middleend/FieldSizeComputation.h"
 #include "lib/DataLayoutAnalysis/Middleend/RemoveBackedges.h"
@@ -3109,4 +3110,81 @@ BOOST_AUTO_TEST_CASE(PointeeUnionStillMergesIndependentAggregateViews) {
                     SecondPointer->Successors.begin()->first);
   BOOST_CHECK_EQUAL(Second->Size, 24);
   BOOST_CHECK_EQUAL(Second->Successors.size(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(FunctionIdentitySeparatesSharedPrototypeLayouts) {
+  TupleTree<model::Binary> Model;
+  Model->Architecture() = model::Architecture::x86_64;
+  auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
+  auto &&[Prototype, PrototypeType] = Model->makeRawFunctionDefinition();
+  Prototype.Architecture() = Model->Architecture();
+  Prototype.FinalStackOffset() = 8;
+  Prototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+  Prototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
+  model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
+                                                  0x1000));
+  Segment.VirtualSize() = 0x100;
+  Segment.FileSize() = 0x100;
+  Segment.IsExecutable() = true;
+  Model->Segments().insert(std::move(Segment));
+  llvm::LLVMContext Context;
+  llvm::Module FirstModule("first", Context), SecondModule("second", Context);
+  FirstModule.setDataLayout("e-p:64:64");
+  SecondModule.setDataLayout("e-p:64:64");
+  auto *Integer = llvm::Type::getInt64Ty(Context);
+  auto *Type = llvm::FunctionType::get(Integer, { Integer }, false);
+  auto Declare = [&](llvm::Module &Module, llvm::StringRef Name, uint64_t PC) {
+    auto Entry = MetaAddress::fromPC(Model->Architecture(), PC);
+    Model->Functions()[Entry].Prototype() = PrototypeType.copy();
+    auto *Function = llvm::Function::Create(Type,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            Name,
+                                            Module);
+    FunctionTags::Isolated.addTo(Function);
+    setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
+    return Function;
+  };
+  auto *First = Declare(FirstModule, "first_function", 0x1000);
+  auto *Other = Declare(FirstModule, "other_function", 0x1010);
+  auto *Copy = Declare(SecondModule, "first_function", 0x1000);
+  auto *Caller = Declare(SecondModule, "caller", 0x1020);
+  auto *Block = llvm::BasicBlock::Create(Context, "entry", Caller);
+  llvm::IRBuilder<> IR(Block);
+  auto Annotate = [&](llvm::CallInst *Call) {
+    setStringMetadata(Call,
+                      PrototypeMDName,
+                      Model->getTypeDefinitionReference(Prototype.key())
+                        .toString());
+    return Call;
+  };
+  auto *Direct = Annotate(IR.CreateCall(Copy, { Caller->getArg(0) }));
+  auto *Target = IR.CreateIntToPtr(Caller->getArg(0), IR.getPtrTy());
+  auto *Indirect = Annotate(IR.CreateCall(Type, Target, { IR.getInt64(8) }));
+  IR.CreateRet(Direct);
+  BOOST_REQUIRE(Model->verify(true));
+
+  LayoutTypeSystem TS;
+  DLATypeSystemLLVMBuilder Builder(TS, *Model);
+  std::vector<llvm::Module *> Modules{ &FirstModule, &SecondModule };
+  Builder.buildFromLLVMModules(Modules, { "first", "second" });
+  auto ID = [&](llvm::Value *Value) {
+    auto &Values = Builder.getValues();
+    auto It = llvm::find(Values, LayoutTypePtr(Value));
+    revng_assert(It != Values.end());
+    return static_cast<unsigned>(std::distance(Values.begin(), It));
+  };
+  unsigned FirstArg = ID(First->getArg(0)), OtherArg = ID(Other->getArg(0));
+  unsigned CopyArg = ID(Copy->getArg(0)), Constant = ID(IR.getInt64(8));
+  unsigned FirstReturn = ID(First), OtherReturn = ID(Other);
+  unsigned CopyReturn = ID(Copy), DirectReturn = ID(Direct);
+  unsigned IndirectReturn = ID(Indirect);
+  runStep<CollapseEqualitySCC>(TS);
+  auto &Eq = TS.getEqClasses();
+  BOOST_CHECK(Eq.haveSameEqClass(FirstArg, CopyArg));
+  BOOST_CHECK(not Eq.haveSameEqClass(FirstArg, OtherArg));
+  BOOST_CHECK(not Eq.haveSameEqClass(FirstArg, Constant));
+  BOOST_CHECK(Eq.haveSameEqClass(FirstReturn, CopyReturn));
+  BOOST_CHECK(Eq.haveSameEqClass(FirstReturn, DirectReturn));
+  BOOST_CHECK(not Eq.haveSameEqClass(FirstReturn, OtherReturn));
+  BOOST_CHECK(not Eq.haveSameEqClass(FirstReturn, IndirectReturn));
 }

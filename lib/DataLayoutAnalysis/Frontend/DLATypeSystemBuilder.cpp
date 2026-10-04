@@ -233,19 +233,16 @@ DLATypeSystemLLVMBuilder::getLayoutTypes(const Value &V) {
 }
 
 const Function *
-DLATypeSystemLLVMBuilder::getFunctionWithPrototype(const model::TypeDefinition
-                                                     *Prototype) const {
-  if (Prototype == nullptr)
+DLATypeSystemLLVMBuilder::getCanonicalCallee(const model::TypeDefinition
+                                               *Prototype,
+                                             const Function *Callee) const {
+  if (Prototype == nullptr or Callee == nullptr)
     return nullptr;
 
-  auto It = VisitedPrototypes.find(Prototype);
-  if (It == VisitedPrototypes.end())
+  auto It = VisitedFunctions.find({ Prototype, Callee->getName().str() });
+  if (It == VisitedFunctions.end())
     return nullptr;
-
-  // Given that we create interprocedural types first, the VisitedPrototype
-  // should always give a Function, unless the Prototype is used only on a call
-  // site.
-  return dyn_cast<Function>(It->second.getVal());
+  return cast<Function>(It->second.getVal());
 }
 
 SmallVector<std::pair<LayoutTypeSystemNode *, bool>, 2>
