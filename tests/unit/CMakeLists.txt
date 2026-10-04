@@ -645,3 +645,18 @@ target_link_libraries(test_move_to_own_module revngSupport
                       Boost::unit_test_framework ${LLVM_LIBRARIES})
 revng_add_test(NAME test_move_to_own_module COMMAND test_move_to_own_module)
 set_tests_properties(test_move_to_own_module PROPERTIES LABELS "unit")
+
+#
+# test_speculative_worklist
+#
+
+revng_add_test_executable(test_speculative_worklist
+                          "${SRC}/SpeculativeWorklist.cpp")
+target_compile_definitions(test_speculative_worklist
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_speculative_worklist
+                           PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_speculative_worklist revngSupport
+                      Boost::unit_test_framework ${LLVM_LIBRARIES})
+revng_add_test(NAME test_speculative_worklist COMMAND test_speculative_worklist)
+set_tests_properties(test_speculative_worklist PROPERTIES LABELS "unit")
