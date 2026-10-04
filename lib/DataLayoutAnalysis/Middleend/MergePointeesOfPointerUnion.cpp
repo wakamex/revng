@@ -217,6 +217,35 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
           }
         }
 
+        // A containing layout and its subobject are separate views. Equating
+        // them feeds the containing extent back into every use of the subobject.
+        // Keep the pointer alternatives when any pair has this relationship,
+        // including pairs connected through an intermediate aggregate.
+        bool HasContainedPointee = false;
+        for (LTSN *Aggregate : UniquedAggregates) {
+          llvm::SmallVector<LTSN *, 16> Worklist{ Aggregate };
+          llvm::SmallPtrSet<LTSN *, 32> Visited;
+          Visited.insert(Aggregate);
+          while (not Worklist.empty() and not HasContainedPointee) {
+            LTSN *Current = Worklist.pop_back_val();
+            for (const auto &Edge : Current->Successors) {
+              if (not isInstanceEdge(Edge))
+                continue;
+              LTSN *Child = Edge.first;
+              if (Child != Aggregate and UniquedAggregates.contains(Child)) {
+                HasContainedPointee = true;
+                break;
+              }
+              if (Visited.insert(Child).second)
+                Worklist.push_back(Child);
+            }
+          }
+          if (HasContainedPointee)
+            break;
+        }
+        if (HasContainedPointee)
+          continue;
+
         // Sort scalars and aggregates so that the first is the node with the
         // lowerst ID among the nodes with largest size.
 

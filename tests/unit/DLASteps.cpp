@@ -3057,3 +3057,56 @@ BOOST_AUTO_TEST_CASE(StackFrameClippingPreservesSharedUnion) {
   BOOST_CHECK_EQUAL(*Stack.Fields().begin()->Type()->size(), 8);
   BOOST_CHECK(Model->verify());
 }
+
+BOOST_AUTO_TEST_CASE(PointeeUnionPreservesContainedAggregateViews) {
+  for (bool Indirect : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Union = createRoot(TS, 8);
+    auto *OuterPointer = addInstanceAtOffset(TS, Union, 0, 8);
+    auto *InnerPointer = addInstanceAtOffset(TS, Union, 0, 8);
+    auto *Outer = createRoot(TS, 320);
+    auto *Inner = createRoot(TS, 16);
+    auto *Middle = Indirect ? createRoot(TS, 24) : Outer;
+    if (Indirect)
+      TS.addInstanceLink(Outer, Middle, OffsetExpression{ 0 });
+    TS.addInstanceLink(Middle, Inner, OffsetExpression{ 0 });
+    addInstanceAtOffset(TS, Inner, 0, 8);
+    addInstanceAtOffset(TS, Inner, 8, 8);
+    addInstanceAtOffset(TS, Outer, 312, 8);
+    TS.addPointerLink(OuterPointer, Outer);
+    TS.addPointerLink(InnerPointer, Inner);
+    auto *Consumer = createRoot(TS, 24);
+    TS.addInstanceLink(Consumer, Inner, OffsetExpression{ 0 });
+    addInstanceAtOffset(TS, Consumer, 16, 8);
+
+    MergePointeesOfPointerUnion Step(8);
+    Step.runOnTypeSystem(TS);
+    BOOST_CHECK(TS.verifyDAG());
+    BOOST_REQUIRE(llvm::is_contained(TS.getLayoutsRange(), Inner));
+    BOOST_CHECK_EQUAL(Inner->Size, 16);
+    BOOST_CHECK_EQUAL(Consumer->Size, 24);
+    BOOST_CHECK_EQUAL(countInstanceEdges(Consumer, Inner), 1);
+    BOOST_CHECK_EQUAL(InnerPointer->Successors.begin()->first, Inner);
+  }
+}
+
+BOOST_AUTO_TEST_CASE(PointeeUnionStillMergesIndependentAggregateViews) {
+  LayoutTypeSystem TS;
+  auto *Union = createRoot(TS, 8);
+  auto *FirstPointer = addInstanceAtOffset(TS, Union, 0, 8);
+  auto *SecondPointer = addInstanceAtOffset(TS, Union, 0, 8);
+  auto *First = createRoot(TS, 16);
+  auto *Second = createRoot(TS, 24);
+  addInstanceAtOffset(TS, First, 0, 8);
+  addInstanceAtOffset(TS, Second, 16, 8);
+  TS.addPointerLink(FirstPointer, First);
+  TS.addPointerLink(SecondPointer, Second);
+
+  MergePointeesOfPointerUnion Step(8);
+  Step.runOnTypeSystem(TS);
+  BOOST_CHECK(TS.verifyDAG());
+  BOOST_CHECK_EQUAL(FirstPointer->Successors.begin()->first,
+                    SecondPointer->Successors.begin()->first);
+  BOOST_CHECK_EQUAL(Second->Size, 24);
+  BOOST_CHECK_EQUAL(Second->Successors.size(), 2);
+}
