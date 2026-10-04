@@ -57,6 +57,10 @@ static std::weak_ordering weakOrderNodes(const LTSN *A, const LTSN *B) {
     return SizeCmp;
   }
 
+  // Unknown pointer evidence changes the emitted type even without successors.
+  if (auto Cmp = A->HasUnknownPointee <=> B->HasUnknownPointee; Cmp != 0)
+    return Cmp;
+
   // If they have a different number of successors, order the one with less
   // successor first;
   size_t NChild1 = A->Successors.size();

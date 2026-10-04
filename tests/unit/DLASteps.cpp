@@ -3382,3 +3382,28 @@ BOOST_AUTO_TEST_CASE(ArrangePropagatesMissingFunctionField) {
   BOOST_CHECK_EQUAL(countInstanceEdges(Object, Access), 0);
   BOOST_CHECK(TS.verifyDAG());
 }
+
+
+BOOST_AUTO_TEST_CASE(DeduplicateFieldsPreservesUnknownPointerEvidence) {
+  for (bool Nested : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Object = createRoot(TS, 16);
+    auto *ScalarView = addInstanceAtOffset(TS, Object, 0, 16);
+    auto *PointerView = addInstanceAtOffset(TS, Object, 0, 16);
+    auto *Scalar = ScalarView;
+    auto *Pointer = PointerView;
+    if (Nested) {
+      Scalar = addInstanceAtOffset(TS, ScalarView, 8, 8);
+      Pointer = addInstanceAtOffset(TS, PointerView, 8, 8);
+    }
+    Pointer->HasUnknownPointee = true;
+    auto *OtherObject = createRoot(TS, 24);
+    TS.addInstanceLink(OtherObject, Scalar, OffsetExpression{ 8 });
+    unsigned ScalarID = Scalar->ID, PointerID = Pointer->ID;
+    DeduplicateFields().runOnTypeSystem(TS);
+    BOOST_REQUIRE(not TS.getEqClasses().haveSameEqClass(ScalarID, PointerID));
+    BOOST_CHECK(not Scalar->HasUnknownPointee);
+    BOOST_CHECK(Pointer->HasUnknownPointee);
+    BOOST_CHECK(TS.verifyDAG());
+  }
+}
