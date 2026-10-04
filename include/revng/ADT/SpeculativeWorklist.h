@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -73,6 +74,9 @@ public:
     size_t Prepared = 0;
     size_t Repeated = 0;
     size_t Committed = 0;
+
+    /// Time the main thread spent waiting for a worker
+    std::chrono::duration<double> Waiting{ 0 };
   };
 
 private:
@@ -228,11 +232,13 @@ public:
         continue;
 
       // Nothing to do but wait for a worker to finish something
+      auto Start = std::chrono::steady_clock::now();
       std::unique_lock Guard(Lock);
       size_t Seen = Completions;
       WorkDone.wait(Guard, [&]() {
         return Completions != Seen or Head.Status == State::Done;
       });
+      Stats.Waiting += std::chrono::steady_clock::now() - Start;
     }
 
     {

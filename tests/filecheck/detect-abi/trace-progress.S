@@ -55,7 +55,7 @@
 #
 # JOBS: "name": "Ship function", "cat": "task", "ph": "B"
 # JOBS: "name": "Analyze shipped function", "cat": "task", "ph": "B"
-# JOBS: "name": "Analyzed on 4 workers: {{[0-9]+}} commits, {{[0-9]+}} preparations, {{[0-9]+}} repeated"
+# JOBS: "name": "Analyzed on 4 workers: {{[0-9]+}} commits, {{[0-9]+}} preparations, {{[0-9]+}} repeated, {{[0-9]+}} s waiting for workers"
 #
 # MODEL: Functions:
 # MODEL-COUNT-3: - Entry: "0x{{[0-9a-f]+}}:Code_x86_64"

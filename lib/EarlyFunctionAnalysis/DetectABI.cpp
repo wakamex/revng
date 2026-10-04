@@ -679,7 +679,10 @@ void DetectABI::preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
                      "Analyzed on " + llvm::Twine(Workers) + " workers: "
                        + llvm::Twine(Statistics.Committed) + " commits, "
                        + llvm::Twine(Statistics.Prepared) + " preparations, "
-                       + llvm::Twine(Statistics.Repeated) + " repeated");
+                       + llvm::Twine(Statistics.Repeated) + " repeated, "
+                       + llvm::Twine(static_cast<uint64_t>(
+                         Statistics.Waiting.count()))
+                       + " s waiting for workers");
 }
 
 void DetectABI::preliminaryFunctionAnalysis() {
