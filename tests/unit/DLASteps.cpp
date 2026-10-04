@@ -3407,3 +3407,66 @@ BOOST_AUTO_TEST_CASE(DeduplicateFieldsPreservesUnknownPointerEvidence) {
     BOOST_CHECK(TS.verifyDAG());
   }
 }
+
+
+BOOST_AUTO_TEST_CASE(ConstantStoresDoNotUnifyIndependentStorage) {
+  TupleTree<model::Binary> Model;
+  Model->Architecture() = model::Architecture::x86_64;
+  auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
+  auto &&[Prototype, PrototypeType] = Model->makeRawFunctionDefinition();
+  Prototype.Architecture() = Model->Architecture();
+  Prototype.FinalStackOffset() = 8;
+  Prototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+  Prototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
+  model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(), 0x1000));
+  Segment.VirtualSize() = Segment.FileSize() = 0x100;
+  Segment.IsExecutable() = true;
+  Model->Segments().insert(std::move(Segment));
+  llvm::LLVMContext Context;
+  llvm::Module Module("constants", Context);
+  Module.setDataLayout("e-p:64:64");
+  auto *Integer = llvm::Type::getInt64Ty(Context);
+  auto *Type = llvm::FunctionType::get(Integer, { Integer }, false);
+  llvm::SmallVector<llvm::Value *> Addresses;
+  for (unsigned Index = 0; Index != 8; ++Index) {
+    auto Entry = MetaAddress::fromPC(Model->Architecture(), 0x1000 + Index * 16);
+    Model->Functions()[Entry].Prototype() = PrototypeType.copy();
+    auto *Function = llvm::Function::Create(Type,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            "store_" + std::to_string(Index),
+                                            Module);
+    FunctionTags::Isolated.addTo(Function);
+    setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
+    llvm::IRBuilder<> IR(llvm::BasicBlock::Create(Context, "entry", Function));
+    auto *Address = IR.CreateIntToPtr(Function->getArg(0), IR.getPtrTy());
+    Addresses.push_back(Address);
+    const uint64_t Values[] = { 0, 1, 8, UINT64_MAX };
+    IR.CreateStore(IR.getInt64(Values[Index / 2]), Address);
+    IR.CreateRet(Function->getArg(0));
+  }
+  BOOST_REQUIRE(Model->verify(true));
+  LayoutTypeSystem TS;
+  DLATypeSystemLLVMBuilder Builder(TS, *Model);
+  std::vector<llvm::Module *> Modules{ &Module };
+  Builder.buildFromLLVMModules(Modules, { "constants" });
+  llvm::SmallVector<unsigned> Accesses;
+  for (auto *Address : Addresses) {
+    auto &Values = Builder.getValues();
+    auto It = llvm::find(Values, LayoutTypePtr(Address));
+    BOOST_REQUIRE(It != Values.end());
+    unsigned ID = std::distance(Values.begin(), It);
+    auto Nodes = TS.getLayoutsRange();
+    auto Node = llvm::find_if(Nodes, [ID](auto *N) { return N->ID == ID; });
+    BOOST_REQUIRE(Node != Nodes.end());
+    llvm::SmallVector<unsigned> Fields;
+    for (const auto &Edge : (*Node)->Successors)
+      if (isInstanceEdge(Edge) and Edge.first->Size == 8)
+        Fields.push_back(Edge.first->ID);
+    BOOST_REQUIRE_EQUAL(Fields.size(), 1);
+    Accesses.push_back(Fields.front());
+  }
+  runStep<CollapseEqualitySCC>(TS);
+  for (unsigned Index = 0; Index != Accesses.size(); Index += 2)
+    BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(Accesses[Index],
+                                                     Accesses[Index + 1]));
+}

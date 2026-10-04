@@ -827,6 +827,12 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
           revng_assert(PointerNode);
           TS.addInstanceLink(PointerNode, AccessNode, OffsetExpression{});
 
+          // Equal literals do not establish a shared pointee or storage type.
+          // Constant addresses are not modeled by the base-address explorer.
+          if (isa<ConstantInt>(Val) or isa<ConstantPointerNull>(Val)
+              or isa<UndefValue>(Val))
+            continue;
+
           // Create pointer edge between the access node and the pointee node.
           const auto &[PointeeNode, HasChanged] = getOrCreateLayoutType(Val);
           revng_assert(PointeeNode);
