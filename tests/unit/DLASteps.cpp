@@ -2875,3 +2875,41 @@ BOOST_AUTO_TEST_CASE(ArrangeAccessesHierarchicallyMatchesReferenceVisitingOnce) 
   revng_check(VisitedOnce == 264);
 }
 
+
+// Equal storage extent does not make a pointer hypothesis subsume a scalar.
+BOOST_AUTO_TEST_CASE(ResolveLeafUnionsPreservesScalarAlternatives) {
+  for (bool PointerFirst : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Root = createRoot(TS, 16);
+    auto *First = addInstanceAtOffset(TS, Root, 0, 8);
+    auto *Second = addInstanceAtOffset(TS, Root, 0, 8);
+    auto *Scalar = PointerFirst ? Second : First;
+    auto *Pointer = PointerFirst ? First : Second;
+    TS.addPointerLink(Pointer, createRoot(TS, 4));
+    auto *OtherOffset = addInstanceAtOffset(TS, Root, 8, 8);
+
+    runStep<ResolveLeafUnions>(TS);
+
+    BOOST_CHECK_EQUAL(countInstanceEdges(Root, Scalar), 1);
+    BOOST_CHECK_EQUAL(countInstanceEdges(Root, Pointer), 1);
+    BOOST_CHECK_EQUAL(countInstanceEdges(Root, OtherOffset), 1);
+    BOOST_CHECK(isPointerNode(Pointer));
+    BOOST_CHECK(not isPointerNode(Scalar));
+  }
+}
+
+BOOST_AUTO_TEST_CASE(ResolveLeafUnionsStillSimplifiesContainedPointees) {
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 8);
+  auto *General = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Specific = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Pointee = createRoot(TS, 16);
+  auto *Contained = addInstanceAtOffset(TS, Pointee, 0, 8);
+  TS.addPointerLink(General, Pointee);
+  TS.addPointerLink(Specific, Contained);
+
+  runStep<ResolveLeafUnions>(TS);
+
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, General), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 0);
+}
