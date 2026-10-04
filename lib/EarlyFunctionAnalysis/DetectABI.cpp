@@ -2,13 +2,18 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <chrono>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <thread>
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetOperations.h"
@@ -24,6 +29,7 @@
 
 #include "revng/ABI/FunctionType/Layout.h"
 #include "revng/ADT/Queue.h"
+#include "revng/ADT/SpeculativeWorklist.h"
 #include "revng/BasicAnalyses/CSVGlobals.h"
 #include "revng/BasicAnalyses/RootFunction.h"
 #include "revng/EarlyFunctionAnalysis/CFGAnalyzer.h"
@@ -57,6 +63,7 @@
 #include "revng/Support/MetaAddress.h"
 #include "revng/Support/NewPC.h"
 #include "revng/Support/OpaqueRegisterUser.h"
+#include "revng/Support/Tag.h"
 
 using namespace llvm;
 using namespace llvm::cl;
@@ -117,6 +124,42 @@ static opt<bool> CheckReuse("detect-abi-check-reuse",
                                  "the new result and log whether the two "
                                  "differ (for testing)"),
                             init(false));
+
+static opt<unsigned> Jobs("detect-abi-jobs",
+                          desc("Threads running the optimization pipeline of "
+                               "the preliminary function analysis. With more "
+                               "than one, the pipeline runs on each function "
+                               "moved through bitcode into a context of its "
+                               "own, as with -detect-abi-round-trip, and the "
+                               "model is the one -detect-abi-round-trip gives. "
+                               "Enabling a logger, -aa-writer, "
+                               "-indirect-branch-info-summary or "
+                               "-detect-abi-check-reuse forces one."),
+                          init(1));
+
+static opt<unsigned> AnalysesAhead("detect-abi-analyses-ahead",
+                                   desc("How many functions the preliminary "
+                                        "function analysis prepares ahead "
+                                        "of the one it commits next, with "
+                                        "-detect-abi-jobs above one (0: "
+                                        "four per job)"),
+                                   init(0));
+
+static opt<size_t> WorkerInstructions("detect-abi-worker-instructions",
+                                      desc("With -detect-abi-jobs above one, "
+                                           "stop preparing functions ahead "
+                                           "while the prepared ones not yet "
+                                           "committed hold this many "
+                                           "instructions in all"),
+                                      init(8'000'000));
+
+static opt<unsigned> WorkerDelay("detect-abi-worker-delay",
+                                 desc("With -detect-abi-jobs above one, delay "
+                                      "each worker result by up to this many "
+                                      "microseconds, by a function of the "
+                                      "function's address and its attempt "
+                                      "(for testing)"),
+                                 init(0));
 
 static Logger Log("detect-abi");
 static Logger ReuseLog("detect-abi-reuse");
@@ -275,7 +318,15 @@ public:
 private:
   void computeApproximateCallGraph();
   void preliminaryFunctionAnalysis();
+  void preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
+                                             revng::ConvergenceMonitor &C,
+                                             unsigned Workers);
   FunctionSummary analyzeOrReuse(const MetaAddress &Entry);
+  void commitPreliminary(const BasicBlockNode *EntryNode,
+                         FunctionSummary &&AnalysisResult,
+                         revng::ConvergenceMonitor &Convergence,
+                         llvm::function_ref<void(const BasicBlockNode *)>
+                           Enqueue);
   void analyzeABI();
   Changes analyzeFunctionABI(const model::Function &Function,
                              OutlinedFunction &OutlinedFunction,
@@ -431,6 +482,203 @@ FunctionSummary DetectABI::analyzeOrReuse(const MetaAddress &Entry) {
   return Result;
 }
 
+/// Commit the preliminary analysis of the function at \p EntryNode: cache its
+/// CFG, record its summary and, if it changed, pass the functions to analyze
+/// again to \p Enqueue
+void DetectABI::commitPreliminary(const BasicBlockNode *EntryNode,
+                                  FunctionSummary &&AnalysisResult,
+                                  revng::ConvergenceMonitor &Convergence,
+                                  llvm::function_ref<void(const BasicBlockNode *)>
+                                    Enqueue) {
+  MetaAddress EntryPointAddress = EntryNode->Address;
+
+  if (Log.isEnabled()) {
+    AnalysisResult.dump(Log);
+    Log << DoLog;
+  }
+
+  // Serialize CFG in the ControlFlowGraphCache
+  {
+    TupleTree<efa::FunctionBundle> New;
+    efa::ControlFlowGraph &Main = New->MainFunction();
+    Main.Entry() = EntryNode->Address;
+    Main.Blocks() = AnalysisResult.CFG;
+    Main.simplify(*Binary);
+    FMC.set(std::move(New));
+  }
+
+  // Perform some early sanity checks once the CFG is ready
+  revng_assert(AnalysisResult.CFG.size() > 0);
+
+  if (not Binary->Functions()[EntryPointAddress].Prototype().isEmpty()) {
+    auto &Summary = Oracle.getLocalFunction(EntryPointAddress);
+    Summary.CFG = std::move(AnalysisResult.CFG);
+    Convergence.visit(EntryPointAddress.toString(),
+                      summaryState(Summary),
+                      false);
+    return;
+  }
+
+  bool Changed = Oracle.registerLocalFunction(EntryPointAddress,
+                                              std::move(AnalysisResult));
+  Convergence.visit(EntryPointAddress.toString(),
+                    summaryState(Oracle.getLocalFunction(EntryPointAddress)),
+                    Changed);
+
+  revng_assert(Oracle.getLocalFunction(EntryPointAddress).CFG.size() > 0);
+
+  // If we got improved results for a function, we need to recompute its
+  // callers, and if a caller turns out to be an inline function, the
+  // callers of the inline function too.
+  if (Changed) {
+    revng_log(Log,
+              "Entry " << EntryPointAddress.toString() << " has changed");
+    LoggerIndent Indent(Log);
+    OnceQueue<const BasicBlockNode *> InlineFunctionWorklist;
+    InlineFunctionWorklist.insert(EntryNode);
+
+    while (!InlineFunctionWorklist.empty()) {
+      const BasicBlockNode *Node = InlineFunctionWorklist.pop();
+      MetaAddress NodeAddress = Node->Address;
+      revng_log(Log,
+                "Re-enqueuing callers of " << NodeAddress.toString() << ":");
+      LoggerIndent Indent(Log);
+      for (auto *Caller : Node->predecessors()) {
+        // Root node?
+        if (Caller->Address.isInvalid())
+          continue;
+
+        // If it's inline, re-enqueue its callers too
+        MetaAddress CallerPC = Caller->Address;
+        const auto &CallerSummary = Oracle.getLocalFunction(CallerPC);
+        using namespace model::FunctionAttribute;
+        if (CallerSummary.Attributes.contains(HasOneBrokenReturn))
+          InlineFunctionWorklist.insert(Caller);
+
+        if (Binary->Functions().at(CallerPC).Prototype().isEmpty()) {
+          revng_log(Log, CallerPC.toString());
+          Enqueue(Caller);
+        }
+      }
+    }
+  }
+}
+
+namespace {
+
+/// A function shipped to a worker, with what shipping it read
+struct ShippedPreliminary {
+  PreliminaryAnalysisInputs Inputs;
+  ShippedAnalysis Analysis;
+  unsigned Attempt = 0;
+};
+
+} // namespace
+
+/// The preliminary analysis with the optimization pipeline on \p Workers
+/// threads. Functions are shipped ahead of the one committed next, and
+/// committed in the order of the sequential loop. A shipped function is
+/// committed only if everything its shipping read from the oracle and the
+/// model still gets the same answer, the test the reuse of preliminary
+/// analyses relies on; otherwise it is shipped again. The commits are those of
+/// the sequential loop with -detect-abi-round-trip.
+void DetectABI::preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
+                                                      revng::ConvergenceMonitor
+                                                        &Convergence,
+                                                      unsigned Workers) {
+  using Branches = std::vector<IndirectBranchFacts>;
+  using Worklist = SpeculativeWorklist<const BasicBlockNode *,
+                                       ShippedPreliminary,
+                                       Branches>;
+
+  // Assign the tag IDs before any worker can read them
+  FunctionTags::Tag::init();
+
+  Worklist ToAnalyze;
+  while (not Queue.empty())
+    ToAnalyze.insert(Queue.pop());
+
+  WorklistTask Task(ToAnalyze.size(), "Analyze functions");
+  std::map<MetaAddress, unsigned> Attempts;
+
+  Worklist::Callbacks C;
+  C.Prepare = [&](const BasicBlockNode *Node)
+    -> std::optional<ShippedPreliminary> {
+    const MetaAddress &Entry = Node->Address;
+
+    // Its previous analysis is likely to be reused at its commit
+    if (ReusePreliminary and Analyses.reusable(Entry, Oracle, *Binary))
+      return std::nullopt;
+
+    PreliminaryAnalysisInputs Inputs = Analyses.newInputs();
+    ShippedAnalysis Analysis = Analyzer.ship(Entry, &Inputs);
+    return ShippedPreliminary{ std::move(Inputs),
+                               std::move(Analysis),
+                               Attempts[Entry]++ };
+  };
+
+  C.Cost = [](const ShippedPreliminary &Shipped) {
+    return Shipped.Analysis.Instructions;
+  };
+
+  C.Work = [](const ShippedPreliminary &Shipped) {
+    if (WorkerDelay != 0) {
+      size_t Hash = llvm::hash_combine(Shipped.Analysis.Address.toString(),
+                                       Shipped.Attempt);
+      std::this_thread::sleep_for(std::chrono::microseconds(Hash
+                                                            % WorkerDelay));
+    }
+    return CFGAnalyzer::runShipped(Shipped.Analysis);
+  };
+
+  C.Commit = [&](const BasicBlockNode *Node,
+                 std::optional<ShippedPreliminary> &Shipped,
+                 std::optional<Branches> &Facts) {
+    const MetaAddress &Entry = Node->Address;
+
+    // Decide as analyzeOrReuse does at this point of the sequential loop
+    std::optional<FunctionSummary> Result;
+    if (ReusePreliminary)
+      Result = Analyses.reusable(Entry, Oracle, *Binary);
+
+    if (not Result.has_value()) {
+      if (not Shipped.has_value()
+          or not Shipped->Inputs.stillHold(Entry, Oracle, *Binary))
+        return false;
+
+      Result = Analyzer.finish(std::move(Shipped->Analysis),
+                               *Facts,
+                               &Shipped->Inputs);
+      if (ReusePreliminary)
+        Analyses.record(Entry, std::move(Shipped->Inputs), *Result);
+    }
+
+    Task.advance(ToAnalyze.size(), Entry.toString());
+    commitPreliminary(Node,
+                      std::move(*Result),
+                      Convergence,
+                      [&](const BasicBlockNode *Caller) {
+                        ToAnalyze.insert(Caller);
+                      });
+    return true;
+  };
+
+  // Shipping a function reads the summaries of its callees
+  C.DependsOn = [](const BasicBlockNode *Node, const BasicBlockNode *Earlier) {
+    return llvm::is_contained(Node->successors(), Earlier);
+  };
+
+  unsigned Ahead = AnalysesAhead != 0 ? AnalysesAhead : 4 * Workers;
+  ToAnalyze.run(C, Workers, Ahead, WorkerInstructions);
+
+  const auto &Statistics = ToAnalyze.statistics();
+  llvm::Task Summary(1,
+                     "Analyzed on " + llvm::Twine(Workers) + " workers: "
+                       + llvm::Twine(Statistics.Committed) + " commits, "
+                       + llvm::Twine(Statistics.Prepared) + " preparations, "
+                       + llvm::Twine(Statistics.Repeated) + " repeated");
+}
+
 void DetectABI::preliminaryFunctionAnalysis() {
   revng_log(Log, "Running the preliminary function analysis");
   LoggerIndent LodIndent(Log);
@@ -461,86 +709,32 @@ void DetectABI::preliminaryFunctionAnalysis() {
   //
 
   UnboundedScanLimits Limits;
-  WorklistTask Task(EntrypointsQueue.size(), "Analyze functions");
   revng::ConvergenceMonitor Convergence("preliminary function analysis");
-  while (!EntrypointsQueue.empty()) {
-    const BasicBlockNode *EntryNode = EntrypointsQueue.pop();
-    MetaAddress EntryPointAddress = EntryNode->Address;
-    Task.advance(EntrypointsQueue.size(), EntryPointAddress.toString());
-    revng_log(Log, "Analyzing " << EntryPointAddress.toString());
-    LoggerIndent Indent(Log);
 
-    FunctionSummary AnalysisResult = analyzeOrReuse(EntryPointAddress);
+  unsigned Workers = Jobs;
+  if (Workers > 1
+      and (anyLoggerEnabled() or CheckReuse
+           or not CFGAnalyzer::canRunInParallel())) {
+    Workers = 1;
+  }
 
-    if (Log.isEnabled()) {
-      AnalysisResult.dump(Log);
-      Log << DoLog;
-    }
-
-    // Serialize CFG in the ControlFlowGraphCache
-    {
-      TupleTree<efa::FunctionBundle> New;
-      efa::ControlFlowGraph &Main = New->MainFunction();
-      Main.Entry() = EntryNode->Address;
-      Main.Blocks() = AnalysisResult.CFG;
-      Main.simplify(*Binary);
-      FMC.set(std::move(New));
-    }
-
-    // Perform some early sanity checks once the CFG is ready
-    revng_assert(AnalysisResult.CFG.size() > 0);
-
-    if (not Binary->Functions()[EntryPointAddress].Prototype().isEmpty()) {
-      auto &Summary = Oracle.getLocalFunction(EntryPointAddress);
-      Summary.CFG = std::move(AnalysisResult.CFG);
-      Convergence.visit(EntryPointAddress.toString(),
-                        summaryState(Summary),
-                        false);
-      continue;
-    }
-
-    bool Changed = Oracle.registerLocalFunction(EntryPointAddress,
-                                                std::move(AnalysisResult));
-    Convergence.visit(EntryPointAddress.toString(),
-                      summaryState(Oracle.getLocalFunction(EntryPointAddress)),
-                      Changed);
-
-    revng_assert(Oracle.getLocalFunction(EntryPointAddress).CFG.size() > 0);
-
-    // If we got improved results for a function, we need to recompute its
-    // callers, and if a caller turns out to be an inline function, the
-    // callers of the inline function too.
-    if (Changed) {
-      revng_log(Log,
-                "Entry " << EntryPointAddress.toString() << " has changed");
+  if (Workers > 1) {
+    preliminaryFunctionAnalysisInParallel(EntrypointsQueue, Convergence, Workers);
+  } else {
+    WorklistTask Task(EntrypointsQueue.size(), "Analyze functions");
+    while (!EntrypointsQueue.empty()) {
+      const BasicBlockNode *EntryNode = EntrypointsQueue.pop();
+      MetaAddress EntryPointAddress = EntryNode->Address;
+      Task.advance(EntrypointsQueue.size(), EntryPointAddress.toString());
+      revng_log(Log, "Analyzing " << EntryPointAddress.toString());
       LoggerIndent Indent(Log);
-      OnceQueue<const BasicBlockNode *> InlineFunctionWorklist;
-      InlineFunctionWorklist.insert(EntryNode);
 
-      while (!InlineFunctionWorklist.empty()) {
-        const BasicBlockNode *Node = InlineFunctionWorklist.pop();
-        MetaAddress NodeAddress = Node->Address;
-        revng_log(Log,
-                  "Re-enqueuing callers of " << NodeAddress.toString() << ":");
-        LoggerIndent Indent(Log);
-        for (auto *Caller : Node->predecessors()) {
-          // Root node?
-          if (Caller->Address.isInvalid())
-            continue;
-
-          // If it's inline, re-enqueue its callers too
-          MetaAddress CallerPC = Caller->Address;
-          const auto &CallerSummary = Oracle.getLocalFunction(CallerPC);
-          using namespace model::FunctionAttribute;
-          if (CallerSummary.Attributes.contains(HasOneBrokenReturn))
-            InlineFunctionWorklist.insert(Caller);
-
-          if (Binary->Functions().at(CallerPC).Prototype().isEmpty()) {
-            revng_log(Log, CallerPC.toString());
-            EntrypointsQueue.insert(Caller);
-          }
-        }
-      }
+      commitPreliminary(EntryNode,
+                        analyzeOrReuse(EntryPointAddress),
+                        Convergence,
+                        [&](const BasicBlockNode *Caller) {
+                          EntrypointsQueue.insert(Caller);
+                        });
     }
   }
 

@@ -121,6 +121,20 @@ struct PreparedFunction {
   DecodedInstructions Decoded;
 };
 
+/// A function outlined, prepared and shipped as bitcode for the optimization
+/// pipeline, with what the analysis needs afterwards to decide the summary
+struct ShippedAnalysis {
+  MetaAddress Address;
+  SortedVector<efa::BasicBlock> CFG;
+  DecodedInstructions Decoded;
+  ShippedFunction Function;
+  std::string MarkerName;
+  std::string StackPointerName;
+
+  /// The instructions entering the pipeline
+  size_t Instructions = 0;
+};
+
 /// This class, given an Oracle, analyzes a function returning its CFG, the set
 /// of callee saved registers, whether it's noreturn or not and its final stack
 /// offset
@@ -173,6 +187,25 @@ public:
 
   OutlinedFunction outline(const MetaAddress &Entry);
 
+  /// The three parts of `analyze` with `-detect-abi-round-trip`, for running
+  /// the pipeline on another thread. `ship` and `finish` run on the thread
+  /// that owns the module, and each records what it reads in \p Inputs, if
+  /// not null; `runShipped` touches nothing but \p Analysis. Together they
+  /// compute what `analyze` computes, provided the oracle gives `finish` the
+  /// answers it gave `ship`. The caller must hold an `UnboundedScanLimits`.
+  ShippedAnalysis ship(const MetaAddress &Entry,
+                       PreliminaryAnalysisInputs *Inputs);
+  static std::vector<IndirectBranchFacts>
+  runShipped(const ShippedAnalysis &Analysis);
+  FunctionSummary finish(ShippedAnalysis &&Analysis,
+                         const std::vector<IndirectBranchFacts> &Branches,
+                         PreliminaryAnalysisInputs *Inputs);
+
+  /// Whether `runShipped` may run on another thread: the outputs of
+  /// `-aa-writer` and `-indirect-branch-info-summary` go to one stream in
+  /// analysis order, so they need a single thread
+  static bool canRunInParallel();
+
 private:
   static llvm::FunctionType *createCallMarkerType(llvm::Module &M);
   static llvm::FunctionType *createRetMarkerType(llvm::Module &M);
@@ -193,6 +226,13 @@ private:
   /// Main thread, before the pipeline: outline the function at \p Entry and
   /// prepare it
   PreparedFunction prepare(const MetaAddress &Entry, llvm::Task &T);
+
+  /// Main thread: prepare the function at \p Entry and ship it
+  ShippedAnalysis ship(const MetaAddress &Entry, llvm::Task &T);
+
+  /// Record what the oracle and the model answer in \p Inputs, or stop
+  /// recording if it is null
+  void recordReadsIn(PreliminaryAnalysisInputs *Inputs);
 
   /// The pipeline: everything it reads is in \p F's module and its arguments
   static void runOptimizationPipeline(llvm::Function &F,

@@ -21,6 +21,14 @@
 # RUN: FileCheck %s --check-prefix=ROUND-TRIP < %t.round-trip.trace
 # RUN: diff %t.yml %t.round-trip.yml
 #
+# With -detect-abi-jobs the pipeline runs on worker threads, and commits
+# follow the sequential order whatever order the workers finish in, so the
+# model is still the same.
+#
+# RUN: env REVNG_OPTIONS="--trace=%t.jobs.trace -detect-abi-jobs=4 -detect-abi-analyses-ahead=8 -detect-abi-worker-delay=2000" %root/bin/revng quick analyze --analyses=parse-binary,detect-abi %t > %t.jobs.yml
+# RUN: FileCheck %s --check-prefix=JOBS < %t.jobs.trace
+# RUN: diff %t.yml %t.jobs.yml
+#
 # TRACE: "name": "Collect functions from callees", "cat": "task", "ph": "B"
 # TRACE: "name": "Scan {{[0-9]+}} blocks of root", "cat": "task", "ph": "B", "args": {"step": 0, "steps": 2}
 # TRACE: "name": "Create 2 functions", "cat": "task", "ph": "B", "args": {"step": 1, "steps": 2}
@@ -37,12 +45,17 @@
 # TRACE: "name": "0x{{[0-9a-f]+}}:Code_x86_64", "cat": "task", "ph": "B", "args": {"step": 2, "steps": 3}
 # TRACE: "name": "Collect functions from unused addresses", "cat": "task", "ph": "B"
 #
-# ROUND-TRIP: "name": "Outline", "cat": "task", "ph": "B", "args": {"step": 0, "steps": 6}
+# ROUND-TRIP: "name": "Outline", "cat": "task", "ph": "B", "args": {"step": 0, "steps": 7}
 # ROUND-TRIP: "name": "Prepare ({{[0-9]+}} instructions, {{[0-9]+}} calls, {{[0-9]+}} blocks)"
+# ROUND-TRIP: "name": "Collect helper CSVs ({{[0-9]+}} instructions, {{[0-9]+}} calls, {{[0-9]+}} blocks)"
 # ROUND-TRIP: "name": "Extract ({{[0-9]+}} instructions, {{[0-9]+}} calls, {{[0-9]+}} blocks)"
 # ROUND-TRIP: "name": "Parse", "cat": "task", "ph": "B"
 # ROUND-TRIP: "name": "Optimize ({{[0-9]+}} instructions, {{[0-9]+}} calls, {{[0-9]+}} blocks)"
 # ROUND-TRIP: "name": "Collect results ({{[0-9]+}} instructions, {{[0-9]+}} calls, {{[0-9]+}} blocks)"
+#
+# JOBS: "name": "Ship function", "cat": "task", "ph": "B"
+# JOBS: "name": "Analyze shipped function", "cat": "task", "ph": "B"
+# JOBS: "name": "Analyzed on 4 workers: {{[0-9]+}} commits, {{[0-9]+}} preparations, {{[0-9]+}} repeated"
 #
 # MODEL: Functions:
 # MODEL-COUNT-3: - Entry: "0x{{[0-9a-f]+}}:Code_x86_64"

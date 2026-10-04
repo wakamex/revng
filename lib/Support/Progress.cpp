@@ -7,6 +7,7 @@
 #if defined(__linux__)
 extern "C" {
 #include "sys/ioctl.h"
+#include "sys/syscall.h"
 }
 #endif
 
@@ -139,8 +140,10 @@ private:
       Output << "}, ";
     }
     Output << "\"ts\": " << getTimestamp() << ", ";
+    // Worker threads' events carry their own thread ID; the main thread's
+    // equals the process ID
     Output << "\"pid\": " << getpid() << ", ";
-    Output << "\"tid\": " << getpid();
+    Output << "\"tid\": " << syscall(SYS_gettid);
     Output << "}";
     if (EmitTrailingComma)
       Output << ",";

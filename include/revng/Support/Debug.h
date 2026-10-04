@@ -93,6 +93,10 @@ private:
   bool Enabled;
 };
 
+/// Whether any logger is enabled. Loggers share one indentation level and
+/// write without locks, so code that runs on several threads checks this.
+bool anyLoggerEnabled();
+
 /// Indent all loggers within the scope of this object
 class LoggerIndent {
 public:

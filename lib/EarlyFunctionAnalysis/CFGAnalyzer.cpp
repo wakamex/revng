@@ -1281,6 +1281,81 @@ CFGAnalyzer::work(const ShippedFunction &Shipped,
   return readIndirectBranchInfo(F, *Marker);
 }
 
+void CFGAnalyzer::recordReadsIn(PreliminaryAnalysisInputs *Inputs) {
+  Recording = Inputs;
+  Oracle.recordCallSitesIn(Inputs);
+}
+
+ShippedAnalysis CFGAnalyzer::ship(const MetaAddress &Entry, llvm::Task &T) {
+  using namespace llvm;
+
+  // Outline and prepare the function, reading the oracle and the model
+  PreparedFunction Prepared = prepare(Entry, T);
+  Function &Marker = *Prepared.Outlined.IndirectBranchInfoMarker;
+
+  // Move the function to a module of its own and write it as bitcode
+  Function *F = Prepared.Outlined.releaseFunction();
+  T.advance("Collect helper CSVs" + describeSize(*F));
+  // The marker comes along even when the function has no indirect branch
+  std::vector<GlobalValue *> Extra = helperCSVs(*F);
+  Extra.push_back(&Marker);
+  T.advance("Extract" + describeSize(*F));
+
+  ShippedAnalysis Result;
+  Result.Address = Prepared.Outlined.Address;
+  Result.CFG = std::move(Prepared.CFG);
+  Result.Decoded = std::move(Prepared.Decoded);
+  Result.Instructions = F->getInstructionCount();
+  Result.MarkerName = Marker.getName().str();
+  Result.StackPointerName = Globals.spReg()->getName().str();
+  Result.Function = shipFunction(*F, Extra);
+  return Result;
+}
+
+ShippedAnalysis CFGAnalyzer::ship(const MetaAddress &Entry,
+                                  PreliminaryAnalysisInputs *Inputs) {
+  revng_assert(UnboundedScanLimits::active());
+  recordReadsIn(Inputs);
+  auto StopRecording = llvm::make_scope_exit([this]() {
+    recordReadsIn(nullptr);
+  });
+
+  llvm::Task T(4, "Ship function");
+  return ship(Entry, T);
+}
+
+std::vector<IndirectBranchFacts>
+CFGAnalyzer::runShipped(const ShippedAnalysis &Analysis) {
+  revng_assert(canRunInParallel());
+  llvm::Task T(3, "Analyze shipped function");
+  return work(Analysis.Function,
+              Analysis.MarkerName,
+              Analysis.StackPointerName,
+              llvm::nulls(),
+              llvm::nulls(),
+              T);
+}
+
+FunctionSummary
+CFGAnalyzer::finish(ShippedAnalysis &&Analysis,
+                    const std::vector<IndirectBranchFacts> &Branches,
+                    PreliminaryAnalysisInputs *Inputs) {
+  recordReadsIn(Inputs);
+  auto StopRecording = llvm::make_scope_exit([this]() {
+    recordReadsIn(nullptr);
+  });
+
+  return milkInfo(Analysis.Address,
+                  std::move(Analysis.CFG),
+                  Analysis.Decoded,
+                  Branches);
+}
+
+bool CFGAnalyzer::canRunInParallel() {
+  return AAWriterPath.getNumOccurrences() == 0
+         and IndirectBranchInfoSummaryPath.getNumOccurrences() == 0;
+}
+
 FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
                                      PreliminaryAnalysisInputs *Inputs) {
   using namespace llvm;
@@ -1288,47 +1363,43 @@ FunctionSummary CFGAnalyzer::analyze(const MetaAddress &Entry,
   revng_assert(UnboundedScanLimits::active());
 
   // Record what this analysis reads, here and through the oracle
-  Recording = Inputs;
-  Oracle.recordCallSitesIn(Inputs);
+  recordReadsIn(Inputs);
   auto StopRecording = llvm::make_scope_exit([this]() {
-    Recording = nullptr;
-    Oracle.recordCallSitesIn(nullptr);
+    recordReadsIn(nullptr);
   });
 
   llvm::Task T(RoundTrip ? 7 : 4, "Analyze function");
+
+  if (RoundTrip) {
+    // Run the pipeline on a copy of the function parsed from bitcode into a
+    // context of its own
+    ShippedAnalysis Shipped = ship(Entry, T);
+    std::vector<IndirectBranchFacts> Branches = work(Shipped.Function,
+                                                     Shipped.MarkerName,
+                                                     Shipped.StackPointerName,
+                                                     *OutputIBI,
+                                                     *OutputAAWriter,
+                                                     T);
+    return milkInfo(Shipped.Address,
+                    std::move(Shipped.CFG),
+                    Shipped.Decoded,
+                    Branches);
+  }
 
   // Outline and prepare the function, reading the oracle and the model
   PreparedFunction Prepared = prepare(Entry, T);
   Function &Marker = *Prepared.Outlined.IndirectBranchInfoMarker;
 
-  std::vector<IndirectBranchFacts> Branches;
-  if (RoundTrip) {
-    // Move the function to a module of its own and through bitcode, then run
-    // the pipeline on a copy in a context of its own
-    Function *F = Prepared.Outlined.releaseFunction();
-    T.advance("Collect helper CSVs" + describeSize(*F));
-    // The marker comes along even when the function has no indirect branch
-    std::vector<GlobalValue *> Extra = helperCSVs(*F);
-    Extra.push_back(&Marker);
-    T.advance("Extract" + describeSize(*F));
-    ShippedFunction Shipped = shipFunction(*F, Extra);
-    Branches = work(Shipped,
-                    Marker.getName(),
-                    Globals.spReg()->getName(),
-                    *OutputIBI,
-                    *OutputAAWriter,
-                    T);
-  } else {
-    // Execute the optimization pipeline over the outlined function, which
-    // reads nothing but the function and its module
-    Function &F = *Prepared.Outlined.Function;
-    T.advance("Optimize" + describeSize(F));
-    runOptimizationPipeline(F, Globals.spReg(), *OutputIBI, *OutputAAWriter);
+  // Execute the optimization pipeline over the outlined function, which reads
+  // nothing but the function and its module
+  Function &F = *Prepared.Outlined.Function;
+  T.advance("Optimize" + describeSize(F));
+  runOptimizationPipeline(F, Globals.spReg(), *OutputIBI, *OutputAAWriter);
 
-    // Squeeze out the results obtained from the optimization passes
-    T.advance("Collect results" + describeSize(F));
+  // Squeeze out the results obtained from the optimization passes
+  T.advance("Collect results" + describeSize(F));
+  std::vector<IndirectBranchFacts>
     Branches = readIndirectBranchInfo(F, Marker);
-  }
 
   return milkInfo(Prepared.Outlined.Address,
                   std::move(Prepared.CFG),

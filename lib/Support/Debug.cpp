@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -67,11 +68,19 @@ public:
 
   void registerArguments() const;
 
+  bool anyEnabled() const {
+    return llvm::any_of(Loggers, [](Logger *L) { return L->isEnabled(); });
+  }
+
 private:
   std::vector<Logger *> Loggers;
 };
 
 static llvm::ManagedStatic<LoggersRegistry> Loggers;
+
+bool anyLoggerEnabled() {
+  return Loggers->anyEnabled();
+}
 
 ScopedDebugFeature::ScopedDebugFeature(std::string Name, bool Enable) :
   Name(Name), Enabled(Enable) {
