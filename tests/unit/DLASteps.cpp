@@ -3241,3 +3241,28 @@ BOOST_AUTO_TEST_CASE(SingleChildPreservesFunctionArgumentOrigin) {
   BOOST_CHECK_EQUAL(Caller->Size, 16);
   BOOST_CHECK(Caller->IsTypeRoot);
 }
+
+BOOST_AUTO_TEST_CASE(PointeeUnionPreservesFunctionLayoutAlternatives) {
+  for (bool MarkSmaller : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Union = createRoot(TS, 8);
+    auto *FirstPointer = addInstanceAtOffset(TS, Union, 0, 8);
+    auto *SecondPointer = addInstanceAtOffset(TS, Union, 0, 8);
+    auto *First = createRoot(TS, 16);
+    auto *Second = createRoot(TS, 24);
+    (MarkSmaller ? First : Second)->IsTypeRoot = true;
+    addInstanceAtOffset(TS, First, 0, 8);
+    addInstanceAtOffset(TS, First, 8, 8);
+    addInstanceAtOffset(TS, Second, 16, 8);
+    TS.addPointerLink(FirstPointer, First);
+    TS.addPointerLink(SecondPointer, Second);
+    unsigned FirstID = First->ID, SecondID = Second->ID;
+    MergePointeesOfPointerUnion(8).runOnTypeSystem(TS);
+    BOOST_REQUIRE(not TS.getEqClasses().haveSameEqClass(FirstID, SecondID));
+    BOOST_CHECK_EQUAL(First->Size, 16);
+    BOOST_CHECK_EQUAL(Second->Size, 24);
+    BOOST_CHECK_EQUAL(FirstPointer->Successors.begin()->first, First);
+    BOOST_CHECK_EQUAL(SecondPointer->Successors.begin()->first, Second);
+    BOOST_CHECK(TS.verifyDAG());
+  }
+}

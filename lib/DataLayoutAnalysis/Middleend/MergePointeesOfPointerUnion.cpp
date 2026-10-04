@@ -217,6 +217,15 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
           }
         }
 
+        // A pointer union can select different objects. A function layout is
+        // independently observable, so keep its pointee alternative instead
+        // of adding every other object's fields to it.
+        if (UniquedAggregates.size() > 1
+            and llvm::any_of(UniquedAggregates, [](const LTSN *Pointee) {
+                  return Pointee->IsTypeRoot;
+                }))
+          continue;
+
         // A containing layout and its subobject are separate views. Equating
         // them feeds the containing extent back into every use of the subobject.
         // Keep the pointer alternatives when any pair has this relationship,
