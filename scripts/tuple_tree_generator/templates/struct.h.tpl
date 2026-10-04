@@ -95,6 +95,11 @@ public:
     fieldAccessed("/*= field.name =*/" , "/*= struct | fullname =*/");
 #endif
     /*= field.name =*/Tracker.access();
+    /**- elif field | is_upcastable **/
+    // An empty pointer has no fields whose reads would be recorded, so record
+    // that it was read empty: setting it must invalidate what depended on that
+    if (The/*= field.name =*/.isEmpty())
+      /*= field.name =*/Tracker.access();
     /** endif -**/
 
     /** endif -**/

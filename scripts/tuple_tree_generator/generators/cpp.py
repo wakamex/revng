@@ -53,6 +53,7 @@ class CppGenerator:
         self.environment.filters["fullname"] = self.fullname
         self.environment.filters["user_fullname"] = self.user_fullname
         self.environment.filters["is_struct_field"] = self.is_struct_field
+        self.environment.filters["is_upcastable"] = self.is_upcastable
         self.environment.filters["enum_underlying_type"] = self.enum_underlying_type
         self.enum_template = self.environment.get_template("enum.h.tpl")
         self.struct_template = self.environment.get_template("struct.h.tpl")
@@ -322,6 +323,10 @@ class CppGenerator:
     @staticmethod
     def is_struct_field(field: StructField):
         return isinstance(field, StructField)
+
+    @staticmethod
+    def is_upcastable(field: StructField):
+        return isinstance(field.resolved_type, UpcastableDefinition)
 
     @staticmethod
     def render_docstring(docstr: str):
