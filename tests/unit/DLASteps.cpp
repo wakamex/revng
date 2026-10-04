@@ -3266,3 +3266,91 @@ BOOST_AUTO_TEST_CASE(PointeeUnionPreservesFunctionLayoutAlternatives) {
     BOOST_CHECK(TS.verifyDAG());
   }
 }
+
+BOOST_AUTO_TEST_CASE(DeduplicateCompatibleFunctionViews) {
+  for (bool Reverse : { false, true }) {
+    LayoutTypeSystem TS;
+    auto *Object = createRoot(TS, 48);
+    auto *Sparse = createRoot(TS, 24);
+    auto *Complete = createRoot(TS, 24);
+    Sparse->IsTypeRoot = Complete->IsTypeRoot = true;
+    auto *Nested = addInstanceAtOffset(TS, Sparse, 0, 24);
+    addInstanceAtOffset(TS, Nested, 8, 8);
+    addInstanceAtOffset(TS, Nested, 16, 8)->HasUnknownPointee = true;
+    addInstanceAtOffset(TS, Complete, 0, 8);
+    addInstanceAtOffset(TS, Complete, 8, 8);
+    addInstanceAtOffset(TS, Complete, 16, 8)->HasUnknownPointee = true;
+    TS.addInstanceLink(Object,
+                       Reverse ? Complete : Sparse,
+                       OffsetExpression{ 16 });
+    TS.addInstanceLink(Object,
+                       Reverse ? Sparse : Complete,
+                       OffsetExpression{ 16 });
+    unsigned SparseID = Sparse->ID, CompleteID = Complete->ID;
+    DeduplicateFields().runOnTypeSystem(TS);
+    BOOST_CHECK(TS.getEqClasses().haveSameEqClass(SparseID, CompleteID));
+    BOOST_CHECK(TS.verifyDAG());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(DeduplicateFunctionViewsRejectsDifferentStorage) {
+  for (unsigned Case = 0; Case < 6; ++Case) {
+    LayoutTypeSystem TS;
+    auto *Object = createRoot(TS, 64);
+    auto *Sparse = createRoot(TS, 24);
+    auto *Complete = createRoot(TS, Case == 0 ? 32 : 24);
+    Sparse->IsTypeRoot = Complete->IsTypeRoot = true;
+    addInstanceAtOffset(TS, Sparse, 8, 8);
+    addInstanceAtOffset(TS, Sparse, 16, 8);
+    auto *Field = addInstanceAtOffset(TS, Complete, 8, Case == 1 ? 4 : 8);
+    addInstanceAtOffset(TS, Complete, 0, 8);
+    addInstanceAtOffset(TS, Complete, 16, 8);
+    if (Case == 5)
+      Field->HasUnknownPointee = true;
+    if (Case == 2)
+      TS.addPointerLink(Field, createRoot(TS, 8));
+    TS.addInstanceLink(Object, Sparse, OffsetExpression{ 0 });
+    if (Case == 3)
+      Object = createRoot(TS, 64);
+    TS.addInstanceLink(Object,
+                       Complete,
+                       OffsetExpression{ Case == 4 ? 8ULL : 0ULL });
+    unsigned SparseID = Sparse->ID, CompleteID = Complete->ID;
+    DeduplicateFields().runOnTypeSystem(TS);
+    BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(SparseID, CompleteID));
+    BOOST_CHECK(TS.verifyDAG());
+  }
+}
+
+BOOST_AUTO_TEST_CASE(DeduplicateFunctionViewsPreservesPointerAlternatives) {
+  LayoutTypeSystem TS;
+  auto *Object = createRoot(TS, 8);
+  auto *First = addInstanceAtOffset(TS, Object, 0, 8);
+  auto *Second = addInstanceAtOffset(TS, Object, 0, 8);
+  First->IsTypeRoot = Second->IsTypeRoot = true;
+  TS.addPointerLink(First, createRoot(TS, 16));
+  TS.addPointerLink(Second, createRoot(TS, 24));
+  unsigned FirstID = First->ID, SecondID = Second->ID;
+  DeduplicateFields().runOnTypeSystem(TS);
+  BOOST_REQUIRE(not TS.getEqClasses().haveSameEqClass(FirstID, SecondID));
+  BOOST_CHECK_EQUAL(First->Successors.size(), 1);
+  BOOST_CHECK_EQUAL(Second->Successors.size(), 1);
+  BOOST_CHECK(TS.verifyDAG());
+}
+
+BOOST_AUTO_TEST_CASE(DeduplicateFunctionViewsPreservesContainment) {
+  LayoutTypeSystem TS;
+  auto *Object = createRoot(TS, 24);
+  auto *Sparse = createRoot(TS, 24);
+  auto *Complete = createRoot(TS, 24);
+  Sparse->IsTypeRoot = Complete->IsTypeRoot = true;
+  addInstanceAtOffset(TS, Sparse, 16, 8);
+  addInstanceAtOffset(TS, Complete, 0, 8);
+  TS.addInstanceLink(Complete, Sparse, OffsetExpression{ 0 });
+  TS.addInstanceLink(Object, Sparse, OffsetExpression{ 0 });
+  TS.addInstanceLink(Object, Complete, OffsetExpression{ 0 });
+  unsigned SparseID = Sparse->ID, CompleteID = Complete->ID;
+  DeduplicateFields().runOnTypeSystem(TS);
+  BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(SparseID, CompleteID));
+  BOOST_CHECK(TS.verifyDAG());
+}

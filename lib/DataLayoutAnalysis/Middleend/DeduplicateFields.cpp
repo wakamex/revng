@@ -6,6 +6,9 @@
 #include <compare>
 #include <cstdint>
 #include <iterator>
+#include <limits>
+#include <set>
+#include <tuple>
 
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/GraphTraits.h"
@@ -351,8 +354,102 @@ static auto getSuccEdgesToChild(LTSN *Parent, LTSN *Child) {
                                                            nullptr }));
 }
 
+// Compare only fixed, non-overlapping storage observations. Pointer targets
+// remain alternatives and are never traversed or unified by this comparison.
+using StorageField = std::tuple<uint64_t, uint64_t, unsigned>;
+using StorageFields = std::set<StorageField>;
+
+static std::optional<StorageFields> storageFields(LTSN *Root, LTSN *OtherRoot) {
+  StorageFields Fields;
+  std::set<std::pair<LTSN *, uint64_t>> Visited;
+  llvm::SmallVector<std::pair<LTSN *, uint64_t>> Pending{ { Root, 0 } };
+  while (not Pending.empty()) {
+    auto [Node, Offset] = Pending.pop_back_val();
+    if (Node == OtherRoot)
+      return std::nullopt;
+    if (not Visited.insert({ Node, Offset }).second)
+      continue;
+    bool Pointer = false;
+    bool Instance = false;
+    for (const Link &L : Node->Successors) {
+      if (isPointerEdge(L)) {
+        Pointer = true;
+        continue;
+      }
+      if (not isInstanceEdge(L))
+        return std::nullopt;
+      const auto &OE = L.second->getOffsetExpr();
+      if (not OE.Strides.empty()
+          or uint64_t(OE.Offset)
+               > std::numeric_limits<uint64_t>::max() - Offset)
+        return std::nullopt;
+      Instance = true;
+      Pending.emplace_back(L.first, Offset + OE.Offset);
+    }
+    if (Pointer or not Instance) {
+      if (Node->Size == 0 or Node->NonScalar or Offset > Root->Size
+          or Node->Size > Root->Size - Offset)
+        return std::nullopt;
+      unsigned Role = Pointer ? 2 : 1;
+      if (Node->HasUnknownPointee)
+        Role |= 4;
+      Fields.emplace(Offset, Node->Size, Role);
+    }
+  }
+  uint64_t End = 0;
+  for (auto [Offset, Size, Role] : Fields) {
+    if (Offset < End)
+      return std::nullopt;
+    End = Offset + Size;
+  }
+  return Fields;
+}
+
+// Two function views of the same actual object can expose different subsets of
+// its fields. Equal ranges and compatible observations preserve their boundary.
+static bool mergeCompatibleFunctionViews(LayoutTypeSystem &TS) {
+  bool Changed = false;
+  llvm::SmallPtrSet<LTSN *, 16> Erased;
+  llvm::SmallVector<LTSN *> Nodes(llvm::nodes(&TS));
+  for (LTSN *Parent : Nodes) {
+    if (Erased.contains(Parent))
+      continue;
+    llvm::SmallVector<Link> Views;
+    for (const Link &L : Parent->Successors)
+      if (isInstanceEdge(L) and L.first->IsTypeRoot
+          and not isInstanceLeaf(L.first) and isPointerLeaf(L.first)
+          and L.second->getOffsetExpr().Strides.empty())
+        Views.push_back(L);
+    for (size_t I = 0; I < Views.size(); ++I) {
+      auto [A, ATag] = Views[I];
+      if (Erased.contains(A))
+        continue;
+      for (size_t J = I + 1; J < Views.size(); ++J) {
+        auto [B, BTag] = Views[J];
+        if (A == B or Erased.contains(B) or A->Size != B->Size
+            or ATag->getOffsetExpr().Offset != BTag->getOffsetExpr().Offset)
+          continue;
+        auto AF = storageFields(A, B);
+        auto BF = storageFields(B, A);
+        if (not AF or not BF or AF->empty() or BF->empty())
+          continue;
+        if (not std::includes(AF->begin(), AF->end(), BF->begin(), BF->end())
+            and not std::includes(BF->begin(),
+                                  BF->end(),
+                                  AF->begin(),
+                                  AF->end()))
+          continue;
+        TS.mergeNodes({ A, B });
+        Erased.insert(B);
+        Changed = true;
+      }
+    }
+  }
+  return Changed;
+}
+
 bool DeduplicateFields::runOnTypeSystem(LayoutTypeSystem &TS) {
-  bool TypeSystemChanged = false;
+  bool TypeSystemChanged = mergeCompatibleFunctionViews(TS);
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
 
