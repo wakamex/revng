@@ -2,8 +2,11 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
 #include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include "llvm/Support/Progress.h"
 
@@ -146,19 +149,31 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
   Context->enableMultithreading(true);
 
   using Ticket = mlir::Operation *;
-  SpeculativeWorklist<const ObjectID *, Ticket, bool> Functions;
+  std::map<const ObjectID *, std::pair<Ticket, size_t>> Inputs;
   for (const ObjectID *Object : Objects) {
     revng_assert(Object->kind() == Kinds::Function);
-    Functions.insert(Object);
+    const MetaAddress &Key = std::get<MetaAddress>(Object->key());
+    FunctionOp Function = getUniqueIsolatedFunction(Container.getModule(*Object),
+                                                    Key);
+    size_t Operations = 0;
+    Function->walk([&](mlir::Operation *) { ++Operations; });
+    Inputs[Object] = { Function.getOperation(), Operations };
   }
+
+  // Commits do not depend on each other: start the largest functions first,
+  // so that none of them is left running alone at the end
+  std::vector<const ObjectID *> Order = Objects;
+  llvm::stable_sort(Order, [&](const ObjectID *LHS, const ObjectID *RHS) {
+    return Inputs.at(LHS).second > Inputs.at(RHS).second;
+  });
+  SpeculativeWorklist<const ObjectID *, Ticket, bool> Functions;
+  for (const ObjectID *Object : Order)
+    Functions.insert(Object);
 
   using Worklist = decltype(Functions);
   Worklist::Callbacks C;
   C.Prepare = [&](const ObjectID *Object) -> std::optional<Ticket> {
-    const MetaAddress &Key = std::get<MetaAddress>(Object->key());
-    FunctionOp Function = getUniqueIsolatedFunction(Container.getModule(*Object),
-                                                    Key);
-    return Function.getOperation();
+    return Inputs.at(Object).first;
   };
   C.Cost = [](const Ticket &) -> size_t { return 1; };
   C.Work = [this, Context](const Ticket &Function) {
@@ -175,8 +190,8 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
   };
   C.Reads = [](const ObjectID *) { return std::vector<const ObjectID *>(); };
 
-  // Commits do not depend on each other: admit every function, so a slow one
-  // at the head of the queue does not leave the workers idle
+  // Admit every function, so a slow one at the head of the queue does not
+  // leave the workers idle
   Functions.run(C, Workers, Objects.size(), Objects.size());
   Context->enableMultithreading(WasMultithreaded);
   return true;

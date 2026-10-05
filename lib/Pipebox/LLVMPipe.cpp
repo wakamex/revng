@@ -3,7 +3,9 @@
 //
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <vector>
 #include <optional>
 
 #include "llvm/IR/LLVMContext.h"
@@ -79,16 +81,26 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
     return false;
 
   using Bitcode = LLVMFunctionContainer::Bitcode;
-  SpeculativeWorklist<const ObjectID *, Bitcode, Bitcode> Functions;
+  std::map<const ObjectID *, Bitcode> Inputs;
   for (const ObjectID *Object : Objects) {
     revng_assert(Object->kind() == Kinds::Function);
-    Functions.insert(Object);
+    Inputs[Object] = Container.takeBitcode(*Object);
   }
+
+  // Commits do not depend on each other: start the largest functions first,
+  // so that none of them is left running alone at the end
+  std::vector<const ObjectID *> Order = Objects;
+  llvm::stable_sort(Order, [&](const ObjectID *LHS, const ObjectID *RHS) {
+    return Inputs.at(LHS).size() > Inputs.at(RHS).size();
+  });
+  SpeculativeWorklist<const ObjectID *, Bitcode, Bitcode> Functions;
+  for (const ObjectID *Object : Order)
+    Functions.insert(Object);
 
   using Worklist = decltype(Functions);
   Worklist::Callbacks C;
   C.Prepare = [&](const ObjectID *Object) -> std::optional<Bitcode> {
-    return Container.takeBitcode(*Object);
+    return std::move(Inputs.at(Object));
   };
   C.Cost = [](const Bitcode &Input) -> size_t { return Input.size(); };
   C.Work = [this](const Bitcode &Input) {
@@ -119,9 +131,9 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
   };
   C.Reads = [](const ObjectID *) { return std::vector<const ObjectID *>(); };
 
-  // Commits do not depend on each other, and a function in flight is its own
-  // bitcode moved out of the container: admit every function, so a slow one
-  // at the head of the queue does not leave the workers idle
+  // A function in flight is its own bitcode moved out of the container: admit
+  // every function, so a slow one at the head of the queue does not leave
+  // the workers idle
   Functions.run(C, Workers, Objects.size(), SIZE_MAX);
   return true;
 }
