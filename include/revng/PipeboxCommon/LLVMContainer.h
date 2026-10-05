@@ -4,6 +4,10 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
+#include <optional>
+#include <ranges>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -107,49 +111,54 @@ public:
   static constexpr llvm::StringRef MimeType = "application/x.llvm.bc";
   static constexpr llvm::StringRef Compression = "zstd;level=2";
 
+  using Bitcode = llvm::SmallVector<char, 0>;
+
 private:
   bool Disposable = false;
-  std::optional<llvm::LLVMContext> Context;
-  std::map<ObjectID, std::unique_ptr<llvm::Module>> Modules;
+
+  // Each function is either a module in `Context` or, until something asks
+  // for its module, bitcode: deserializing keeps bitcode, and so do pipes
+  // that run on other threads, which take and return bitcode. Parsing
+  // happens on demand, so a const accessor can parse.
+  mutable std::optional<llvm::LLVMContext> Context;
+  mutable std::map<ObjectID, std::unique_ptr<llvm::Module>> Modules;
+  mutable std::map<ObjectID, Bitcode> Unparsed;
 
 public:
   LLVMFunctionContainer() : Context(std::in_place_t{}) {}
 
 public:
   std::set<ObjectID> objects() const {
-    return std::views::keys(Modules) | revng::to<std::set<ObjectID>>();
+    std::set<ObjectID> Result = std::views::keys(Modules)
+                                | revng::to<std::set<ObjectID>>();
+    for (const auto &[Object, _] : Unparsed)
+      Result.insert(Object);
+    return Result;
   }
 
   void
   deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
-    // Parse in object order, not in the order of the ObjectID pointers: the
-    // modules share a context, and the order in which they are parsed decides
-    // the suffixes their named struct types get there
-    using Entry = std::pair<const ObjectID *, llvm::ArrayRef<char>>;
-    std::vector<Entry> Sorted(Data.begin(), Data.end());
-    llvm::sort(Sorted, [](const Entry &LHS, const Entry &RHS) {
-      return *LHS.first < *RHS.first;
-    });
-
-    for (auto const &[Object, Buffer] : Sorted) {
-      llvm::MemoryBufferRef BufferRef({ Buffer.data(), Buffer.size() },
-                                      "newBuffer");
-      Modules[*Object] = llvm::cantFail(llvm::parseBitcodeFile(BufferRef,
-                                                               *Context));
+    for (auto const &[Object, Buffer] : Data) {
+      Modules.erase(*Object);
+      Unparsed[*Object].assign(Buffer.begin(), Buffer.end());
     }
   }
 
   std::map<ObjectID, Buffer>
   serialize(const std::vector<const ObjectID *> Objects) const {
     std::map<ObjectID, Buffer> Result;
-    for (const ObjectID *Object : Objects)
-      writeBitcode(*Modules.at(*Object), Result[*Object].data());
+    for (const ObjectID *Object : Objects) {
+      if (auto It = Unparsed.find(*Object); It != Unparsed.end())
+        Result[*Object].data().assign(It->second.begin(), It->second.end());
+      else
+        writeBitcode(*Modules.at(*Object), Result[*Object].data());
+    }
     return Result;
   }
 
   bool verify() const {
-    for (auto const &[_, Module] : Modules)
-      revng::forceVerify(&*Module);
+    for (const ObjectID &Object : objects())
+      revng::forceVerify(&getModule(Object));
     return true;
   }
 
@@ -160,6 +169,7 @@ public:
       return;
 
     Modules.clear();
+    Unparsed.clear();
     Context.emplace();
     Disposable = false;
   }
@@ -169,20 +179,53 @@ public:
   const llvm::LLVMContext &getContext() const { return *Context; }
 
   const llvm::Module &getModule(const ObjectID &ID) const {
-    return *Modules.at(ID);
+    return *parsed(ID);
   }
 
-  llvm::Module &getModule(const ObjectID &ID) { return *Modules.at(ID); }
+  llvm::Module &getModule(const ObjectID &ID) { return *parsed(ID); }
 
   std::unique_ptr<llvm::Module> takeModule(const ObjectID &ID) {
-    return std::move(Modules.at(ID));
+    return std::move(parsed(ID));
   }
 
   void assign(const ObjectID &ID, std::unique_ptr<llvm::Module> &&NewModule) {
+    Unparsed.erase(ID);
     if (&*Context == &NewModule->getContext())
       Modules[ID] = std::move(NewModule);
     else
       Modules[ID] = cloneIntoContext(*NewModule, *Context);
+  }
+
+  /// Remove \p ID's function and return it as bitcode, without parsing it if
+  /// it is still bitcode
+  Bitcode takeBitcode(const ObjectID &ID) {
+    if (auto It = Unparsed.find(ID); It != Unparsed.end()) {
+      Bitcode Result = std::move(It->second);
+      Unparsed.erase(It);
+      return Result;
+    }
+
+    auto It = Modules.find(ID);
+    revng_assert(It != Modules.end() and It->second != nullptr);
+    Bitcode Result;
+    writeBitcode(*It->second, Result);
+    Modules.erase(It);
+    return Result;
+  }
+
+  /// Set \p ID's function to \p NewBitcode, parsed only when needed
+  void assignBitcode(const ObjectID &ID, Bitcode &&NewBitcode) {
+    Modules.erase(ID);
+    Unparsed[ID] = std::move(NewBitcode);
+  }
+
+private:
+  std::unique_ptr<llvm::Module> &parsed(const ObjectID &ID) const {
+    if (auto It = Unparsed.find(ID); It != Unparsed.end()) {
+      Modules[ID] = readBitcode(It->second, *Context);
+      Unparsed.erase(It);
+    }
+    return Modules.at(ID);
   }
 };
 
