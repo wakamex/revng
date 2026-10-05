@@ -10,9 +10,7 @@ namespace revng::pypeline::piperuns {
 using IFMN = ImportDescriptiveFunctionInfo;
 void IFMN::runOnCliftFunction(const model::Function &Function,
                               clift::FunctionOp MLIR) {
-  clift::importDescriptiveInfo(Function,
-                               Binary,
-                               MLIR->getParentOfType<mlir::ModuleOp>());
+  clift::importDescriptiveInfo(Binary, MLIR->getParentOfType<mlir::ModuleOp>());
 }
 
 void ImportDescriptiveInfo::run() {
