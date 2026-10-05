@@ -2,7 +2,12 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <string>
+
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Progress.h"
+#include "llvm/Support/SHA256.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "revng/Support/Assert.h"
 #include "revng/Support/Debug.h"
@@ -117,6 +122,71 @@ static Logger DLADumpDot("dla-step-dump-dot");
   return true;
 }
 
+static Logger DigestLog("dla-type-system-digest");
+
+/// Log the SHA-256 of a canonical description of \p TS: every node by ID with
+/// its size and flags, its successors and predecessors with each edge's kind
+/// and offset expression, and the compressed equivalence classes. Two runs
+/// that build the same type system log the same digest, whatever the
+/// addresses of its nodes and tags.
+static void logDigest(const LayoutTypeSystem &TS, llvm::StringRef When) {
+  if (not DigestLog.isEnabled())
+    return;
+
+  llvm::SHA256 Hash;
+  std::string Buffer;
+  llvm::raw_string_ostream OS(Buffer);
+  auto Flush = [&]() {
+    OS.flush();
+    Hash.update(llvm::StringRef(Buffer));
+    Buffer.clear();
+  };
+  auto PrintLink = [&OS](const LayoutTypeSystemNode::Link &L) {
+    const auto &[Other, Tag] = L;
+    OS << " " << Other->ID << ":" << Tag->getKind();
+    if (Tag->getKind() == TypeLinkTag::LK_Instance)
+      Tag->getOffsetExpr().print(OS);
+  };
+
+  uint64_t Nodes = 0;
+  uint64_t Edges = 0;
+  for (const LayoutTypeSystemNode *N : TS.getLayoutsRange()) {
+    ++Nodes;
+    Edges += N->Successors.size();
+    OS << N->ID << " " << N->Size << " " << N->InterferingInfo << " "
+       << N->NonScalar;
+    if (N->IsTypeRoot)
+      OS << " type-root";
+    if (N->HasUnknownPointee)
+      OS << " unknown-pointee";
+    OS << " >";
+    for (const auto &L : N->Successors)
+      PrintLink(L);
+    OS << " <";
+    for (const auto &L : N->Predecessors)
+      PrintLink(L);
+    OS << "\n";
+    if (Buffer.size() > (1 << 20))
+      Flush();
+  }
+
+  VectEqClasses Classes = TS.getEqClasses();
+  Classes.compress();
+  for (unsigned I = 0; I < Classes.getNumElements(); ++I) {
+    auto Class = Classes.getEqClassID(I);
+    OS << (Class ? std::to_string(*Class) : "removed") << "\n";
+    if (Buffer.size() > (1 << 20))
+      Flush();
+  }
+  Flush();
+
+  revng_log(DigestLog,
+            "DLA type system after " << When << ": "
+                                     << llvm::toHex(Hash.final(), true)
+                                     << " nodes=" << Nodes
+                                     << " edges=" << Edges);
+}
+
 void StepManager::run(LayoutTypeSystem &TS) {
   if (not hasValidSchedule())
     revng_abort("Cannot run a on LayoutTypeSystem: invalid schedule");
@@ -125,10 +195,14 @@ void StepManager::run(LayoutTypeSystem &TS) {
     TS.dumpDotOnFile("type-system-0.dot", true);
 
   llvm::Task T{ Schedule.size(), "StepManager::run" };
+  logDigest(TS, "the front end");
   for (auto &S : Schedule) {
     T.advance(getStepNameFromID(S->getStepID()));
     S->runOnTypeSystem(TS);
     ++x;
+    logDigest(TS,
+              std::to_string(x) + " "
+                + getStepNameFromID(S->getStepID()));
     if (DLADumpDot.isEnabled()) {
       revng_log(DLADumpDot,
                 "Step " << getStepNameFromID(S->getStepID())

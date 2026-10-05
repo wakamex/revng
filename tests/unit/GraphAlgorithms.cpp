@@ -4,6 +4,7 @@
 
 #define BOOST_TEST_MODULE GraphAlgorithms
 bool init_unit_test();
+#include <memory>
 #include <random>
 
 #include "boost/test/unit_test.hpp"
@@ -418,4 +419,144 @@ BOOST_AUTO_TEST_CASE(InsertNodesBetweenMatchesNodesBetween) {
     }
   }
   revng_check(Exceeded > 0);
+}
+
+/// A graph whose nodes keep their successors in a vector, so that a node can
+/// have repeated edges and edges to itself, and which counts the visits of
+/// successor lists.
+struct SCCTestNode {
+  std::vector<SCCTestNode *> Successors;
+};
+
+static size_t SCCTestChildVisits = 0;
+
+template<>
+struct llvm::GraphTraits<SCCTestNode *> {
+  using NodeRef = SCCTestNode *;
+  using ChildIteratorType = std::vector<SCCTestNode *>::iterator;
+  static NodeRef getEntryNode(NodeRef N) { return N; }
+  static ChildIteratorType child_begin(NodeRef N) {
+    ++SCCTestChildVisits;
+    return N->Successors.begin();
+  }
+  static ChildIteratorType child_end(NodeRef N) {
+    return N->Successors.end();
+  }
+};
+
+using SCCList = std::vector<std::vector<SCCTestNode *>>;
+
+/// What forEachSCCFrom replaces: a fresh llvm::scc_iterator from each start,
+/// skipping the components an earlier one yielded
+static SCCList sccsFromEachStart(const std::vector<SCCTestNode *> &Starts) {
+  SCCList Result;
+  std::set<SCCTestNode *> Visited;
+  for (SCCTestNode *Start : Starts) {
+    if (Visited.contains(Start))
+      continue;
+    for (const auto &SCC : llvm::make_range(llvm::scc_begin(Start),
+                                            llvm::scc_end(Start))) {
+      if (Visited.contains(SCC[0]))
+        continue;
+      Visited.insert(SCC.begin(), SCC.end());
+      Result.push_back(SCC);
+    }
+  }
+  return Result;
+}
+
+static void checkSCCsFrom(const std::vector<SCCTestNode *> &Starts) {
+  SCCList Expected = sccsFromEachStart(Starts);
+
+  SCCTestChildVisits = 0;
+  SCCList Actual;
+  using GT = llvm::GraphTraits<SCCTestNode *>;
+  forEachSCCFrom<GT>(Starts, [&](const std::vector<SCCTestNode *> &SCC) {
+    Actual.push_back(SCC);
+  });
+
+  BOOST_TEST((Actual == Expected));
+
+  // Each reachable node has its successors visited once
+  size_t Reached = 0;
+  for (const auto &SCC : Actual)
+    Reached += SCC.size();
+  BOOST_TEST(SCCTestChildVisits == Reached);
+}
+
+struct SCCTestGraph {
+  std::vector<std::unique_ptr<SCCTestNode>> Storage;
+  std::vector<SCCTestNode *> Nodes;
+
+  explicit SCCTestGraph(size_t Size) {
+    for (size_t I = 0; I < Size; ++I) {
+      Storage.push_back(std::make_unique<SCCTestNode>());
+      Nodes.push_back(Storage.back().get());
+    }
+  }
+
+  void addEdge(size_t From, size_t To) {
+    Nodes[From]->Successors.push_back(Nodes[To]);
+  }
+};
+
+BOOST_AUTO_TEST_CASE(SCCsFromEveryStartMatchSCCIteratorPerStart) {
+  // Adversarial shapes for the per-start iterator: each start reaches all the
+  // earlier ones, so every new start walks everything again.
+  for (size_t Size : { 1, 2, 3, 10, 200 }) {
+    // A chain pointing back to the first node
+    SCCTestGraph Chain(Size);
+    for (size_t I = 1; I < Size; ++I)
+      Chain.addEdge(I, I - 1);
+    checkSCCsFrom(Chain.Nodes);
+
+    // The same with a two-node cycle at every step, and self-loops
+    SCCTestGraph Ladder(2 * Size);
+    for (size_t I = 0; I < Size; ++I) {
+      Ladder.addEdge(2 * I, 2 * I + 1);
+      Ladder.addEdge(2 * I + 1, 2 * I);
+      Ladder.addEdge(2 * I + 1, 2 * I + 1);
+      if (I > 0)
+        Ladder.addEdge(2 * I, 2 * I - 1);
+    }
+    checkSCCsFrom(Ladder.Nodes);
+
+    // Every start reaches one large cycle through a different node
+    SCCTestGraph Fan(2 * Size);
+    for (size_t I = 0; I < Size; ++I) {
+      Fan.addEdge(I, Size + I);
+      Fan.addEdge(Size + I, Size + (I + 1) % Size);
+    }
+    checkSCCsFrom(Fan.Nodes);
+
+    // A complete graph with repeated edges, started from every node twice
+    SCCTestGraph Complete(std::min<size_t>(Size, 30));
+    for (size_t I = 0; I < Complete.Nodes.size(); ++I)
+      for (size_t J = 0; J < Complete.Nodes.size(); ++J)
+        for (int Repeat = 0; Repeat < 2; ++Repeat)
+          Complete.addEdge(I, J);
+    auto Twice = Complete.Nodes;
+    llvm::append_range(Twice, Complete.Nodes);
+    checkSCCsFrom(Twice);
+  }
+
+  // Random graphs of varying density, from random subsets and orders of starts
+  std::mt19937 Generator(20261002);
+  for (int Round = 0; Round < 2000; ++Round) {
+    size_t Size = std::uniform_int_distribution<size_t>(1, 60)(Generator);
+    double Density = std::uniform_real_distribution<double>(0, 4.0 / Size)(
+      Generator);
+    SCCTestGraph Graph(Size);
+    std::bernoulli_distribution HasEdge(Density);
+    for (size_t I = 0; I < Size; ++I)
+      for (size_t J = 0; J < Size; ++J)
+        if (HasEdge(Generator))
+          Graph.addEdge(I, J);
+
+    std::vector<SCCTestNode *> Starts = Graph.Nodes;
+    std::shuffle(Starts.begin(), Starts.end(), Generator);
+    Starts.resize(std::uniform_int_distribution<size_t>(1, Size)(Generator));
+    checkSCCsFrom(Starts);
+    checkSCCsFrom(Graph.Nodes);
+  }
 }

@@ -133,6 +133,10 @@ void debug_function LayoutTypeSystem::dumpDotOnFile(const char *FName,
     }
 
     DotFile << " NonScalar: " << L->NonScalar;
+    if (L->IsTypeRoot)
+      DotFile << " TypeRoot: 1";
+    if (L->HasUnknownPointee)
+      DotFile << " UnknownPointee: 1";
 
     if (CollapsedNodePrinter.isEnabled() or ShowCollapsed)
       DebugPrinter->printNodeContent(*this, L, DotFile);
@@ -318,6 +322,8 @@ void LayoutTypeSystem::mergeNodes(llvm::ArrayRef<LayoutTypeSystemNode *>
       Into->Size = std::max(Into->Size, From->Size);
     }
     Into->NonScalar |= From->NonScalar;
+    Into->IsTypeRoot |= From->IsTypeRoot;
+    Into->HasUnknownPointee |= From->HasUnknownPointee;
 
     EqClasses.join(IntoID, From->ID);
 

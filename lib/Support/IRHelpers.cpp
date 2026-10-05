@@ -392,9 +392,10 @@ void pruneDICompileUnits(Module &M) {
 }
 
 using ValueSet = SmallSet<Value *, 2>;
+using LeafSet = SmallSetVector<Value *, 2>;
 
 static RecursiveCoroutine<void>
-findPhiTreeLeavesImpl(ValueSet &Leaves, ValueSet &Visited, llvm::Value *V) {
+findPhiTreeLeavesImpl(LeafSet &Leaves, ValueSet &Visited, llvm::Value *V) {
   if (auto *Phi = dyn_cast<PHINode>(V)) {
     revng_assert(!Visited.contains(V));
     Visited.insert(V);
@@ -407,8 +408,8 @@ findPhiTreeLeavesImpl(ValueSet &Leaves, ValueSet &Visited, llvm::Value *V) {
   rc_return;
 }
 
-ValueSet findPhiTreeLeaves(Value *Root) {
-  ValueSet Result;
+LeafSet findPhiTreeLeaves(Value *Root) {
+  LeafSet Result;
   ValueSet Visited;
   findPhiTreeLeavesImpl(Result, Visited, Root);
   return Result;

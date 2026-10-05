@@ -26,6 +26,7 @@ revng = [
     "pypeline/storage/local_provider_migrations/v2.sql",
     "pypeline/storage/local_provider_migrations/v3.sql",
     "pypeline/storage/local_provider_migrations/v4.sql",
+    "pypeline/storage/local_provider_migrations/v5.sql",
     "pypeline/rss_server/postgres_migrations/v1.sql",
 ]
 

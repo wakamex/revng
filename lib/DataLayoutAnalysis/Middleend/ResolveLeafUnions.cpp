@@ -134,6 +134,7 @@ static std::partial_ordering compareLeafTypes(const LayoutTypeSystemNode *A,
   LeafType AType = getType(A);
   LeafType BType = getType(B);
 
+  // Pointer use does not disprove a scalar interpretation of the same bytes.
   switch (AType.Kind) {
 
   case LeafType::Generic: {
@@ -145,7 +146,7 @@ static std::partial_ordering compareLeafTypes(const LayoutTypeSystemNode *A,
     }
 
     case LeafType::Pointer: {
-      return std::partial_ordering::less;
+      return std::partial_ordering::unordered;
     }
 
     default:
@@ -159,7 +160,7 @@ static std::partial_ordering compareLeafTypes(const LayoutTypeSystemNode *A,
     switch (BType.Kind) {
 
     case LeafType::Generic: {
-      return std::partial_ordering::greater;
+      return std::partial_ordering::unordered;
     }
 
     case LeafType::Pointer: {

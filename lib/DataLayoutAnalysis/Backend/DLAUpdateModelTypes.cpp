@@ -611,16 +611,20 @@ fillStructWithRecoveredDLATypeAtOffset(model::Binary &Model,
       // verify.
       if (FieldsRemaining) {
 
-        // Drop the large fields
-        for (auto &FieldNum : FieldsToDrop)
-          NewU->Fields().erase(FieldNum);
+        // Other arguments and objects can share the recovered union. Narrow
+        // only this consumer's copy, preserving the shared definition.
+        auto &&[Trimmed, TrimmedType] = Model.makeUnionDefinition();
+        for (const auto &Field : NewU->Fields()) {
+          if (FieldsToDrop.contains(Field.Index()))
+            continue;
+          auto Copy = Field;
+          Copy.Index() = Trimmed.Fields().size();
+          Trimmed.Fields().insert(std::move(Copy));
+        }
+        RecoveredType = std::move(TrimmedType);
 
-        // Re-enumerate the remaining fields
-        for (auto &&[Index, Field] : llvm::enumerate(NewU->Fields()))
-          Field.Index() = Index;
-
-        revng_assert(NewU->Fields().size() == FieldsRemaining);
-        revng_assert(NewU->verify());
+        revng_assert(Trimmed.Fields().size() == FieldsRemaining);
+        revng_assert(Trimmed.verify());
       }
     }
 

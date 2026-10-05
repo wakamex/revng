@@ -7,6 +7,7 @@ revng_add_analyses_library_internal(
   Frontend/DLACreateIntraProceduralTypes.cpp
   Frontend/DLATypeSystemBuilder.cpp
   Frontend/SCEVBaseAddressExplorer.cpp
+  Frontend/StaticFunctionPointers.cpp
   Middleend/ArrangeAccessesHierarchically.cpp
   Middleend/CollapseSCC.cpp
   Middleend/CompactCompatibleArrays.cpp
@@ -33,4 +34,4 @@ revng_add_analyses_library_internal(
   DLATypeSystem.cpp)
 
 target_link_libraries(revngDataLayoutAnalysis revngSupport
-                      revngEarlyFunctionAnalysis revngModel ${LLVM_LIBRARIES})
+                      revngEarlyFunctionAnalysis revngModel revngSegmentReferences ${LLVM_LIBRARIES})

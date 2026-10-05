@@ -3,10 +3,17 @@
 //
 
 #include <algorithm>
+#include <deque>
+#include <functional>
 #include <iterator>
+#include <queue>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -88,9 +95,14 @@ static bool isFixedChild(const LayoutTypeSystemNode *Parent,
   // If there's a strided edge going to Child, then Child is fixed.
   // If Child has another Parent that is different from Parent, then it's
   // fixed
-  if (Child->NonScalar or isLeaf(Child) or hasPointerChild(Child)
-      or hasPointerParent(Child) or hasStridedParent(Child)
-      or hasAnotherParent(Child, Parent)) {
+  //
+  // hasAnotherParent comes before the other edge checks, which visit every
+  // outgoing or incoming edge of Child when it has no pointer or strided
+  // edge: a child shared by many parents is fixed for each of them, and
+  // usually its first incoming edge shows it.
+  if (Child->NonScalar or Child->IsTypeRoot or isLeaf(Child)
+      or hasAnotherParent(Child, Parent) or hasPointerChild(Child)
+      or hasPointerParent(Child) or hasStridedParent(Child)) {
     return true;
   }
 
@@ -342,6 +354,26 @@ canPushThrough(const LayoutTypeSystemNode *Parent,
     return std::nullopt;
   }
 
+  // A partially overlapping access does not establish a field of a function
+  // subobject. Keep it in the containing object instead of spreading it to
+  // every caller of the function. Exact and contained accesses remain valid.
+  if (Outer->IsTypeRoot) {
+    for (const auto &[Field, Tag] : Outer->Successors) {
+      if (not isInstanceEdge({ Field, Tag }))
+        continue;
+      const auto &OE = Tag->getOffsetExpr();
+      if (not OE.Strides.empty() or OE.Offset > Outer->Size
+          or Field->Size > Outer->Size - OE.Offset)
+        continue;
+      uint64_t FieldEnd = OE.Offset + Field->Size;
+      bool Overlaps = OffsetInElem < FieldEnd and OE.Offset < EndByteInElem;
+      bool Inside = OffsetInElem >= OE.Offset and EndByteInElem <= FieldEnd;
+      bool Contains = OffsetInElem <= OE.Offset and EndByteInElem >= FieldEnd;
+      if (Overlaps and not Inside and not Contains)
+        return std::nullopt;
+    }
+  }
+
   return PushThroughComparisonResult{
     .ToPush = InnerIt,
     .Through = OuterIt,
@@ -368,8 +400,106 @@ static std::weak_ordering operator<=>(const NeighborIterator &LHS,
   return *LHSTag <=> *RHSTag;
 }
 
+/// For each node that ArrangeAccessesHierarchically has not analyzed yet, the
+/// number of its parents (through non-pointer edges) that it has not analyzed
+/// yet. A node is ready to be analyzed when this count drops to 0. The step
+/// tells it about every edge it adds or removes before a node is analyzed.
+class PendingParents {
+  llvm::DenseMap<const LayoutTypeSystemNode *, unsigned> Count;
+  llvm::SmallVector<LayoutTypeSystemNode *> Released;
+
+public:
+  explicit PendingParents(LayoutTypeSystem &TS) {
+    for (LayoutTypeSystemNode *N : llvm::nodes(&TS))
+      Count[N] = 0;
+    for (LayoutTypeSystemNode *N : llvm::nodes(&TS))
+      for (LayoutTypeSystemNode *Child : distinctChildren(N))
+        ++Count[Child];
+  }
+
+  bool isPending(const LayoutTypeSystemNode *N) const {
+    return Count.count(N) != 0;
+  }
+
+  bool empty() const { return Count.empty(); }
+
+  unsigned count(const LayoutTypeSystemNode *N) const {
+    return Count.lookup(N);
+  }
+
+  /// The distinct children of \p N through non-pointer edges
+  static llvm::SmallVector<LayoutTypeSystemNode *>
+  distinctChildren(LayoutTypeSystemNode *N) {
+    llvm::SmallVector<LayoutTypeSystemNode *> Result;
+    for (LayoutTypeSystemNode *Child : llvm::children<NonPointerFilterT>(N))
+      if (Result.empty() or Result.back() != Child)
+        Result.push_back(Child);
+    return Result;
+  }
+
+  /// Whether a non-pointer edge goes from \p Parent to \p Child
+  static bool isParent(const LayoutTypeSystemNode *Parent,
+                       const LayoutTypeSystemNode *Child) {
+    using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
+    auto &Predecessors = Child->Predecessors;
+    auto It = Predecessors.lower_bound(IDBasedKey{ Parent->ID, nullptr });
+    auto End = Predecessors.upper_bound(IDBasedKey{ Parent->ID + 1,
+                                                    nullptr });
+    for (; It != End; ++It)
+      if (isNotPointerEdge(*It))
+        return true;
+    return false;
+  }
+
+  /// Call before adding a non-pointer edge from \p Parent to \p Child (the
+  /// type system adds no edge from a node to itself)
+  void beforeLink(const LayoutTypeSystemNode *Parent,
+                  const LayoutTypeSystemNode *Child) {
+    if (Parent != Child and isPending(Parent) and not isParent(Parent, Child))
+      ++Count[Child];
+  }
+
+  /// Call after removing a non-pointer edge from \p Parent to \p Child
+  void afterUnlink(const LayoutTypeSystemNode *Parent,
+                   LayoutTypeSystemNode *Child) {
+    if (isPending(Parent) and not isParent(Parent, Child))
+      release(Child);
+  }
+
+  /// Call when \p N leaves the graph without being analyzed
+  void erase(const LayoutTypeSystemNode *N) { Count.erase(N); }
+
+  /// Call once \p N has been analyzed
+  void analyzed(LayoutTypeSystemNode *N) {
+    revng_assert(Count.lookup(N) == 0);
+    Count.erase(N);
+    for (LayoutTypeSystemNode *Child : distinctChildren(N))
+      release(Child);
+  }
+
+  /// The nodes whose count dropped to 0 since the last call
+  llvm::SmallVector<LayoutTypeSystemNode *> takeReady() {
+    llvm::SmallVector<LayoutTypeSystemNode *> Result;
+    for (LayoutTypeSystemNode *N : Released)
+      if (isPending(N) and Count.lookup(N) == 0)
+        Result.push_back(N);
+    Released.clear();
+    return Result;
+  }
+
+private:
+  void release(LayoutTypeSystemNode *N) {
+    auto It = Count.find(N);
+    revng_assert(It != Count.end() and It->second > 0);
+    if (--It->second == 0)
+      Released.push_back(N);
+  }
+};
+
 static llvm::SmallPtrSet<LayoutTypeSystemNode *, 8>
-absorbVolatileChildren(LayoutTypeSystem &TS, LayoutTypeSystemNode *Parent) {
+absorbVolatileChildren(LayoutTypeSystem &TS,
+                       LayoutTypeSystemNode *Parent,
+                       PendingParents *Pending = nullptr) {
   revng_log(Log, "absorbVolatileChildren of: " << Parent->ID);
   LoggerIndent Indent{ Log };
 
@@ -422,13 +552,22 @@ absorbVolatileChildren(LayoutTypeSystem &TS, LayoutTypeSystemNode *Parent) {
     // Remove all volatile nodes
     for (LayoutTypeSystemNode *Volatile : VolatileChildren) {
       Absorbed.insert(Volatile);
+      auto GrandChildren = PendingParents::distinctChildren(Volatile);
       TS.dropOutgoingEdges(Volatile);
+      if (Pending)
+        for (LayoutTypeSystemNode *GrandChild : GrandChildren)
+          Pending->afterUnlink(Volatile, GrandChild);
       revng_log(Log, "Merge volatile child: " << Volatile->ID);
       TS.mergeNodes({ Parent, Volatile });
+      if (Pending)
+        Pending->erase(Volatile);
     }
 
-    for (auto &[OffsetExpr, Target] : CompoundEdges.takeVector())
+    for (auto &[OffsetExpr, Target] : CompoundEdges.takeVector()) {
+      if (Pending)
+        Pending->beforeLink(Parent, Target);
       TS.addInstanceLink(Parent, Target, std::move(OffsetExpr));
+    }
   }
   return Absorbed;
 }
@@ -449,6 +588,78 @@ static void absorbVolatileChildren(LayoutTypeSystem &TS) {
   }
 }
 
+/// Byte ranges of fields, each with a number, to find the ones that overlap
+/// a given range in time proportional to their count
+class OverlapIndex {
+  struct Field {
+    uint64_t Start = 0;
+    uint64_t End = 0;
+    unsigned Number = 0;
+  };
+
+  // Sorted by start
+  std::vector<Field> Fields;
+  // The largest end in each range of Fields, as a segment tree
+  std::vector<uint64_t> MaxEnd;
+  size_t Leaves = 1;
+
+public:
+  void add(uint64_t Start, uint64_t End, unsigned Number) {
+    revng_assert(Start < End);
+    Fields.push_back({ Start, End, Number });
+  }
+
+  void build() {
+    llvm::stable_sort(Fields, [](const Field &LHS, const Field &RHS) {
+      return LHS.Start < RHS.Start;
+    });
+    while (Leaves < Fields.size())
+      Leaves *= 2;
+    MaxEnd.assign(2 * Leaves, 0);
+    for (size_t I = 0; I < Fields.size(); ++I)
+      MaxEnd[Leaves + I] = Fields[I].End;
+    for (size_t I = Leaves - 1; I > 0; --I)
+      MaxEnd[I] = std::max(MaxEnd[2 * I], MaxEnd[2 * I + 1]);
+  }
+
+  /// Call \p Callback with the number of each field that shares a byte with
+  /// [Start, End)
+  template<typename CallbackT>
+  void forEachOverlapping(uint64_t Start,
+                          uint64_t End,
+                          CallbackT &&Callback) const {
+    auto ByStart = [](const Field &F, uint64_t Offset) {
+      return F.Start < Offset;
+    };
+    auto First = std::lower_bound(Fields.begin(),
+                                  Fields.end(),
+                                  Start,
+                                  ByStart);
+
+    // The fields starting inside the range
+    for (auto It = First; It != Fields.end() and It->Start < End; ++It)
+      Callback(It->Number);
+
+    // The fields starting before it and ending inside or after it
+    size_t Before = First - Fields.begin();
+    llvm::SmallVector<std::tuple<size_t, size_t, size_t>, 32> Stack{
+      { 1, 0, Leaves }
+    };
+    while (not Stack.empty()) {
+      auto [Node, Low, High] = Stack.pop_back_val();
+      if (Low >= Before or MaxEnd[Node] <= Start)
+        continue;
+      if (High - Low == 1) {
+        Callback(Fields[Low].Number);
+        continue;
+      }
+      size_t Middle = (Low + High) / 2;
+      Stack.push_back({ 2 * Node + 1, Middle, High });
+      Stack.push_back({ 2 * Node, Low, Middle });
+    }
+  }
+};
+
 bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
@@ -457,19 +668,14 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
 
   absorbVolatileChildren(TS);
 
-  // This dla::Step will heavily mutate the graph while iterating on it.
-  // Despite thinking hard about it, we couldn't come up with a sane visit order
-  // that could be pre-computed and guaranteed to be stable during the mutation,
-  // or could be updated cheaply.
-  // So we precompute some kind of global topological ordering, and use it as a
-  // hard-coded ordering for analysis throughout the dla::Step.
-  // Then we go fixed-point until we don't have anything left to recompute, but
-  // we always follow this order because it's still better than iterating
-  // randomly, or with some other ordering that is not stable.
+  // Analyze each node once, after all the nodes that have an instance edge to
+  // it. Analyzing a node only adds or removes edges between it and the nodes
+  // it reaches, so once every parent of a node has been analyzed its edges
+  // stop changing, and analyzing it then arranges all of them at once. The
+  // ready nodes are taken in reverse post order of the graph as it is when the
+  // step starts, which is a topological order of that graph.
 
-  // Add a fake root to be able to compute a RPOT from that. What's important
-  // here is not that it's strictly a RPOT, but that it is a topological
-  // traversal.
+  // Add a fake root to be able to compute a RPOT from that.
   auto *FakeRoot = TS.createArtificialLayoutType();
   for (LayoutTypeSystemNode *Root : llvm::nodes(&TS)) {
     revng_assert(Root != nullptr);
@@ -479,32 +685,35 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
     TS.addInstanceLink(FakeRoot, Root, OffsetExpression{});
   }
 
-  // Compute the RPOT
-  auto Queue = llvm::ReversePostOrderTraversal(NonPointerFilterT(FakeRoot));
-
-  // Compute the node to analyze.
-  std::set<const LayoutTypeSystemNode *> ToAnalyze;
-  for (const auto *Node : Queue)
-    ToAnalyze.insert(Node);
+  // Number the nodes in RPOT
+  llvm::DenseMap<const LayoutTypeSystemNode *, unsigned> Position;
+  for (LayoutTypeSystemNode *Node :
+       llvm::ReversePostOrderTraversal(NonPointerFilterT(FakeRoot)))
+    Position.insert({ Node, Position.size() });
 
   // The fake root is never to analyze and can already be removed.
-  ToAnalyze.erase(FakeRoot);
+  Position.erase(FakeRoot);
   TS.removeNode(FakeRoot);
+  revng_assert(Position.size() == TS.getNumLayouts());
 
-  while (not ToAnalyze.empty()) {
+  PendingParents Pending(TS);
+  using ReadyEntry = std::pair<unsigned, LayoutTypeSystemNode *>;
+  std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, std::greater<>>
+    Ready;
+  for (LayoutTypeSystemNode *Node : llvm::nodes(&TS))
+    if (Pending.count(Node) == 0)
+      Ready.push({ Position.lookup(Node), Node });
 
-    for (LayoutTypeSystemNode *Parent : Queue) {
+  while (not Ready.empty()) {
+    LayoutTypeSystemNode *Parent = Ready.top().second;
+    Ready.pop();
 
-      // Erase Parent from ToAnalyze
-      bool AlreadyAnalyzed = not ToAnalyze.erase(Parent);
+    // A node absorbed into its parent leaves the graph unanalyzed
+    if (not Pending.isPending(Parent))
+      continue;
 
-      // If erasure failed, Parent wasn't in ToAnalyze, so it was already
-      // analyzed in a previous iteration, and we can skip it.
-      if (AlreadyAnalyzed)
-        continue;
-
+    {
       revng_log(Log, "Analyzing parent: " << Parent->ID);
-      revng_assert(Parent != FakeRoot);
       LoggerIndent Indent{ Log };
 
       // If we reach this point we have to analyze Parent, to see if some of its
@@ -520,18 +729,60 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // For instance if we had A->B, A->C, B->C, and C was pushed down B, then
       // C becomes volatile inside B.
       {
-        auto Absorbed = absorbVolatileChildren(TS, Parent);
-        for (auto *A : Absorbed)
-          ToAnalyze.erase(A);
+        absorbVolatileChildren(TS, Parent, &Pending);
       }
 
-      // Represents an edge iterator pointing to an instance edge, along with an
-      // OffsetExpression that is not the one currently attached to the instance
-      // edge, but that it is used to move the edge around.
-      struct EdgeWithOffset {
-        NeighborIterator Edge;
-        OffsetExpression FinalOE;
+      // What is pushed through an edge E, in the order it arrives: single
+      // edges, and everything pushed through another edge A before A itself
+      // was pushed through E. Every edge that ends up pushed through E gets
+      // the offset computeOffsetAfterPush gives for the two edges, and pushing
+      // an edge a second time would change nothing: the edge it adds is
+      // already there, or was skipped because it would close a loop, which it
+      // still would since edges are only added meanwhile. So, instead of
+      // copying what was pushed through A into each edge containing A, which
+      // costs the depth of the hierarchy times the size of the lists, each
+      // list refers to the lists it includes, and is expanded once, keeping
+      // the first occurrence of each edge, when it is applied.
+      struct PushedThrough {
+        struct Event {
+          // Pushed edge, when Included is null
+          NeighborIterator Edge;
+          // Everything pushed through another edge, when not null
+          const PushedThrough *Included = nullptr;
+        };
+        llvm::SmallVector<Event> Events;
+
+        // The pushed edges, each once, in the order they first arrived
+        llvm::SmallVector<NeighborIterator> expand() const {
+          llvm::SmallVector<NeighborIterator> Result;
+          llvm::DenseSet<const LayoutTypeSystemNode::Link *> Seen;
+          llvm::DenseSet<const PushedThrough *> Expanded{ this };
+          llvm::SmallVector<std::pair<const PushedThrough *, size_t>> Stack{
+            { this, 0 }
+          };
+          while (not Stack.empty()) {
+            auto [List, Index] = Stack.back();
+            if (Index == List->Events.size()) {
+              Stack.pop_back();
+              continue;
+            }
+            ++Stack.back().second;
+            const Event &Next = List->Events[Index];
+            if (Next.Included != nullptr) {
+              // A list expanded before adds no edge that is not there yet
+              if (Expanded.insert(Next.Included).second)
+                Stack.push_back({ Next.Included, 0 });
+            } else if (Seen.insert(&*Next.Edge).second) {
+              Result.push_back(Next.Edge);
+            }
+          }
+          return Result;
+        }
       };
+
+      // Owns the lists, which outlive their entries in ChildrenHierarchy when
+      // other lists include them
+      std::deque<PushedThrough> Lists;
 
       revng_log(Log, "Initialize ChildrenHierarchy");
       // A map whose key is an edge iterator representing an instance edge, and
@@ -541,8 +792,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // In particular, we only keep in this map the neighbor iterator that are
       // the roots of the hierarchy of instance edges, i.e. the instance edges
       // that cannot be pushed through any other edge.
-      std::map<NeighborIterator, llvm::SmallVector<EdgeWithOffset>>
-        ChildrenHierarchy;
+      std::map<NeighborIterator, PushedThrough *> ChildrenHierarchy;
 
       using GT = llvm::GraphTraits<LayoutTypeSystemNode *>;
 
@@ -554,8 +804,60 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
            AIt != ChildEnd;
            ++AIt) {
         if (isInstanceEdge(*AIt))
-          ChildrenHierarchy[AIt];
+          ChildrenHierarchy[AIt] = &Lists.emplace_back();
       }
+
+      // canPushThrough finds nothing for two edges whose fields share no
+      // byte, and finding nothing changes nothing. So each root is compared
+      // only with the later roots whose fields overlap its own, which an
+      // index of the fields by byte range finds, in the order of
+      // ChildrenHierarchy: the same comparisons that find something, in the
+      // same order, without comparing all pairs of the children of a node
+      // with thousands of them. A child of size 0 has no field size, and its
+      // edges are compared with every root, as before.
+      std::vector<NeighborIterator> Roots;
+      llvm::DenseMap<const LayoutTypeSystemNode::Link *, unsigned> RootNumber;
+      std::vector<bool> IsRoot;
+      OverlapIndex Overlaps;
+      llvm::SmallVector<unsigned> Unsized;
+      for (const auto &[Edge, Unused] : ChildrenHierarchy) {
+        unsigned Number = Roots.size();
+        Roots.push_back(Edge);
+        RootNumber[&*Edge] = Number;
+        IsRoot.push_back(true);
+        if (Edge->first->Size == 0) {
+          Unsized.push_back(Number);
+        } else {
+          uint64_t Start = Edge->second->getOffsetExpr().Offset;
+          Overlaps.add(Start,
+                       Start + getFieldSize(Edge->first, Edge->second),
+                       Number);
+        }
+      }
+      Overlaps.build();
+
+      // The roots after Number in ChildrenHierarchy that canPushThrough may
+      // find something with, in that order
+      auto Candidates = [&](unsigned Number) {
+        llvm::SmallVector<unsigned> Result;
+        auto Add = [&](unsigned Other) {
+          if (Other > Number and IsRoot[Other])
+            Result.push_back(Other);
+        };
+        NeighborIterator Edge = Roots[Number];
+        if (Edge->first->Size == 0) {
+          for (unsigned Other = Number + 1; Other < Roots.size(); ++Other)
+            Add(Other);
+          return Result;
+        }
+        uint64_t Start = Edge->second->getOffsetExpr().Offset;
+        uint64_t End = Start + getFieldSize(Edge->first, Edge->second);
+        Overlaps.forEachOverlapping(Start, End, Add);
+        for (unsigned Other : Unsized)
+          Add(Other);
+        llvm::sort(Result);
+        return Result;
+      };
 
       revng_log(Log, "Compare children edges");
       // Now compare each root only with other roots
@@ -572,20 +874,17 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                                       << " label: " << AEdgeIt->second);
 
         // A vector of instance edges that are contained in AEdgeIt and that
-        // should be pushed through it, along with the new offsets they will
-        // have after the push through.
-        llvm::SmallVector<EdgeWithOffset> ContainedInA;
+        // should be pushed through it.
+        llvm::SmallVector<NeighborIterator> ContainedInA;
 
         // A vector of instance edges that contain AEdgeIt. AEdgeIt will have to
-        // be pushed through all of them. The FinalOE in EdgeWithOffset here
-        // represents the new offset that AEdgeIt will have after being pushed
-        // through them.
-        llvm::SmallVector<EdgeWithOffset> ContainsA;
+        // be pushed through all of them.
+        llvm::SmallVector<NeighborIterator> ContainsA;
 
-        for (auto BRootIt = ARootNext; BRootIt != HierarchyEnd; ++BRootIt) {
+        for (unsigned BNumber : Candidates(RootNumber.lookup(&*AEdgeIt))) {
           LoggerIndent OtherChildIndent{ Log };
 
-          auto &[BEdgeIt, ContainedInB] = *BRootIt;
+          NeighborIterator BEdgeIt = Roots[BNumber];
           revng_log(Log,
                     "with BEdge: " << BEdgeIt->first->ID
                                    << " label: " << BEdgeIt->second);
@@ -601,24 +900,21 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           if (ToPush == AEdgeIt) {
             revng_assert(Through == BEdgeIt);
             // AEdgeIt can be pushed inside BEdgeIt
-            auto BWithNewAOffset = EdgeWithOffset{ BEdgeIt,
-                                                   std::move(OEAfterPush) };
-            ContainsA.push_back(std::move(BWithNewAOffset));
+            ContainsA.push_back(BEdgeIt);
           } else {
             revng_assert(ToPush == BEdgeIt and Through == AEdgeIt);
             // BEdgeIt can be pushed inside AEdgeIt
-            auto BWithNewBOffset = EdgeWithOffset{ BEdgeIt,
-                                                   std::move(OEAfterPush) };
-            ContainedInA.push_back(std::move(BWithNewBOffset));
+            ContainedInA.push_back(BEdgeIt);
           }
         }
 
         // Now, push all the roots contained in A into A, and remove them from
         // ChildrenHierarchy, since they're not roots anymore.
-        PushedInsideA.reserve(PushedInsideA.size() + ContainedInA.size());
-        PushedInsideA.append(ContainedInA);
-        for (const auto &[PushedInA, Unused] : ContainedInA)
+        for (NeighborIterator PushedInA : ContainedInA) {
           ChildrenHierarchy.erase(PushedInA);
+          IsRoot[RootNumber.lookup(&*PushedInA)] = false;
+          PushedInsideA->Events.push_back({ PushedInA });
+        }
 
         // Then, for all the other edges that contain A, A can be pushed through
         // them, along with all the nodes that have already been pushed through
@@ -627,29 +923,17 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // itelf from ChildrenHierarchy, since it's not a root anymore.
         ARootNext = std::next(ARootIt);
         if (not ContainsA.empty()) {
-          for (const auto &[LargerThanA, FinalOE] : ContainsA) {
-
-            // If A needs to be pushed through LargerThanA, and all things that
-            // were previously pushed pushed through A can now be pushed through
-            // LargerThanA.
-            auto &PushedThroughLargerThanA = ChildrenHierarchy.at(LargerThanA);
-            PushedThroughLargerThanA.reserve(PushedThroughLargerThanA.size()
-                                             + PushedInsideA.size() + 1);
-            for (auto &[EdgeToPush, OEAfterPush] : PushedInsideA) {
-              // We have to recompute the offset of EdgeToPush here, after being
-              // pushed through LargerThanA, because this value was never
-              // computed before, given that these two edges have never been
-              // compared before.
-              PushedThroughLargerThanA.push_back(EdgeWithOffset{
-                EdgeToPush, computeOffsetAfterPush(EdgeToPush, LargerThanA) });
-            }
-            // Then also AEdgeIt can be pushed through LargerThanA. The final
-            // offset of AEdgeIt after being pushed through has already been
-            // computed in advance, so we just use that.
-            PushedThroughLargerThanA.push_back({ AEdgeIt, std::move(FinalOE) });
+          for (NeighborIterator LargerThanA : ContainsA) {
+            // A can be pushed through LargerThanA, and so can all the things
+            // that were previously pushed through A.
+            PushedThrough *PushedThroughLargerThanA = ChildrenHierarchy.at(
+              LargerThanA);
+            PushedThroughLargerThanA->Events.push_back({ {}, PushedInsideA });
+            PushedThroughLargerThanA->Events.push_back({ AEdgeIt });
           }
           // Now AEdgeIt is not a root anymore, so we have to erase it and
           // update ARootNext.
+          IsRoot[RootNumber.lookup(&*AEdgeIt)] = false;
           ARootNext = ChildrenHierarchy.erase(ARootIt);
         }
       }
@@ -658,16 +942,19 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       {
         revng_log(Log, "Collect EdgesToErase");
         LoggerIndent IndentCollect{ Log };
-        for (auto &[EdgeToPushThrough, EdgesToPush] : ChildrenHierarchy) {
+        for (auto &[EdgeToPushThrough, ToPush] : ChildrenHierarchy) {
+          llvm::SmallVector<NeighborIterator> EdgesToPush = ToPush->expand();
 
           if (EdgesToPush.empty())
             continue;
 
           auto *ToPushThrough = EdgeToPushThrough->first;
-          ToAnalyze.insert(ToPushThrough);
+          revng_assert(Pending.isPending(ToPushThrough));
 
-          for (auto &[PushedEdgeIt, FinalOE] : EdgesToPush) {
+          for (NeighborIterator PushedEdgeIt : EdgesToPush) {
             auto *ToPushDown = PushedEdgeIt->first;
+            OffsetExpression FinalOE = computeOffsetAfterPush(PushedEdgeIt,
+                                                              EdgeToPushThrough);
 
             // We already checked that we don't close an instance loop, but we
             // did it on the graph before any push happened, and edges were only
@@ -703,6 +990,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
             EdgesToErase.insert(PushedEdgeIt);
 
             revng_assert(not isLeaf(ToPushThrough));
+            Pending.beforeLink(ToPushThrough, ToPushDown);
             TS.addInstanceLink(ToPushThrough, ToPushDown, std::move(FinalOE));
           }
         }
@@ -716,13 +1004,20 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           revng_log(Log,
                     "erase: " << Parent->ID << " -> " << ToErase->first->ID
                               << " label: " << ToErase->second);
+          LayoutTypeSystemNode *Child = ToErase->first;
           TS.eraseEdge(Parent, ToErase);
+          Pending.afterUnlink(Parent, Child);
         }
       }
 
       Changed |= not EdgesToErase.empty();
     }
+
+    Pending.analyzed(Parent);
+    for (LayoutTypeSystemNode *Node : Pending.takeReady())
+      Ready.push({ Position.lookup(Node), Node });
   }
+  revng_assert(Pending.empty());
 
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());

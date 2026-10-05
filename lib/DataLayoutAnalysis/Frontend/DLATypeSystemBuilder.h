@@ -5,16 +5,22 @@
 //
 
 #include <ranges>
+#include <string>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
 #include "revng/Model/Binary.h"
+#include "revng/Model/FunctionTags.h"
+#include "revng/Model/IRHelpers.h"
 
 #include "../FuncOrCallInst.h"
+#include "StaticFunctionPointers.h"
 
 namespace dla {
 
@@ -89,8 +95,8 @@ public:
 class DLATypeSystemLLVMBuilder {
 public:
   using VisitedMapT = std::map<LayoutTypePtr, LayoutTypeSystemNode *>;
-  using PrototypesMapT = std::map<const model::TypeDefinition *,
-                                  FuncOrCallInst>;
+  using FunctionsMapT = std::
+    map<std::pair<const model::TypeDefinition *, std::string>, FuncOrCallInst>;
   using SegmentNodeMapT = std::map<const model::Segment *,
                                    LayoutTypeSystemNode *>;
 
@@ -103,6 +109,11 @@ private:
 
   /// The Model used by this builder to get type information.
   const model::Binary &Model;
+  StaticFunctionTargets StaticTargets;
+  std::map<MetaAddress, const llvm::Function *> FunctionsByEntry;
+  std::map<const llvm::LoadInst *, const llvm::Function *> LoadedFunctions;
+
+  void collectLoadedFunctions(llvm::Module &M);
 
   /// Ordered vector, each element is indexed with the ID of the
   /// corresponding Node
@@ -111,9 +122,9 @@ private:
   /// Reverse map between `llvm::Value`s and Nodes
   VisitedMapT VisitedValues;
 
-  /// Associate each indirect call's prototype in the model with the
-  /// first `llvm::CallInst` found with that prototype,
-  PrototypesMapT VisitedPrototypes;
+  /// Canonical declarations of the same function across modules. A shared
+  /// signature alone does not identify a shared object layout.
+  FunctionsMapT VisitedFunctions;
 
 private:
   LayoutTypeSystemNode *getLayoutType(const llvm::Value *V, unsigned Id);
@@ -136,9 +147,10 @@ private:
   llvm::SmallVector<std::pair<LayoutTypeSystemNode *, bool>, 2>
   getOrCreateLayoutTypes(const llvm::Value &V);
 
-  /// Returns a function whose type on the model is \p Prototype, if any
+  /// Return the canonical direct callee when its model prototype matches.
   const llvm::Function *
-  getFunctionWithPrototype(const model::TypeDefinition *Prototype) const;
+  getCanonicalCallee(const model::TypeDefinition *Prototype,
+                     const llvm::Function *Callee) const;
 
 private:
   /// Create one shared artificial node per model segment.
@@ -160,8 +172,10 @@ public:
   void debug_function dumpValuesMapping(const llvm::StringRef Name) const;
 
 public:
-  DLATypeSystemLLVMBuilder(LayoutTypeSystem &TS, const model::Binary &M) :
-    TS(TS), Model(M){};
+  DLATypeSystemLLVMBuilder(LayoutTypeSystem &TS,
+                           const model::Binary &M,
+                           StaticFunctionTargets Targets = {}) :
+    TS(TS), Model(M), StaticTargets(std::move(Targets)) {}
 
   /// Create a DLATypeSystem graph from a range of LLVM modules
   ///
@@ -173,10 +187,15 @@ public:
   /// corresponds to the ID of the corresponding LayoutTypeSystemNode generated
   ///
   /// \p Modules is a multipass range of `llvm::Module *`. VisitedValues and
-  /// VisitedPrototypes are kept alive across all the modules, so that values
+  /// VisitedFunctions are kept alive across all the modules, so that values
   /// and prototypes shared between modules converge on the same nodes.
+  /// \p ModuleNames names each module in the progress steps.
   template<typename ModuleRange>
-  void buildFromLLVMModules(ModuleRange &&Modules) {
+  void buildFromLLVMModules(ModuleRange &&Modules,
+                            llvm::ArrayRef<std::string> ModuleNames) {
+    revng_assert(static_cast<size_t>(std::ranges::distance(Modules))
+                 == ModuleNames.size());
+
     // The debug printer only needs a module handle for debugging convenience,
     // so install it with the first module of the range. For an empty request
     // the default base printer installed by LayoutTypeSystem stands.
@@ -190,23 +209,44 @@ public:
     SegmentNodeMapT SegmentNodes;
     initializeSegments(SegmentNodes);
 
-    for (llvm::Module *M : Modules)
-      createInterproceduralTypes(*M, SegmentNodes);
+    if (not StaticTargets.empty()) {
+      for (llvm::Module *M : Modules)
+        for (const llvm::Function &F : *M)
+          if (FunctionTags::Isolated.isTagOf(&F)) {
+            auto Entry = getMetaAddressMetadata(&F, FunctionEntryMDName);
+            if (Entry.isValid())
+              FunctionsByEntry.try_emplace(Entry, &F);
+          }
+      for (llvm::Module *M : Modules)
+        collectLoadedFunctions(*M);
+    }
 
-    for (llvm::Module *M : Modules)
-      createIntraproceduralTypes(*M);
+    llvm::Task T(3, "DLA type system");
+    T.advance("Create interprocedural types");
+    {
+      llvm::Task PerModule(ModuleNames.size(), "Create interprocedural types");
+      for (auto &&[M, Name] : llvm::zip_equal(Modules, ModuleNames)) {
+        PerModule.advance(Name);
+        createInterproceduralTypes(*M, SegmentNodes);
+      }
+    }
 
+    T.advance("Create intraprocedural types");
+    {
+      llvm::Task PerModule(ModuleNames.size(), "Create intraprocedural types");
+      for (auto &&[M, Name] : llvm::zip_equal(Modules, ModuleNames)) {
+        PerModule.advance(Name);
+        createIntraproceduralTypes(*M);
+      }
+    }
+
+    T.advance("Create values list");
     createValuesList();
     VisitedValues.clear();
-    VisitedPrototypes.clear();
+    VisitedFunctions.clear();
+    FunctionsByEntry.clear();
+    LoadedFunctions.clear();
   }
-
-  /// Given an indirect Call instruction, check if it shares the model
-  /// prototype with another function. If it does, connect the nodes
-  /// corresponding to the types of the return values and arguments of this Call
-  /// with the types of the return values and arguments of the function sharing
-  /// the same prototype, using equality links.
-  bool connectToFuncsWithSamePrototype(const llvm::CallInst *Call);
 };
 
 } // namespace dla

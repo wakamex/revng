@@ -7,11 +7,13 @@
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/Value.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
+#include "revng/SegmentReferences/SegmentUsesEnumerator.h"
 #include "revng/Support/Assert.h"
 #include "revng/Support/IRHelpers.h"
 
@@ -233,19 +235,16 @@ DLATypeSystemLLVMBuilder::getLayoutTypes(const Value &V) {
 }
 
 const Function *
-DLATypeSystemLLVMBuilder::getFunctionWithPrototype(const model::TypeDefinition
-                                                     *Prototype) const {
-  if (Prototype == nullptr)
+DLATypeSystemLLVMBuilder::getCanonicalCallee(const model::TypeDefinition
+                                               *Prototype,
+                                             const Function *Callee) const {
+  if (Prototype == nullptr or Callee == nullptr)
     return nullptr;
 
-  auto It = VisitedPrototypes.find(Prototype);
-  if (It == VisitedPrototypes.end())
+  auto It = VisitedFunctions.find({ Prototype, Callee->getName().str() });
+  if (It == VisitedFunctions.end())
     return nullptr;
-
-  // Given that we create interprocedural types first, the VisitedPrototype
-  // should always give a Function, unless the Prototype is used only on a call
-  // site.
-  return dyn_cast<Function>(It->second.getVal());
+  return cast<Function>(It->second.getVal());
 }
 
 SmallVector<std::pair<LayoutTypeSystemNode *, bool>, 2>
@@ -421,5 +420,40 @@ void DLATypeSystemLLVMBuilder::dumpValuesMapping(const StringRef Name) const {
     }
 
     OutFile << "\n";
+  }
+}
+
+void DLATypeSystemLLVMBuilder::collectLoadedFunctions(llvm::Module &M) {
+  SegmentUsesEnumerator Uses(Model, SegmentUsesEnumerator::SegmentAccess::All);
+  for (auto [Use, Address] : Uses.getUses(M)) {
+    auto *Load = dyn_cast<LoadInst>(Use->getUser());
+    if (not Load or not Load->isSimple()
+        or Use->getOperandNo() != LoadInst::getPointerOperandIndex()
+        or not Load->getType()->isIntegerTy(64))
+      continue;
+    // Segment enumeration follows casts. Reject lossy address conversions
+    // before trusting the resulting constant slot address.
+    const Value *V = Load->getPointerOperand();
+    bool Lossless = true;
+    while (auto *Op = dyn_cast<Operator>(V)) {
+      auto Opcode = Op->getOpcode();
+      if (Opcode == Instruction::PtrToInt) {
+        Lossless &= Op->getType()->isIntegerTy(64)
+                    and Op->getOperand(0)->getType()->isPointerTy();
+      } else if (Opcode == Instruction::IntToPtr) {
+        Lossless &= Op->getOperand(0)->getType()->isIntegerTy(64);
+      } else if (Opcode != Instruction::Add and Opcode != Instruction::Sub) {
+        break;
+      }
+      V = Op->getOperand(0);
+    }
+    if (not Lossless)
+      continue;
+    auto Target = StaticTargets.find(Address);
+    if (Target == StaticTargets.end())
+      continue;
+    auto Function = FunctionsByEntry.find(Target->second);
+    if (Function != FunctionsByEntry.end())
+      LoadedFunctions.emplace(Load, Function->second);
   }
 }

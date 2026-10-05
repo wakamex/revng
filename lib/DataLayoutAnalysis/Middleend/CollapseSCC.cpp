@@ -2,12 +2,10 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include <set>
 #include <type_traits>
 #include <vector>
 
 #include "llvm/ADT/GraphTraits.h"
-#include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/Progress.h"
@@ -15,6 +13,7 @@
 #include "revng/ADT/FilteredGraphTraits.h"
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
 #include "revng/Support/Debug.h"
+#include "revng/Support/GraphAlgorithms.h"
 
 #include "DLAStep.h"
 #include "RemoveBackedges.h"
@@ -39,44 +38,28 @@ static bool sizeGreater(const LTSN *LHS, const LTSN *RHS) {
 template<typename NodeT>
 static bool collapseSCCs(LayoutTypeSystem &TS) {
 
-  std::set<GraphNodeT> VisitedNodes;
-
   using scc_t = std::vector<GraphNodeT>;
   llvm::SmallVector<scc_t, 0> ToCollapse;
 
   // We cannot start just from the roots because we cannot exclude that there
   // are loops without entries.
-  for (const auto &Node : llvm::nodes(&TS)) {
-    revng_assert(Node != nullptr);
-    revng_log(LogVerbose, "## Analyzing SCCs from  " << Node);
-    if (VisitedNodes.contains(Node)) {
-      revng_log(LogVerbose, "## Was already visited");
-      continue;
+  forEachSCCFrom<llvm::GraphTraits<NodeT>>(llvm::nodes(&TS),
+                                           [&](const scc_t &SCC) {
+    revng_assert(not SCC.empty());
+
+    if (LogVerbose.isEnabled()) {
+      revng_log(LogVerbose, "# SCC has " << SCC.size() << " elements:");
+      size_t I = 0;
+      for (const LTSN *N : SCC)
+        revng_log(LogVerbose, "  - " << I << ": " << N);
+      revng_log(LogVerbose, "# SCC End");
     }
 
-    llvm::scc_iterator<NodeT> I = llvm::scc_begin(NodeT(Node));
-    llvm::scc_iterator<NodeT> E = llvm::scc_end(NodeT(Node));
-    for (const auto &SCC : llvm::make_range(I, E)) {
-      revng_assert(not SCC.empty());
-      if (VisitedNodes.contains(SCC[0]))
-        continue;
-      VisitedNodes.insert(SCC.begin(), SCC.end());
-
-      if (LogVerbose.isEnabled()) {
-        revng_log(LogVerbose, "# SCC has " << SCC.size() << " elements:");
-        size_t I = 0;
-        for (const LTSN *N : SCC)
-          revng_log(LogVerbose, "  - " << I << ": " << N);
-        revng_log(LogVerbose, "# SCC End");
-      }
-
-      // If the SCC is larger than just a single point we track all the nodes
-      // that compose it as EqualityVisitedNodes, and we then add the SCC to the
-      // set of SCC ToCollapse.
-      if (SCC.size() > 1)
-        ToCollapse.push_back(SCC);
-    }
-  }
+    // If the SCC is larger than just a single point we add it to the set of SCC
+    // ToCollapse.
+    if (SCC.size() > 1)
+      ToCollapse.push_back(SCC);
+  });
   revng_log(LogVerbose, "## Collapsing " << ToCollapse.size() << " SCCs");
 
   for (scc_t &SCC : ToCollapse) {

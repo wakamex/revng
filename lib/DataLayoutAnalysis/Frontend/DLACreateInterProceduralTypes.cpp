@@ -91,20 +91,23 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
 
     // Create the Function's return types
     auto FRetTypes = getOrCreateLayoutTypes(F);
+    for (auto [ReturnNode, Created] : FRetTypes)
+      ReturnNode->IsTypeRoot = true;
 
-    // Check if a function with the same prototype has already been visited
-    const auto [It, NewPrototype] = VisitedPrototypes.insert({ Prototype, &F });
+    // Unify declarations of the same function, including copies in callers.
+    const auto [It,
+                NewFunction] = VisitedFunctions.insert({ { Prototype,
+                                                           F.getName().str() },
+                                                         &F });
 
-    // If it wasn't inserted, it means that we already have a function with the
-    // same Prototype. In that case we need to mark return types and argument
-    // types as equal, connecting them with equality links.
-    FuncOrCallInst FuncWithSameProto;
-    if (not NewPrototype) {
-      FuncWithSameProto = It->second;
-      revng_assert(not FuncWithSameProto.isNull());
-      revng_assert(F.arg_size() == FuncWithSameProto.arg_size());
+    // The canonical declaration supplies the shared argument and return nodes.
+    FuncOrCallInst SameFunction;
+    if (not NewFunction) {
+      SameFunction = It->second;
+      revng_assert(not SameFunction.isNull());
+      revng_assert(F.arg_size() == SameFunction.arg_size());
 
-      auto OtherRetVals = getLayoutTypes(*FuncWithSameProto.getVal());
+      auto OtherRetVals = getLayoutTypes(*SameFunction.getVal());
       revng_assert(FRetTypes.size() == OtherRetVals.size());
       for (auto &&[N1, N2] : llvm::zip(OtherRetVals, FRetTypes))
         TS.addEqualityLink(N1, N2.first);
@@ -118,6 +121,7 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
                    or isa<PointerType>(ArgVal.getType()));
       auto &&[ArgNode, _] = getOrCreateLayoutType(&ArgVal);
       revng_assert(ArgNode);
+      ArgNode->IsTypeRoot = true;
 
       model::UpcastableType ArgumentModelType;
       if (RFT) {
@@ -160,10 +164,9 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
         }
       }
 
-      // If there is already a Function with the same prototype, add equality
-      // edges between args
-      if (not FuncWithSameProto.isNull()) {
-        auto &OtherArg = *(FuncWithSameProto.getArg(ArgIndex));
+      // Connect arguments of declarations referring to the same function.
+      if (not SameFunction.isNull()) {
+        auto &OtherArg = *(SameFunction.getArg(ArgIndex));
         auto *OtherArgNode = getLayoutType(&OtherArg);
         revng_assert(OtherArgNode);
         TS.addEqualityLink(ArgNode, OtherArgNode);
@@ -175,23 +178,47 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
         if (auto *Call = getCallToIsolatedFunction(&I)) {
 
           const Function *Callee = getCallee(Call);
+          if (not Callee) {
+            const Value *Target = Call->getCalledOperand();
+            if (auto *Cast = dyn_cast<IntToPtrInst>(Target);
+                Cast and Cast->getOperand(0)->getType()->isIntegerTy(64))
+              Target = Cast->getOperand(0);
+            auto *Load = dyn_cast<LoadInst>(Target);
+            auto It = LoadedFunctions.find(Load);
+            if (It != LoadedFunctions.end())
+              Callee = It->second;
+          }
           if (not Callee)
             continue;
 
-          // If the call site and the callee don't agree on the prototype, it
-          // means that the call was made direct at some point of the pipeline,
-          // thanks to some LLVM optimizations that managed to devirtualize the
-          // call. While doing that, the call site metadata was not updated.
-          // If this happens, there is no way we can in general map arguments
-          // and return types from the callee to the call site, so we bail out.
-          const auto &CallPrototype = getCallSitePrototype(Model, Call);
-          const auto &CalleePrototype = getFunctionPrototype(Model, *Callee);
-          if (CallPrototype != CalleePrototype)
+          // Devirtualization can identify a callee without updating the call
+          // site's prototype. Raw prototypes still identify arguments by their
+          // machine registers, even when their LLVM positions differ.
+          const auto *CallPrototype = getCallSitePrototype(Model, Call);
+          const auto *CalleePrototype = getFunctionPrototype(Model, *Callee);
+          const auto
+            *CallRaw = dyn_cast<model::RawFunctionDefinition>(CallPrototype);
+          const auto *
+            CalleeRaw = dyn_cast<model::RawFunctionDefinition>(CalleePrototype);
+          bool SamePrototype = CallPrototype == CalleePrototype;
+          if (not SamePrototype
+              and (not CallRaw or not CalleeRaw
+                   or CallRaw->Architecture() != CalleeRaw->Architecture()))
             continue;
 
-          unsigned ArgNo = 0U;
-          for (const Use &ArgUse : Call->args()) {
-
+          for (auto &&[ArgNo, ArgUse] : llvm::enumerate(Call->args())) {
+            unsigned FormalIndex = ArgNo;
+            if (not SamePrototype) {
+              // Stack arguments need a separate offset-based correspondence.
+              if (ArgNo >= CallRaw->Arguments().size())
+                continue;
+              auto &Argument = *std::next(CallRaw->Arguments().begin(), ArgNo);
+              auto It = CalleeRaw->Arguments().find(Argument.Location());
+              if (It == CalleeRaw->Arguments().end())
+                continue;
+              FormalIndex = std::distance(CalleeRaw->Arguments().begin(), It);
+            }
+            revng_assert(FormalIndex < Callee->arg_size());
             // Create the layout for the call arguments
             const auto *ActualArg = ArgUse.get();
             revng_assert(isa<IntegerType>(ActualArg->getType())
@@ -204,7 +231,9 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
             auto ActualTypes = getOrCreateLayoutTypes(*ActualArg);
 
             // Create the layout for the formal arguments.
-            Value *FormalArg = Callee->getArg(ArgNo);
+            Value *FormalArg = Callee->getArg(FormalIndex);
+            if (ActualArg->getType() != FormalArg->getType())
+              continue;
             revng_assert(isa<IntegerType>(FormalArg->getType())
                          or isa<PointerType>(FormalArg->getType()));
             auto FormalTypes = getOrCreateLayoutTypes(*FormalArg);
@@ -222,7 +251,6 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
                 TS.addPointerLink(Placeholder, ActualTypes[FieldId].first);
               }
             }
-            ++ArgNo;
           }
         } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
           revng_assert(isa<IntegerType>(PHI->getType())

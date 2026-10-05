@@ -7,7 +7,9 @@
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -39,6 +41,74 @@ using namespace model::Architecture;
 
 using LayoutTypeSystemNode = dla::LayoutTypeSystemNode;
 using SCEVTypeMap = SCEVBaseAddressExplorer::SCEVTypeMap;
+
+namespace {
+
+// Lifted addresses use integer arithmetic. Compare their byte ranges after
+// removing only lossless pointer/integer conversions; ordinary pointer alias
+// analysis otherwise treats even distinct stack slots as possible clobbers.
+class IntegerAddressAAResult : public AAResultBase {
+  ScalarEvolution &SE;
+  const DataLayout &DL;
+
+public:
+  IntegerAddressAAResult(ScalarEvolution &SE, const DataLayout &DL) :
+    SE(SE), DL(DL) {}
+
+  AliasResult alias(const MemoryLocation &A,
+                    const MemoryLocation &B,
+                    AAQueryInfo &,
+                    const Instruction *) {
+    if (A.Ptr->getType() != B.Ptr->getType()
+        or DL.isNonIntegralPointerType(A.Ptr->getType()))
+      return AliasResult::MayAlias;
+    auto *Integer = DL.getIntPtrType(A.Ptr->getType());
+    auto Address = [&](const Value *Pointer) {
+      auto *V = const_cast<Value *>(Pointer);
+      if (auto *Cast = dyn_cast<IntToPtrInst>(V);
+          Cast and Cast->getOperand(0)->getType() == Integer)
+        return SE.getSCEV(Cast->getOperand(0));
+      return SE.getPtrToIntExpr(SE.getSCEV(V), Integer);
+    };
+    const SCEV *AddressA = Address(A.Ptr);
+    const SCEV *AddressB = Address(B.Ptr);
+    // MemorySSA can compare accesses in sibling loops across an outer
+    // backedge. Their recurrences cannot form one valid SCEV expression.
+    if (not SE.instructionCouldExistWitthOperands(AddressA, AddressB))
+      return AliasResult::MayAlias;
+    auto *Difference = dyn_cast<SCEVConstant>(SE.getMinusSCEV(AddressA, AddressB));
+    if (not Difference)
+      return AliasResult::MayAlias;
+    const APInt &Delta = Difference->getAPInt();
+    if (Delta.isZero())
+      return AliasResult::MustAlias;
+    if (not A.Size.hasValue() or not B.Size.hasValue())
+      return AliasResult::MayAlias;
+    // Check both directions in the address ring, including wraparound. Extend
+    // before comparing so an access size cannot truncate to the address width.
+    unsigned Width = std::max(64u, Delta.getBitWidth()) + 1;
+    if (Delta.zext(Width).uge(APInt(Width, B.Size.getValue()))
+        and (-Delta).zext(Width).uge(APInt(Width, A.Size.getValue())))
+      return AliasResult::NoAlias;
+    return AliasResult::MayAlias;
+  }
+};
+
+class IntegerAddressAA : public AnalysisInfoMixin<IntegerAddressAA> {
+  friend AnalysisInfoMixin<IntegerAddressAA>;
+  static AnalysisKey Key;
+
+public:
+  using Result = IntegerAddressAAResult;
+  Result run(Function &F, FunctionAnalysisManager &AM) {
+    return Result(AM.getResult<ScalarEvolutionAnalysis>(F),
+                  F.getParent()->getDataLayout());
+  }
+};
+
+AnalysisKey IntegerAddressAA::Key;
+
+} // namespace
 
 static int64_t getSCEVConstantSExtVal(const SCEV *S) {
   return cast<SCEVConstant>(S)->getAPInt().getSExtValue();
@@ -479,18 +549,10 @@ public:
           const auto *Prototype = getCallSitePrototype(Model, C);
           revng_assert(Prototype);
 
-          // Let's see if there is a function with the call site's prototype.
-          // Let's call this callee, even if strictly speaking it may not be the
-          // callee but just another function whose model type matches the call
-          // site's prototype.
-          // If Callee is null here it means that there is no isolated function
-          // with the exact prototype of the call site.
-          // This can happen is the call site is indirect, or if it was indirect
-          // but was at some point devirtualized without updating the call site
-          // metadata. If the latter happens we have no way of mapping the call
-          // site prototype arguments and return types to the callee return type
-          // and in some cases we have to bail out.
-          const Function *Callee = Builder.getFunctionWithPrototype(Prototype);
+          // Use the actual direct target. Sharing a signature does not make
+          // another function a valid source of return-layout constraints.
+          const Function *Callee = Builder.getCanonicalCallee(Prototype,
+                                                              getCallee(C));
           revng_assert(not Callee or not Callee->isVarArg());
 
           // Add entry in SCEVToLayoutType map for actual arguments of CallInst.
@@ -736,62 +798,6 @@ public:
 
 using Builder = DLATypeSystemLLVMBuilder;
 
-bool Builder::connectToFuncsWithSamePrototype(const llvm::CallInst *Call) {
-  revng_assert(Call);
-  // This procedure for regular functions (i.e. those that are used in direct
-  // calls) is done separately by `CreateInterProceduralTypes`
-  revng_assert(Call->isIndirectCall());
-  bool Changed = false;
-
-  const auto *Prototype = getCallSitePrototype(Model, Call);
-  if (Prototype == nullptr)
-    return false;
-
-  const auto [It, NewPrototype] = VisitedPrototypes.insert({ Prototype, Call });
-  if (NewPrototype)
-    return Changed;
-
-  FuncOrCallInst OtherCall = It->second;
-  revng_assert(not OtherCall.isNull());
-
-  bool ReturnsVoid = OtherCall.getRetType()->isVoidTy();
-  revng_assert(Call->getType()->isVoidTy() == ReturnsVoid);
-
-  if (not ReturnsVoid) {
-    // Connect return values
-    auto OtherRetVals = getLayoutTypes(*OtherCall.getVal());
-    auto RetVals = getLayoutTypes(*Call);
-    revng_assert(RetVals.size() == OtherRetVals.size());
-    for (auto &&[N1, N2] : llvm::zip(OtherRetVals, RetVals)) {
-      Changed = true;
-      TS.addEqualityLink(N1, N2);
-    }
-  }
-
-  // Connect arguments
-  for (const auto &ArgIt : llvm::enumerate(Call->args())) {
-    // Arguments can only be integers and pointers
-    const Value *Arg1 = ArgIt.value();
-    const Value *Arg2 = OtherCall.getArg(ArgIt.index());
-    revng_assert(Arg1->getType()->isIntOrPtrTy()
-                 and Arg2->getType()->isIntOrPtrTy());
-
-    // Avoid creating layouts for pointers to functions.
-    if (isPointerToFunctionExpression(Arg1))
-      continue;
-    if (isPointerToFunctionExpression(Arg2))
-      continue;
-
-    auto *Arg1Node = getLayoutType(Arg1);
-    auto *Arg2Node = getLayoutType(Arg2);
-
-    Changed = true;
-    TS.addEqualityLink(Arg1Node, Arg2Node);
-  }
-
-  return Changed;
-}
-
 bool Builder::createIntraproceduralTypes(llvm::Module &M) {
   bool Changed = false;
   InstanceLinkAdder ILA(Model);
@@ -799,9 +805,18 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
   // Own the new-pass-manager infrastructure for the whole module. A single FAM
   // serves every function here because it caches per llvm::Function; it lives
   // until this call returns, so peak memory is bounded by one module.
+  ModuleAnalysisManager MAM;
   FunctionAnalysisManager FAM;
   PassBuilder PB;
+  PB.registerModuleAnalyses(MAM);
+  FAM.registerPass([&] { return IntegerAddressAA(); });
+  FAM.registerPass([&] {
+    auto AA = PB.buildDefaultAAPipeline();
+    AA.registerFunctionAnalysis<IntegerAddressAA>();
+    return AA;
+  });
   PB.registerFunctionAnalyses(FAM);
+  FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM); });
 
   for (Function &F : M.functions()) {
     auto FTags = FunctionTags::TagsSet::from(&F);
@@ -891,6 +906,12 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
           revng_assert(PointerNode);
           TS.addInstanceLink(PointerNode, AccessNode, OffsetExpression{});
 
+          // Equal literals do not establish a shared pointee or storage type.
+          // Constant addresses are not modeled by the base-address explorer.
+          if (isa<ConstantInt>(Val) or isa<ConstantPointerNull>(Val)
+              or isa<UndefValue>(Val))
+            continue;
+
           // Create pointer edge between the access node and the pointee node.
           const auto &[PointeeNode, HasChanged] = getOrCreateLayoutType(Val);
           revng_assert(PointeeNode);
@@ -915,6 +936,35 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
           // pointee is not going to be a pointer, and we can bail out early.
           if (AccessSize != getPointerSize(Model.Architecture()))
             continue;
+
+          // A proven reaching store establishes value identity, unlike two
+          // pointer alternatives that merely occupy the same storage offset.
+          // Preserve that identity across spills without merging unrelated
+          // function layouts through a pointer union.
+          if (auto *Load = dyn_cast<LoadInst>(&I); Load and Load->isSimple()) {
+            auto &MSSA = FAM.getResult<MemorySSAAnalysis>(F).getMSSA();
+            auto *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(Load);
+            auto *Definition = dyn_cast<MemoryDef>(Clobber);
+            auto *Store = Definition ?
+                            dyn_cast_or_null<StoreInst>(Definition
+                                                          ->getMemoryInst()) :
+                            nullptr;
+            if (Store and Store->isSimple()
+                and Store->getValueOperand()->getType() == Load->getType()) {
+              auto *Stored = Store->getValueOperand();
+              auto &AA = FAM.getResult<AAManager>(F);
+              if (not isa<Constant>(Stored)
+                  and not isPointerToFunctionExpression(Stored)
+                  and AA.alias(MemoryLocation::get(Load),
+                               MemoryLocation::get(Store))
+                        == AliasResult::MustAlias) {
+                const auto &[StoredNode,
+                             Created] = getOrCreateLayoutType(Stored);
+                Changed |= Created;
+                Changed |= TS.addEqualityLink(PointeeNode, StoredNode).second;
+              }
+            }
+          }
 
           PointeeNode->InterferingInfo = Unknown;
           TS.addPointerLink(AccessNode, PointeeNode);
@@ -1039,14 +1089,6 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
                                                           PointerVal,
                                                           *B);
         }
-
-        // For indirect calls, we want to enforce the following: if this call
-        // shares the prototype with another function in the model, their return
-        // values and arguments must have the same layout. This is done by
-        // adding equality links between these nodes.
-        if (auto *Call = dyn_cast<CallInst>(&I))
-          if (Call->isIndirectCall())
-            Changed |= connectToFuncsWithSamePrototype(Call);
       }
     }
   }

@@ -87,7 +87,7 @@ REPLACE INTO objects(savepoint_id, container_id, configuration_hash, object_id,
 VALUES (?, ?, ?, ?, ?, ?)
 """
 
-PUT_DEPENDENCIES_QUERY = "REPLACE INTO dependencies VALUES (?, ?, ?, ?, ?, ?)"
+PUT_DEPENDENCIES_QUERY = "INSERT OR IGNORE INTO dependencies VALUES (?, ?)"
 
 # SQLite cannot store a single value larger than about 2 GiB, and its default
 # per-value limit is about 0.93 GiB. Object content above this size is stored
@@ -173,8 +173,10 @@ WHERE (savepoint_id, container_id, configuration_hash, object_id) NOT IN
 INVALIDATE_QUERY = """
 WITH matched_dependencies AS (
         SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
-        FROM dependencies
-        WHERE dependencies.model_path IN (SELECT path FROM model_paths_{uuid})
+        FROM dependency_paths AS paths
+        JOIN dependencies ON dependencies.path_id = paths.id
+        JOIN dependency_keys ON dependency_keys.id = dependencies.key_id
+        WHERE paths.path IN (SELECT path FROM model_paths_{uuid})
     UNION
         SELECT savepoint_id_start, savepoint_id_end, configuration_hash, object_id
         FROM additional_objects_{uuid}
@@ -200,17 +202,17 @@ INSERT INTO invalidated_objects_{uuid}
 ;
 
 DELETE FROM dependencies
-WHERE rowid in (
-    SELECT DISTINCT dependencies.rowid
+WHERE key_id in (
+    SELECT DISTINCT dependencies.id
     FROM (
         SELECT savepoint_id, container_id, configuration_hash, object_id
         FROM objects
         WHERE rowid IN (SELECT object_row_id FROM invalidated_objects_{uuid})
     ) AS invalidated_objects
     CROSS JOIN (
-        SELECT DISTINCT savepoint_id_start, savepoint_id_end FROM dependencies
+        SELECT DISTINCT savepoint_id_start, savepoint_id_end FROM dependency_keys
     ) AS ranges
-    CROSS JOIN dependencies
+    CROSS JOIN dependency_keys AS dependencies
     WHERE
         ranges.savepoint_id_start = invalidated_objects.savepoint_id
         AND dependencies.savepoint_id_start = ranges.savepoint_id_start
@@ -562,22 +564,44 @@ class LocalStorageProvider(StorageProvider):
         objects: Mapping[ContainerLocation, Mapping[ObjectID, Buffer]],
     ) -> None:
         with self._cursor() as cursor:
-            # Save dependencies
+            # Intern repeated keys and paths within this transaction. The edge
+            # table retains every dependency, including exact model paths.
+            keys = {}
+            paths = {}
             for dependency in dependencies:
-                # Save ordinary dependencies
                 for container_id, object_id, model_path in dependency.dependencies:
                     check_object_id_supported_by_sql(object_id)
-                    cursor.execute(
-                        PUT_DEPENDENCIES_QUERY,
-                        (
-                            dependency.savepoints_range.start,
-                            dependency.savepoints_range.end,
-                            container_id,
-                            dependency.configuration,
-                            object_id.to_bytes(),
-                            model_path,
-                        ),
+                    key = (
+                        dependency.savepoints_range.start,
+                        dependency.savepoints_range.end,
+                        container_id,
+                        dependency.configuration,
+                        object_id.to_bytes(),
                     )
+                    if key not in keys:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO dependency_keys "
+                            "(savepoint_id_start, savepoint_id_end, container_id, "
+                            "configuration_hash, object_id) VALUES (?, ?, ?, ?, ?)",
+                            key,
+                        )
+                        cursor.execute(
+                            "SELECT id FROM dependency_keys WHERE savepoint_id_start = ? "
+                            "AND savepoint_id_end = ? AND container_id = ? "
+                            "AND configuration_hash = ? AND object_id = ?",
+                            key,
+                        )
+                        keys[key] = cursor.fetchone()[0]
+                    if model_path not in paths:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO dependency_paths(path) VALUES (?)",
+                            (model_path,),
+                        )
+                        cursor.execute(
+                            "SELECT id FROM dependency_paths WHERE path = ?", (model_path,)
+                        )
+                        paths[model_path] = cursor.fetchone()[0]
+                    cursor.execute(PUT_DEPENDENCIES_QUERY, (keys[key], paths[model_path]))
 
                 # Save custom dependencies
                 for index, container_data in enumerate(dependency.custom_invalidation):
@@ -691,6 +715,8 @@ class LocalStorageProvider(StorageProvider):
             cursor.execute("DELETE FROM objects")
             cursor.execute("DELETE FROM object_chunks")
             cursor.execute("DELETE FROM dependencies")
+            cursor.execute("DELETE FROM dependency_keys")
+            cursor.execute("DELETE FROM dependency_paths")
             cursor.execute("DELETE FROM custom_dependencies")
             self._write_metadata(cursor, _MetadataUpdate.OBJECT_SAVE)
 

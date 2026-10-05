@@ -85,7 +85,8 @@ public:
   /// LayoutTypeSystem itself.
   NodeToUpcastableTypeMap(const dla::LayoutTypeSystem &TS) :
     NodeIDEquivalenceClasses{ TS.getEqClasses() },
-    UpcastableTypes{ TS.getEqClasses().getNumClasses() } {}
+    UpcastableTypes{ TS.getEqClasses().getNumClasses() },
+    Alternatives{ TS.getEqClasses().getNumClasses() } {}
 
   UpcastableType &operator[](const LayoutTypeSystemNode *Node) {
     std::optional<unsigned> MaybeTypeIndex = NodeIDEquivalenceClasses
@@ -104,11 +105,32 @@ public:
     return UpcastableTypes[MaybeTypeIndex.value()];
   }
 
+  // Keep base definitions separate while their fields are being populated.
+  // Consumers see a union containing the base type and the pointer alternative.
+  const UpcastableType &withAlternatives(const LayoutTypeSystemNode *Node,
+                                        TupleTree<model::Binary> &Model) {
+    const UpcastableType &Base = at(Node);
+    if (not Node->HasUnknownPointee or isPointerNode(Node)
+        or Node->Size < model::Architecture::getPointerSize(Model->Architecture()))
+      return Base;
+    unsigned Index = *NodeIDEquivalenceClasses.getEqClassID(Node->ID);
+    UpcastableType &Result = Alternatives[Index];
+    if (Result.isEmpty()) {
+      auto &&[Union, Type] = Model->makeUnionDefinition();
+      Union.addField(Base.copy());
+      Union.addField(model::PointerType::make(model::PrimitiveType::makeVoid(),
+                                             Model->Architecture()));
+      Result = std::move(Type);
+    }
+    return Result;
+  }
+
   std::vector<UpcastableType> &types() { return UpcastableTypes; }
 
 private:
   const dla::VectEqClasses &NodeIDEquivalenceClasses;
   std::vector<UpcastableType> UpcastableTypes;
+  std::vector<UpcastableType> Alternatives;
 };
 
 static bool representsTypeDefinition(const LayoutTypeSystemNode *Node) {
@@ -170,7 +192,7 @@ getOrCreateUpcastableScalarType(const LTSN *ScalarNode,
 
   UpcastableType &Result = NodesToTypes[ScalarNode];
   if (not Result.isEmpty())
-    rc_return Result;
+    rc_return NodesToTypes.withAlternatives(ScalarNode, Model);
 
   revng_assert(not representsTypeDefinition(ScalarNode));
 
@@ -199,7 +221,7 @@ getOrCreateUpcastableScalarType(const LTSN *ScalarNode,
   revng_assert(not Result.isEmpty());
   revng_assert(not NodesToTypes[ScalarNode].isEmpty());
 
-  rc_return Result;
+  rc_return NodesToTypes.withAlternatives(ScalarNode, Model);
 }
 
 static RecursiveCoroutine<UpcastableType>
@@ -524,6 +546,9 @@ TypeMapT dla::makeModelTypes(const LayoutTypeSystem &TS,
           populateFields(Node, TS, NodesToTypes, Model);
     }
   }
+
+  for (const LTSN *Node : llvm::nodes(&TS))
+    NodesToTypes[Node] = NodesToTypes.withAlternatives(Node, Model).copy();
 
   logExit(TS, Model);
 

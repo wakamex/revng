@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "llvm/ADT/BreadthFirstIterator.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/MapVector.h"
@@ -23,6 +24,89 @@
 #include "llvm/ADT/SmallSet.h"
 
 #include "revng/Support/Debug.h"
+
+/// Call \p Callback on each strongly connected component reachable from the
+/// nodes of \p Starts, once each, in time linear in the size of what they
+/// reach.
+///
+/// The components come in the order, and each with its nodes in the order,
+/// that running a fresh llvm::scc_iterator from each node of \p Starts in turn
+/// and dropping the components an earlier iterator already yielded would give.
+/// This is Tarjan's algorithm as llvm::scc_iterator implements it, with visit
+/// numbers kept across starts, so that a later start does not descend into
+/// nodes an earlier one finished. A fresh iterator would walk through them
+/// without changing the result: a component is finished only after everything
+/// it reaches, so the finished nodes reach no unfinished one. Walking through
+/// them yields only components seen before, leaves the stack as it found it and
+/// lowers no unfinished node's uplink.
+template<class GT, typename RangeT, typename CallbackT>
+void forEachSCCFrom(RangeT &&Starts, CallbackT &&Callback) {
+  using NodeRef = typename GT::NodeRef;
+  using ChildItTy = typename GT::ChildIteratorType;
+
+  struct StackElement {
+    NodeRef Node;
+    ChildItTy NextChild;
+    ChildItTy EndChild;
+    unsigned MinVisited;
+  };
+
+  // Visit number of each node, ~0U once its component is finished
+  llvm::DenseMap<NodeRef, unsigned> VisitNumbers;
+  unsigned VisitNumber = 0;
+  std::vector<NodeRef> SCCNodeStack;
+  std::vector<StackElement> VisitStack;
+  std::vector<NodeRef> SCC;
+
+  auto VisitOne = [&](NodeRef N) {
+    ++VisitNumber;
+    revng_assert(VisitNumber != ~0U);
+    VisitNumbers[N] = VisitNumber;
+    SCCNodeStack.push_back(N);
+    VisitStack.push_back({ N, GT::child_begin(N), GT::child_end(N),
+                           VisitNumber });
+  };
+
+  for (NodeRef Start : Starts) {
+    if (VisitNumbers.count(Start) != 0)
+      continue;
+
+    VisitOne(Start);
+    while (not VisitStack.empty()) {
+      // Visit the children of the node on top of the stack
+      while (VisitStack.back().NextChild != VisitStack.back().EndChild) {
+        NodeRef Child = *VisitStack.back().NextChild++;
+        auto It = VisitNumbers.find(Child);
+        if (It == VisitNumbers.end()) {
+          VisitOne(Child);
+          continue;
+        }
+
+        if (VisitStack.back().MinVisited > It->second)
+          VisitStack.back().MinVisited = It->second;
+      }
+
+      // Pop it, and propagate its uplink to its parent
+      NodeRef Visiting = VisitStack.back().Node;
+      unsigned MinVisited = VisitStack.back().MinVisited;
+      VisitStack.pop_back();
+      if (not VisitStack.empty() and VisitStack.back().MinVisited > MinVisited)
+        VisitStack.back().MinVisited = MinVisited;
+
+      if (MinVisited != VisitNumbers[Visiting])
+        continue;
+
+      // A whole component is on top of SCCNodeStack
+      SCC.clear();
+      do {
+        SCC.push_back(SCCNodeStack.back());
+        SCCNodeStack.pop_back();
+        VisitNumbers[SCC.back()] = ~0U;
+      } while (SCC.back() != Visiting);
+      Callback(static_cast<const std::vector<NodeRef> &>(SCC));
+    }
+  }
+}
 
 /// A generic way to compute a set of entry points to a graph such that any node
 /// in said graph is reachable from at least one of those points.

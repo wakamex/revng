@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "revng/PipeboxCommon/BinariesContainer.h"
 #include "revng/PipeboxCommon/LLVMContainer.h"
 #include "revng/PipeboxCommon/Model.h"
 
@@ -16,6 +17,7 @@ public:
   llvm::Error run(Model &Model,
                   const Request &Incoming,
                   llvm::StringRef Configuration,
+                  const BinariesContainer &Binaries,
                   LLVMFunctionContainer &ModuleContainer);
 };
 

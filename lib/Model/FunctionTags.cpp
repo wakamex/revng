@@ -148,7 +148,7 @@ template<DerivedValue T>
 using CallT = PossiblyConstValueT<T, llvm::CallInst>;
 
 template<DerivedValue T>
-using CallPtrSet = llvm::SmallPtrSet<CallT<T> *, 2>;
+using CallPtrSet = llvm::SmallSetVector<CallT<T> *, 2>;
 
 template<DerivedValue T>
 llvm::SmallVector<CallPtrSet<T>, 2>
@@ -171,14 +171,15 @@ getConstQualifiedExtractedValuesFromInstruction(T *I) {
     } else {
       // traverse PHIS and markers until we find extractvalues
       llvm::SmallPtrSet<ValueT<T> *, 8> Visited = {};
-      llvm::SmallPtrSet<ValueT<T> *, 8> ToVisit = { TheUser };
+      llvm::SmallSetVector<ValueT<T> *, 8> ToVisit;
+      ToVisit.insert(TheUser);
       while (not ToVisit.empty()) {
 
-        llvm::SmallPtrSet<ValueT<T> *, 8> NextToVisit = {};
+        llvm::SmallSetVector<ValueT<T> *, 8> NextToVisit;
 
         for (ValueT<T> *Ident : ToVisit) {
           Visited.insert(Ident);
-          NextToVisit.erase(Ident);
+          NextToVisit.remove(Ident);
 
           for (auto *User : Ident->users()) {
             using FunctionTags::OpaqueExtractValue;
@@ -206,12 +207,12 @@ getConstQualifiedExtractedValuesFromInstruction(T *I) {
   return Results;
 };
 
-llvm::SmallVector<llvm::SmallPtrSet<llvm::CallInst *, 2>, 2>
+llvm::SmallVector<llvm::SmallSetVector<llvm::CallInst *, 2>, 2>
 getExtractedValuesFromInstruction(llvm::Instruction *I) {
   return getConstQualifiedExtractedValuesFromInstruction(I);
 }
 
-llvm::SmallVector<llvm::SmallPtrSet<const llvm::CallInst *, 2>, 2>
+llvm::SmallVector<llvm::SmallSetVector<const llvm::CallInst *, 2>, 2>
 getExtractedValuesFromInstruction(const llvm::Instruction *I) {
   return getConstQualifiedExtractedValuesFromInstruction(I);
 }

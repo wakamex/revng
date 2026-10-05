@@ -68,7 +68,8 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
       Changed = true;
       Merged = true;
 
-    } else if (isPointerRoot(Node) and not isInstanceRoot(Node)) {
+    } else if (not Node->IsTypeRoot and isPointerRoot(Node)
+               and not isInstanceRoot(Node)) {
       // If the node doesn't have incoming pointer nodes, we can try to absorbe
       // even instance edges with offset different than zero, pushing the
       // padding out of the parent Node.
@@ -105,6 +106,9 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
         PredIt = Next;
       }
 
+      // The old offset-zero bytes become padding outside the collapsed node.
+      // Only the child's annotation belongs at the new offset zero.
+      Node->HasUnknownPointee = false;
       TS.mergeNodes({ /*Into=*/Node, /*From=*/Child });
       Node->Size = ChildSize;
 
