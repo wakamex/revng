@@ -93,17 +93,40 @@ CollectCFG::CollectCFG(const class Model &Model,
 }
 
 void CollectCFG::runOnFunction(const model::Function &Function) {
-  MetaAddress EntryAddress = Function.Entry();
+  // Recover the control-flow graph of the function
+  SortedVector<efa::BasicBlock> Blocks;
+  {
+    efa::UnboundedScanLimits Limits;
+    Blocks = std::move(Analyzer.analyze(Function.Entry()).CFG);
+  }
+  complete(Function.Entry(), std::move(Blocks));
+}
+
+CollectCFG::Ticket CollectCFG::prepare(const model::Function &Function) {
+  if (not ParallelLimits)
+    ParallelLimits.emplace();
+  return Analyzer.ship(Function.Entry(), nullptr);
+}
+
+CollectCFG::Result CollectCFG::work(const Ticket &Shipped) {
+  return efa::CFGAnalyzer::runShipped(Shipped);
+}
+
+void CollectCFG::finish(const model::Function &Function,
+                        Ticket &&Shipped,
+                        Result &&Facts) {
+  complete(Function.Entry(),
+           Analyzer.finish(std::move(Shipped), Facts, nullptr).CFG);
+}
+
+void CollectCFG::complete(const MetaAddress &EntryAddress,
+                          SortedVector<efa::BasicBlock> &&Blocks) {
   const model::Binary &Binary = *Model.get().get();
 
-  // Recover the control-flow graph of the function
   TupleTree<efa::FunctionBundle> New;
   efa::ControlFlowGraph &Main = New->MainFunction();
   Main.Entry() = EntryAddress;
-  {
-    efa::UnboundedScanLimits Limits;
-    Main.Blocks() = std::move(Analyzer.analyze(EntryAddress).CFG);
-  }
+  Main.Blocks() = std::move(Blocks);
 
   if (DebugNames) {
     auto Function = Binary.Functions().at(EntryAddress);

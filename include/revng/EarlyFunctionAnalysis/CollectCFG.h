@@ -33,6 +33,10 @@ private:
   efa::FunctionSummaryOracle Oracle;
   efa::CFGAnalyzer Analyzer;
 
+  /// Held from the first `prepare` on: the optimization pipelines on other
+  /// threads read the scan limits it sets
+  std::optional<efa::UnboundedScanLimits> ParallelLimits;
+
 public:
   static constexpr llvm::StringRef Name = "collect-cfg";
   using Arguments = TypeList<PipeRunArgument<LLVMRootContainer,
@@ -58,7 +62,21 @@ public:
              CFGMap &Output);
   void runOnFunction(const model::Function &TheFunction);
 
+  // The same analysis with its optimization pipeline on another thread
+  using Ticket = efa::ShippedAnalysis;
+  using Result = std::vector<efa::IndirectBranchFacts>;
+  Ticket prepare(const model::Function &TheFunction);
+  static Result work(const Ticket &Shipped);
+  void finish(const model::Function &TheFunction, Ticket &&Shipped, Result &&Facts);
+  static size_t cost(const Ticket &Shipped) { return Shipped.Instructions; }
+  bool canRunInParallel() const { return efa::CFGAnalyzer::canRunInParallel(); }
+
 private:
+  /// Store the control-flow graph \p Blocks of the function at \p Entry,
+  /// with the `AlwaysInline` functions it reaches
+  void complete(const MetaAddress &Entry,
+                SortedVector<efa::BasicBlock> &&Blocks);
+
   efa::ControlFlowGraph analyzeFunction(const MetaAddress &Entry);
 
   /// Record in \p Bundle the control-flow graph of each `AlwaysInline`

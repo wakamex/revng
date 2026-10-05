@@ -9,3 +9,7 @@
 #include "llvm/Support/CommandLine.h"
 
 extern llvm::cl::OptionCategory MainCategory;
+
+/// Worker threads for function pipes that can run their expensive part on
+/// another thread (1: every function on the calling thread)
+extern llvm::cl::opt<unsigned> FunctionPipeJobs;

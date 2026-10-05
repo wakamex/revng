@@ -442,6 +442,7 @@ set(FILECHECK_TESTS
     detect-abi/trap-kinds.S
     lift/cpu-state-initializers-layout.S
     lift/globaldata-instruction-interiors.S
+    model/function-pipe-jobs.S
     model/prototype-set-after-use.S
     segment-references/c-strings-outside-code.S
     lift/gvec-equality.S
