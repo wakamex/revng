@@ -42,6 +42,69 @@ using namespace model::Architecture;
 using LayoutTypeSystemNode = dla::LayoutTypeSystemNode;
 using SCEVTypeMap = SCEVBaseAddressExplorer::SCEVTypeMap;
 
+namespace {
+
+// Lifted addresses use integer arithmetic. Compare their byte ranges after
+// removing only lossless pointer/integer conversions; ordinary pointer alias
+// analysis otherwise treats even distinct stack slots as possible clobbers.
+class IntegerAddressAAResult : public AAResultBase {
+  ScalarEvolution &SE;
+  const DataLayout &DL;
+
+public:
+  IntegerAddressAAResult(ScalarEvolution &SE, const DataLayout &DL) :
+    SE(SE), DL(DL) {}
+
+  AliasResult alias(const MemoryLocation &A,
+                    const MemoryLocation &B,
+                    AAQueryInfo &,
+                    const Instruction *) {
+    if (A.Ptr->getType() != B.Ptr->getType()
+        or DL.isNonIntegralPointerType(A.Ptr->getType()))
+      return AliasResult::MayAlias;
+    auto *Integer = DL.getIntPtrType(A.Ptr->getType());
+    auto Address = [&](const Value *Pointer) {
+      auto *V = const_cast<Value *>(Pointer);
+      if (auto *Cast = dyn_cast<IntToPtrInst>(V);
+          Cast and Cast->getOperand(0)->getType() == Integer)
+        return SE.getSCEV(Cast->getOperand(0));
+      return SE.getPtrToIntExpr(SE.getSCEV(V), Integer);
+    };
+    auto *Difference = dyn_cast<SCEVConstant>(SE.getMinusSCEV(Address(A.Ptr),
+                                                              Address(B.Ptr)));
+    if (not Difference)
+      return AliasResult::MayAlias;
+    const APInt &Delta = Difference->getAPInt();
+    if (Delta.isZero())
+      return AliasResult::MustAlias;
+    if (not A.Size.hasValue() or not B.Size.hasValue())
+      return AliasResult::MayAlias;
+    // Check both directions in the address ring, including wraparound. Extend
+    // before comparing so an access size cannot truncate to the address width.
+    unsigned Width = std::max(64u, Delta.getBitWidth()) + 1;
+    if (Delta.zext(Width).uge(APInt(Width, B.Size.getValue()))
+        and (-Delta).zext(Width).uge(APInt(Width, A.Size.getValue())))
+      return AliasResult::NoAlias;
+    return AliasResult::MayAlias;
+  }
+};
+
+class IntegerAddressAA : public AnalysisInfoMixin<IntegerAddressAA> {
+  friend AnalysisInfoMixin<IntegerAddressAA>;
+  static AnalysisKey Key;
+
+public:
+  using Result = IntegerAddressAAResult;
+  Result run(Function &F, FunctionAnalysisManager &AM) {
+    return Result(AM.getResult<ScalarEvolutionAnalysis>(F),
+                  F.getParent()->getDataLayout());
+  }
+};
+
+AnalysisKey IntegerAddressAA::Key;
+
+} // namespace
+
 static int64_t getSCEVConstantSExtVal(const SCEV *S) {
   return cast<SCEVConstant>(S)->getAPInt().getSExtValue();
 }
@@ -741,6 +804,12 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
   FunctionAnalysisManager FAM;
   PassBuilder PB;
   PB.registerModuleAnalyses(MAM);
+  FAM.registerPass([&] { return IntegerAddressAA(); });
+  FAM.registerPass([&] {
+    auto AA = PB.buildDefaultAAPipeline();
+    AA.registerFunctionAnalysis<IntegerAddressAA>();
+    return AA;
+  });
   PB.registerFunctionAnalyses(FAM);
   FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM); });
 

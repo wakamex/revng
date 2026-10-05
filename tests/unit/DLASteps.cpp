@@ -3572,7 +3572,7 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
 }
 
 BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
-  for (unsigned Scenario = 0; Scenario != 7; ++Scenario) {
+  for (unsigned Scenario = 0; Scenario != 12; ++Scenario) {
     TupleTree<model::Binary> Model;
     Model->Architecture() = model::Architecture::x86_64;
     auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
@@ -3603,7 +3603,7 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
     auto *Start = llvm::BasicBlock::Create(Context, "entry", Function);
     auto *Read = llvm::BasicBlock::Create(Context, "read", Function);
     llvm::IRBuilder<> IR(Start);
-    auto *Slot = IR.CreateAlloca(Integer);
+    auto *Slot = IR.CreateAlloca(llvm::ArrayType::get(Integer, 4));
     IR.CreateStore(Function->getArg(0), Slot);
     if (Scenario == 6) {
       auto *Overwrite = llvm::BasicBlock::Create(Context,
@@ -3628,6 +3628,19 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
     }
     if (Scenario == 3)
       IR.CreateStore(IR.getInt32(0), Slot);
+    if (Scenario >= 7) {
+      auto *Address = IR.CreatePtrToInt(Slot, Integer);
+      uint64_t Offset = Scenario == 7 ? 16 : Scenario == 8 ? 4 : 0;
+      auto *Other = IR.CreateIntToPtr(IR.CreateAdd(Address,
+                                                   IR.getInt64(Offset)),
+                                      IR.getPtrTy());
+      if (Scenario == 10)
+        Other = IR.CreateIntToPtr(IR.CreateAdd(Address, Function->getArg(1)),
+                                  IR.getPtrTy());
+      auto *Write = IR.CreateStore(Function->getArg(1), Other);
+      if (Scenario == 11)
+        Write->setAtomic(llvm::AtomicOrdering::Release);
+    }
     auto *Reload = IR.CreateLoad(Integer, Slot);
     if (Scenario == 4)
       Reload->setVolatile(true);
@@ -3655,9 +3668,9 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
     runStep<CollapseEqualitySCC>(TS);
     BOOST_TEST_CONTEXT("scenario " << Scenario) {
       BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, FirstID),
-                        Scenario == 0);
+                        Scenario == 0 or Scenario == 7);
       BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, SecondID),
-                        Scenario == 1);
+                        Scenario == 1 or Scenario == 9);
     }
   }
 }
