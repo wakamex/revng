@@ -70,8 +70,13 @@ public:
         return SE.getSCEV(Cast->getOperand(0));
       return SE.getPtrToIntExpr(SE.getSCEV(V), Integer);
     };
-    auto *Difference = dyn_cast<SCEVConstant>(SE.getMinusSCEV(Address(A.Ptr),
-                                                              Address(B.Ptr)));
+    const SCEV *AddressA = Address(A.Ptr);
+    const SCEV *AddressB = Address(B.Ptr);
+    // MemorySSA can compare accesses in sibling loops across an outer
+    // backedge. Their recurrences cannot form one valid SCEV expression.
+    if (not SE.instructionCouldExistWitthOperands(AddressA, AddressB))
+      return AliasResult::MayAlias;
+    auto *Difference = dyn_cast<SCEVConstant>(SE.getMinusSCEV(AddressA, AddressB));
     if (not Difference)
       return AliasResult::MayAlias;
     const APInt &Delta = Difference->getAPInt();

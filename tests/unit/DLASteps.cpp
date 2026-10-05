@@ -3610,7 +3610,7 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
 }
 
 BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
-  for (unsigned Scenario = 0; Scenario != 12; ++Scenario) {
+  for (unsigned Scenario = 0; Scenario != 13; ++Scenario) {
     TupleTree<model::Binary> Model;
     Model->Architecture() = model::Architecture::x86_64;
     auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
@@ -3653,7 +3653,41 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
       IR.SetInsertPoint(Overwrite);
       IR.CreateStore(Function->getArg(1), Slot);
     }
-    IR.CreateBr(Read);
+    if (Scenario == 12) {
+      // Stores in one inner loop can reach loads in a sibling loop through
+      // the outer backedge. Neither inner loop dominates the other.
+      auto *Dispatch = BasicBlock::Create(Context, "dispatch", Function);
+      auto *Left = BasicBlock::Create(Context, "left", Function);
+      auto *Right = BasicBlock::Create(Context, "right", Function);
+      auto *Join = BasicBlock::Create(Context, "join", Function);
+      IR.CreateBr(Dispatch);
+      IR.SetInsertPoint(Dispatch);
+      IR.CreateCondBr(IR.CreateICmpEQ(Function->getArg(0), IR.getInt64(0)),
+                      Left,
+                      Right);
+      IR.SetInsertPoint(Left);
+      auto *LeftIndex = IR.CreatePHI(Integer, 2);
+      LeftIndex->addIncoming(Function->getArg(1), Dispatch);
+      auto *LeftPointer = IR.CreateIntToPtr(LeftIndex, IR.getPtrTy());
+      IR.CreateStore(Function->getArg(0), LeftPointer);
+      auto *LeftNext = IR.CreateAdd(LeftIndex, IR.getInt64(8));
+      LeftIndex->addIncoming(LeftNext, Left);
+      IR.CreateCondBr(IR.CreateICmpULT(LeftNext, IR.getInt64(1024)), Left, Join);
+      IR.SetInsertPoint(Right);
+      auto *RightIndex = IR.CreatePHI(Integer, 2);
+      RightIndex->addIncoming(Function->getArg(1), Dispatch);
+      auto *RightPointer = IR.CreateIntToPtr(RightIndex, IR.getPtrTy());
+      IR.CreateLoad(Integer, RightPointer);
+      auto *RightNext = IR.CreateAdd(RightIndex, IR.getInt64(8));
+      RightIndex->addIncoming(RightNext, Right);
+      IR.CreateCondBr(IR.CreateICmpULT(RightNext, IR.getInt64(1024)), Right, Join);
+      IR.SetInsertPoint(Join);
+      IR.CreateCondBr(IR.CreateICmpEQ(Function->getArg(0), IR.getInt64(1)),
+                      Dispatch,
+                      Read);
+    } else {
+      IR.CreateBr(Read);
+    }
     IR.SetInsertPoint(Read);
     if (Scenario == 1)
       IR.CreateStore(Function->getArg(1), Slot);
@@ -3666,7 +3700,7 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
     }
     if (Scenario == 3)
       IR.CreateStore(IR.getInt32(0), Slot);
-    if (Scenario >= 7) {
+    if (Scenario >= 7 and Scenario <= 11) {
       auto *Address = IR.CreatePtrToInt(Slot, Integer);
       uint64_t Offset = Scenario == 7 ? 16 : Scenario == 8 ? 4 : 0;
       auto *Other = IR.CreateIntToPtr(IR.CreateAdd(Address,
@@ -3706,7 +3740,7 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
     runStep<CollapseEqualitySCC>(TS);
     BOOST_TEST_CONTEXT("scenario " << Scenario) {
       BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, FirstID),
-                        Scenario == 0 or Scenario == 7);
+                        Scenario == 0 or Scenario == 7 or Scenario == 12);
       BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, SecondID),
                         Scenario == 1 or Scenario == 9);
     }
