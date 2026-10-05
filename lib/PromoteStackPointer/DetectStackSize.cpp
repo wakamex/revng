@@ -234,6 +234,15 @@ void DetectStackSize::collectStackBounds(Function &F) {
             setBound(LowerBound, Call->getArgOperand(1));
             setBound(UpperBound, Call->getArgOperand(2));
           } else if (StackSizeAtCallSite.getCall(&I).has_value()) {
+            // The optimizer can delete the call a marker precedes, for
+            // instance as undefined behavior when its target is undefined:
+            // such a marker describes no call
+            llvm::CallInst *Associated = findAssociatedCall(Call);
+            if (Associated == nullptr) {
+              revng_log(Log, "Ignoring " << getName(Call) << ": no call");
+              continue;
+            }
+
             revng_log(Log, "Considering call site " << getName(Call));
             auto &NewCallSite = FSI.CallSites.emplace_back();
 
@@ -244,7 +253,7 @@ void DetectStackSize::collectStackBounds(Function &F) {
 
             // Get the prototype
             const auto &Proto = *getCallSitePrototype(*Binary.get(),
-                                                      findAssociatedCall(Call));
+                                                      Associated);
             NewCallSite.CallType = Proto.key();
           }
         }

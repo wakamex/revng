@@ -1494,6 +1494,12 @@ void SegregateFunctionStack::collectCallSites() {
     for (Instruction &I : BB) {
       CallInst *SSACSCall = nullptr;
       if (SSA.SSACS != nullptr and (SSACSCall = getCallTo(&I, SSA.SSACS))) {
+        // A marker whose call the optimizer deleted describes no call
+        if (findAssociatedCall(SSACSCall) == nullptr) {
+          revng_log(Log, "Ignoring " << getName(SSACSCall) << ": no call");
+          continue;
+        }
+
         revng_log(Log, "Processing " << getName(SSACSCall));
         LoggerIndent Indent(Log);
 
