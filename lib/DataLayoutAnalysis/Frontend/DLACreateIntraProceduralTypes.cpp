@@ -7,7 +7,9 @@
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
@@ -735,9 +737,12 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
   // Own the new-pass-manager infrastructure for the whole module. A single FAM
   // serves every function here because it caches per llvm::Function; it lives
   // until this call returns, so peak memory is bounded by one module.
+  ModuleAnalysisManager MAM;
   FunctionAnalysisManager FAM;
   PassBuilder PB;
+  PB.registerModuleAnalyses(MAM);
   PB.registerFunctionAnalyses(FAM);
+  FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM); });
 
   for (Function &F : M.functions()) {
     auto FTags = FunctionTags::TagsSet::from(&F);
@@ -857,6 +862,35 @@ bool Builder::createIntraproceduralTypes(llvm::Module &M) {
           // pointee is not going to be a pointer, and we can bail out early.
           if (AccessSize != getPointerSize(Model.Architecture()))
             continue;
+
+          // A proven reaching store establishes value identity, unlike two
+          // pointer alternatives that merely occupy the same storage offset.
+          // Preserve that identity across spills without merging unrelated
+          // function layouts through a pointer union.
+          if (auto *Load = dyn_cast<LoadInst>(&I); Load and Load->isSimple()) {
+            auto &MSSA = FAM.getResult<MemorySSAAnalysis>(F).getMSSA();
+            auto *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(Load);
+            auto *Definition = dyn_cast<MemoryDef>(Clobber);
+            auto *Store = Definition ?
+                            dyn_cast_or_null<StoreInst>(Definition
+                                                          ->getMemoryInst()) :
+                            nullptr;
+            if (Store and Store->isSimple()
+                and Store->getValueOperand()->getType() == Load->getType()) {
+              auto *Stored = Store->getValueOperand();
+              auto &AA = FAM.getResult<AAManager>(F);
+              if (not isa<Constant>(Stored)
+                  and not isPointerToFunctionExpression(Stored)
+                  and AA.alias(MemoryLocation::get(Load),
+                               MemoryLocation::get(Store))
+                        == AliasResult::MustAlias) {
+                const auto &[StoredNode,
+                             Created] = getOrCreateLayoutType(Stored);
+                Changed |= Created;
+                Changed |= TS.addEqualityLink(PointeeNode, StoredNode).second;
+              }
+            }
+          }
 
           PointeeNode->InterferingInfo = Unknown;
           TS.addPointerLink(AccessNode, PointeeNode);

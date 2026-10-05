@@ -3570,3 +3570,94 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
                 == 0);
   }
 }
+
+BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
+  for (unsigned Scenario = 0; Scenario != 7; ++Scenario) {
+    TupleTree<model::Binary> Model;
+    Model->Architecture() = model::Architecture::x86_64;
+    auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
+    auto &&[Prototype, PrototypeType] = Model->makeRawFunctionDefinition();
+    Prototype.Architecture() = Model->Architecture();
+    Prototype.FinalStackOffset() = 8;
+    Prototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+    Prototype.addArgument(model::Register::rsi_x86_64, Generic.copy());
+    Prototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
+    auto Entry = MetaAddress::fromPC(Model->Architecture(), 0x1000);
+    Model->Functions()[Entry].Prototype() = PrototypeType.copy();
+    model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
+                                                    0x1000));
+    Segment.VirtualSize() = Segment.FileSize() = 0x100;
+    Segment.IsExecutable() = true;
+    Model->Segments().insert(std::move(Segment));
+    llvm::LLVMContext Context;
+    llvm::Module Module("spilled-value", Context);
+    Module.setDataLayout("e-p:64:64");
+    auto *Integer = llvm::Type::getInt64Ty(Context);
+    auto *Type = llvm::FunctionType::get(Integer, { Integer, Integer }, false);
+    auto *Function = llvm::Function::Create(Type,
+                                            llvm::GlobalValue::ExternalLinkage,
+                                            "spilled_value",
+                                            Module);
+    FunctionTags::Isolated.addTo(Function);
+    setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
+    auto *Start = llvm::BasicBlock::Create(Context, "entry", Function);
+    auto *Read = llvm::BasicBlock::Create(Context, "read", Function);
+    llvm::IRBuilder<> IR(Start);
+    auto *Slot = IR.CreateAlloca(Integer);
+    IR.CreateStore(Function->getArg(0), Slot);
+    if (Scenario == 6) {
+      auto *Overwrite = llvm::BasicBlock::Create(Context,
+                                                 "overwrite",
+                                                 Function);
+      IR.CreateCondBr(IR.CreateICmpEQ(Function->getArg(1), IR.getInt64(0)),
+                      Overwrite,
+                      Read);
+      IR.SetInsertPoint(Overwrite);
+      IR.CreateStore(Function->getArg(1), Slot);
+    }
+    IR.CreateBr(Read);
+    IR.SetInsertPoint(Read);
+    if (Scenario == 1)
+      IR.CreateStore(Function->getArg(1), Slot);
+    if (Scenario == 2) {
+      auto *ClobberType = llvm::FunctionType::get(IR.getVoidTy(),
+                                                  { IR.getPtrTy() },
+                                                  false);
+      auto Clobber = Module.getOrInsertFunction("unknown_write", ClobberType);
+      IR.CreateCall(Clobber, { Slot });
+    }
+    if (Scenario == 3)
+      IR.CreateStore(IR.getInt32(0), Slot);
+    auto *Reload = IR.CreateLoad(Integer, Slot);
+    if (Scenario == 4)
+      Reload->setVolatile(true);
+    if (Scenario == 5)
+      Reload->setAtomic(llvm::AtomicOrdering::Acquire);
+    auto *Field = IR.CreateAdd(Reload, IR.getInt64(16));
+    auto *Pointer = IR.CreateIntToPtr(Field, IR.getPtrTy());
+    auto *Value = IR.CreateLoad(Integer, Pointer);
+    IR.CreateRet(Value);
+    BOOST_REQUIRE(Model->verify(true));
+    BOOST_REQUIRE(not llvm::verifyModule(Module, &llvm::errs()));
+    LayoutTypeSystem TS;
+    DLATypeSystemLLVMBuilder Builder(TS, *Model);
+    std::vector<llvm::Module *> Modules{ &Module };
+    Builder.buildFromLLVMModules(Modules, { "spilled-value" });
+    auto ID = [&Builder](llvm::Value *Value) {
+      auto &Values = Builder.getValues();
+      auto It = llvm::find(Values, LayoutTypePtr(Value));
+      BOOST_REQUIRE(It != Values.end());
+      return unsigned(std::distance(Values.begin(), It));
+    };
+    unsigned ReloadID = ID(Reload);
+    unsigned FirstID = ID(Function->getArg(0));
+    unsigned SecondID = ID(Function->getArg(1));
+    runStep<CollapseEqualitySCC>(TS);
+    BOOST_TEST_CONTEXT("scenario " << Scenario) {
+      BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, FirstID),
+                        Scenario == 0);
+      BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, SecondID),
+                        Scenario == 1);
+    }
+  }
+}
