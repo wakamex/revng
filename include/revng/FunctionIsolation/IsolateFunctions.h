@@ -17,6 +17,8 @@
 /// The function every indirect call is routed through
 inline IRHelper<> FunctionDispatcherHelper("function_dispatcher");
 
+class FunctionOutliner;
+
 namespace revng::pypeline::piperuns {
 
 class Isolate {
@@ -39,6 +41,10 @@ private:
   std::optional<CSVGlobals> Globals;
   /// Analysis cache of root, built when isolating the first function
   std::optional<llvm::CodeExtractorAnalysisCache> RootCEAC;
+  /// The outliner every function is isolated with, built with RootCEAC:
+  /// building one scans every function of the module, which grows by one
+  /// function per isolated function
+  std::unique_ptr<FunctionOutliner> Outliner;
   std::vector<IsolatedFunction> IsolatedFunctions;
 
   /// How many output modules still need the body of each isolated function

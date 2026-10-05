@@ -695,15 +695,17 @@ Function *Isolate::isolateFunction(const efa::ControlFlowGraph &FM) {
   // Outline the function (later on we'll steal its body and move it into F)
   CallIsolatedFunction CallHandler(*this, FM);
   // Outlining leaves the blocks of root as they were, so one analysis cache
-  // of root serves every function
-  if (not RootCEAC)
+  // of root and one outliner serve every function. The outliner's oracle only
+  // reads the model, which isolation does not change.
+  if (not Outliner) {
     RootCEAC.emplace(*ClonedModule->getFunction("root"));
-  FunctionOutliner Outliner(*ClonedModule,
-                            Binary,
-                            *RootF,
-                            *Globals,
-                            *RootCEAC);
-  efa::OutlinedFunction Outlined = Outliner.outline(Entry, &CallHandler);
+    Outliner = std::make_unique<FunctionOutliner>(*ClonedModule,
+                                                  Binary,
+                                                  *RootF,
+                                                  *Globals,
+                                                  *RootCEAC);
+  }
+  efa::OutlinedFunction Outlined = Outliner->outline(Entry, &CallHandler);
 
   handleUnexpectedPCCloned(Outlined);
 
@@ -814,6 +816,11 @@ void Isolate::releaseBody(llvm::Function *F) {
 }
 
 Isolate::~Isolate() {
+  // Every function is isolated: drop the outliner and its temporary functions
+  // before the module is cleaned up and split
+  Outliner.reset();
+  RootCEAC.reset();
+
   llvm::Task T(4, "Isolate: epilogue");
   T.advance("Verify module", true);
   revng::verify(ClonedModule.get());
