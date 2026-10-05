@@ -1003,7 +1003,7 @@ def test_local_provider_v3_migration_keeps_inline_objects():
 
         provider = LocalStorageProvider(db_file.name, Path(f.name), Path(d), "")
         db = provider._connection
-        assert db.execute("SELECT version FROM migrations").fetchone()[0] == 4
+        assert db.execute("SELECT version FROM migrations").fetchone()[0] == 5
         location = ContainerLocation(0, container_id, configuration_id)
         assert provider.get(location, [root]) == {root: b"inline"}
         assert db.execute("SELECT chunk_count FROM objects").fetchall() == [(0,)]
@@ -1044,3 +1044,70 @@ class TestReadOnlyPassThrough(unittest.TestCase):
         )
         self.assertEqual(result.get(source), root)
         self.assertEqual(result.get(destination), child)
+
+
+class TestNormalizedDependencies(unittest.TestCase):
+    def test_v4_migration_preserves_edges_and_targeted_invalidation(self):
+        with (
+            NamedTemporaryFile(suffix=".sqlite") as database,
+            NamedTemporaryFile() as model_file,
+            TemporaryDirectory() as directory,
+        ):
+            first = MyObjectID(MyKind.CHILD, "one")
+            second = MyObjectID(MyKind.CHILD, "two")
+            rows = [
+                (2, 4, "a", "config", first.to_bytes(), "/shared"),
+                (2, 4, "a", "config", first.to_bytes(), "/one"),
+                (2, 4, "a", "config", second.to_bytes(), "/shared"),
+                (2, 4, "a", "other", first.to_bytes(), "/other"),
+            ]
+            connection = sqlite3.connect(database.name, autocommit=False)
+            cursor = connection.cursor()
+            migrator = Migrator(cursor)
+            migrator._create_tables_if_missing()
+            for version in (1, 2, 3, 4):
+                migrator._apply_migration(version, migrator._migrations[version].read_text())
+            cursor.execute(
+                "UPDATE project SET version = ?, pipeline_hash = ? WHERE id is 0",
+                (pypeline_version, ""),
+            )
+            cursor.executemany("INSERT INTO dependencies VALUES (?, ?, ?, ?, ?, ?)", rows)
+            for obj, config in ((first, "config"), (second, "config"), (first, "other")):
+                cursor.execute(
+                    local_provider.PUT_QUERY,
+                    (2, "a", config, obj.to_bytes(), obj.serialize(), b"kept"),
+                )
+            connection.commit()
+            connection.close()
+            provider = LocalStorageProvider(
+                database.name, Path(model_file.name), Path(directory), ""
+            )
+            decoded = provider._connection.execute(
+                "SELECT k.savepoint_id_start, k.savepoint_id_end, k.container_id, "
+                "k.configuration_hash, k.object_id, p.path FROM dependencies d "
+                "JOIN dependency_keys k ON k.id = d.key_id "
+                "JOIN dependency_paths p ON p.id = d.path_id"
+            ).fetchall()
+            self.assertCountEqual(decoded, rows)
+            self.assertEqual(
+                provider._invalidate({"/one"}, []),
+                {ContainerLocation(2, "a", "config"): {first}},
+            )
+            self.assertEqual(
+                provider.get(ContainerLocation(2, "a", "config"), [second]),
+                {second: b"kept"},
+            )
+            self.assertEqual(
+                provider.get(ContainerLocation(2, "a", "other"), [first]),
+                {first: b"kept"},
+            )
+            self.assertEqual(
+                provider._invalidate({"/shared"}, []),
+                {ContainerLocation(2, "a", "config"): {second}},
+            )
+            provider.prune_objects()
+            for table in ("dependencies", "dependency_keys", "dependency_paths"):
+                self.assertEqual(
+                    provider._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],
+                    0,
+                )
