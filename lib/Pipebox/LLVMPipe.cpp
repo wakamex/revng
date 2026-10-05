@@ -107,7 +107,7 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
     for (llvm::StructType *Type : Module->getIdentifiedStructTypes())
       Type->setName("");
     Bitcode Output;
-    writeBitcode(*Module, Output);
+    writeBitcode(*Module, Output, true);
     return Output;
   };
   C.Commit = [&](const ObjectID *Object,

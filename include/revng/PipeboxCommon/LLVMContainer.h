@@ -207,8 +207,9 @@ public:
 
     auto It = Modules.find(ID);
     revng_assert(It != Modules.end() and It->second != nullptr);
+    // The function comes back parsed from this bitcode: keep its use lists
     Bitcode Result;
-    writeBitcode(*It->second, Result);
+    writeBitcode(*It->second, Result, true);
     Modules.erase(It);
     return Result;
   }

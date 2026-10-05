@@ -1556,9 +1556,13 @@ cloneSelected(llvm::Module &Module,
                 Action);
 
 /// Serialize a module to bitcode, this is preferable over
-/// llvm::WriteBitcodeToFile as it does not create a redundant temporary buffer
+/// llvm::WriteBitcodeToFile as it does not create a redundant temporary buffer.
+/// With \p PreserveUseListOrder, parsing the result gives every value its
+/// users in the same order, so passes that walk users behave as they would on
+/// \p Module itself.
 void writeBitcode(const llvm::Module &Module,
-                  llvm::SmallVectorImpl<char> &Output);
+                  llvm::SmallVectorImpl<char> &Output,
+                  bool PreserveUseListOrder = false);
 
 /// Deserialize bitcode to a llvm::Module from a buffer
 std::unique_ptr<llvm::Module> readBitcode(llvm::ArrayRef<char> Input,
