@@ -37,10 +37,14 @@ public:
   PureLLVMPassesPipeBase(llvm::StringRef StaticConfiguration);
 
 protected:
-  llvm::legacy::PassManager makePassManager() {
-    llvm::legacy::PassManager Manager;
+  void addPasses(llvm::legacy::PassManager &Manager) const {
     for (const llvm::PassInfo *PassInfo : PassInfos)
       Manager.add(PassInfo->createPass());
+  }
+
+  llvm::legacy::PassManager makePassManager() const {
+    llvm::legacy::PassManager Manager;
+    addPasses(Manager);
     return Manager;
   }
 };
@@ -87,6 +91,9 @@ public:
                  llvm::StringRef Configuration,
                  LLVMFunctionContainer &Container) {
     llvm::Task T(Outgoing[0].size(), TaskName);
+    if (runInParallel(Outgoing[0], Container, T))
+      return { {}, {} };
+
     llvm::legacy::PassManager Manager = makePassManager();
     for (const ObjectID *Object : Outgoing[0]) {
       revng_assert(Object->kind() == Kinds::Function);
@@ -97,6 +104,15 @@ public:
 
     return { {}, {} };
   }
+
+private:
+  /// With -function-pipe-jobs above one, run the passes on that many threads,
+  /// each with its own context into which functions are moved through
+  /// bitcode, and move the results back in object order. Return false, having
+  /// done nothing, if the passes are to run on this thread.
+  bool runInParallel(const std::vector<const ObjectID *> &Objects,
+                     LLVMFunctionContainer &Container,
+                     llvm::Task &Progress) const;
 };
 
 } // namespace revng::pypeline::pipes
