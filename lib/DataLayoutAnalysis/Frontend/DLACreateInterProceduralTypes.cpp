@@ -181,20 +181,34 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
           if (not Callee)
             continue;
 
-          // If the call site and the callee don't agree on the prototype, it
-          // means that the call was made direct at some point of the pipeline,
-          // thanks to some LLVM optimizations that managed to devirtualize the
-          // call. While doing that, the call site metadata was not updated.
-          // If this happens, there is no way we can in general map arguments
-          // and return types from the callee to the call site, so we bail out.
-          const auto &CallPrototype = getCallSitePrototype(Model, Call);
-          const auto &CalleePrototype = getFunctionPrototype(Model, *Callee);
-          if (CallPrototype != CalleePrototype)
+          // Devirtualization can identify a callee without updating the call
+          // site's prototype. Raw prototypes still identify arguments by their
+          // machine registers, even when their LLVM positions differ.
+          const auto *CallPrototype = getCallSitePrototype(Model, Call);
+          const auto *CalleePrototype = getFunctionPrototype(Model, *Callee);
+          const auto
+            *CallRaw = dyn_cast<model::RawFunctionDefinition>(CallPrototype);
+          const auto *
+            CalleeRaw = dyn_cast<model::RawFunctionDefinition>(CalleePrototype);
+          bool SamePrototype = CallPrototype == CalleePrototype;
+          if (not SamePrototype
+              and (not CallRaw or not CalleeRaw
+                   or CallRaw->Architecture() != CalleeRaw->Architecture()))
             continue;
 
-          unsigned ArgNo = 0U;
-          for (const Use &ArgUse : Call->args()) {
-
+          for (auto &&[ArgNo, ArgUse] : llvm::enumerate(Call->args())) {
+            unsigned FormalIndex = ArgNo;
+            if (not SamePrototype) {
+              // Stack arguments need a separate offset-based correspondence.
+              if (ArgNo >= CallRaw->Arguments().size())
+                continue;
+              auto &Argument = *std::next(CallRaw->Arguments().begin(), ArgNo);
+              auto It = CalleeRaw->Arguments().find(Argument.Location());
+              if (It == CalleeRaw->Arguments().end())
+                continue;
+              FormalIndex = std::distance(CalleeRaw->Arguments().begin(), It);
+            }
+            revng_assert(FormalIndex < Callee->arg_size());
             // Create the layout for the call arguments
             const auto *ActualArg = ArgUse.get();
             revng_assert(isa<IntegerType>(ActualArg->getType())
@@ -207,7 +221,9 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
             auto ActualTypes = getOrCreateLayoutTypes(*ActualArg);
 
             // Create the layout for the formal arguments.
-            Value *FormalArg = Callee->getArg(ArgNo);
+            Value *FormalArg = Callee->getArg(FormalIndex);
+            if (ActualArg->getType() != FormalArg->getType())
+              continue;
             revng_assert(isa<IntegerType>(FormalArg->getType())
                          or isa<PointerType>(FormalArg->getType()));
             auto FormalTypes = getOrCreateLayoutTypes(*FormalArg);
@@ -225,7 +241,6 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
                 TS.addPointerLink(Placeholder, ActualTypes[FieldId].first);
               }
             }
-            ++ArgNo;
           }
         } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
           revng_assert(isa<IntegerType>(PHI->getType())

@@ -5,6 +5,7 @@
 #define BOOST_TEST_MODULE DLASteps
 bool init_unit_test();
 
+#include "llvm/IR/Verifier.h"
 #include <compare>
 #include <map>
 #include <optional>
@@ -3445,6 +3446,7 @@ BOOST_AUTO_TEST_CASE(ConstantStoresDoNotUnifyIndependentStorage) {
     IR.CreateRet(Function->getArg(0));
   }
   BOOST_REQUIRE(Model->verify(true));
+  BOOST_REQUIRE(not llvm::verifyModule(Module, &llvm::errs()));
   LayoutTypeSystem TS;
   DLATypeSystemLLVMBuilder Builder(TS, *Model);
   std::vector<llvm::Module *> Modules{ &Module };
@@ -3469,4 +3471,102 @@ BOOST_AUTO_TEST_CASE(ConstantStoresDoNotUnifyIndependentStorage) {
   for (unsigned Index = 0; Index != Accesses.size(); Index += 2)
     BOOST_CHECK(not TS.getEqClasses().haveSameEqClass(Accesses[Index],
                                                      Accesses[Index + 1]));
+}
+
+BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
+  for (bool NarrowArgument : { false, true }) {
+    TupleTree<model::Binary> Model;
+    Model->Architecture() = model::Architecture::x86_64;
+    auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
+    auto &&[CallerPrototype, CallerType] = Model->makeRawFunctionDefinition();
+    CallerPrototype.Architecture() = Model->Architecture();
+    CallerPrototype.FinalStackOffset() = 8;
+    CallerPrototype
+      .addArgument(model::Register::rdx_x86_64,
+                   model::PrimitiveType::make(model::PrimitiveKind::Generic,
+                                              NarrowArgument ? 4 : 8));
+    CallerPrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+    CallerPrototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
+    auto &&[CalleePrototype, CalleeType] = Model->makeRawFunctionDefinition();
+    CalleePrototype.Architecture() = Model->Architecture();
+    CalleePrototype.FinalStackOffset() = 8;
+    CalleePrototype.addArgument(model::Register::rcx_x86_64, Generic.copy());
+    CalleePrototype.addArgument(model::Register::rdx_x86_64, Generic.copy());
+    CalleePrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+    CalleePrototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
+    model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
+                                                    0x1000));
+    Segment.VirtualSize() = 0x100;
+    Segment.FileSize() = 0x100;
+    Segment.IsExecutable() = true;
+    Model->Segments().insert(std::move(Segment));
+    llvm::LLVMContext Context;
+    llvm::Module Module("register_mapping", Context);
+    Module.setDataLayout("e-p:64:64");
+    auto *Integer = llvm::Type::getInt64Ty(Context);
+    auto *FirstInteger = NarrowArgument ? llvm::Type::getInt32Ty(Context) :
+                                          Integer;
+    auto *CallerLLVMType = llvm::FunctionType::get(Integer,
+                                                   { FirstInteger, Integer },
+                                                   false);
+    auto *CalleeLLVMType = llvm::FunctionType::get(Integer,
+                                                   { Integer,
+                                                     Integer,
+                                                     Integer },
+                                                   false);
+    auto Declare = [&](llvm::FunctionType *Type,
+                       llvm::StringRef Name,
+                       uint64_t PC,
+                       const model::UpcastableType &Prototype) {
+      auto Entry = MetaAddress::fromPC(Model->Architecture(), PC);
+      Model->Functions()[Entry].Prototype() = Prototype.copy();
+      auto
+        *Function = llvm::Function::Create(Type,
+                                           llvm::GlobalValue::ExternalLinkage,
+                                           Name,
+                                           Module);
+      FunctionTags::Isolated.addTo(Function);
+      setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
+      return Function;
+    };
+    auto *Caller = Declare(CallerLLVMType, "caller", 0x1000, CallerType);
+    auto *Callee = Declare(CalleeLLVMType, "callee", 0x1010, CalleeType);
+    llvm::IRBuilder<> IR(llvm::BasicBlock::Create(Context, "entry", Caller));
+    auto *Call = IR.CreateCall(CallerLLVMType,
+                               Callee,
+                               { Caller->getArg(0), Caller->getArg(1) });
+    setStringMetadata(Call,
+                      PrototypeMDName,
+                      Model->getTypeDefinitionReference(CallerPrototype.key())
+                        .toString());
+    IR.CreateRet(Call);
+    BOOST_REQUIRE(Model->verify(true));
+    BOOST_REQUIRE(not llvm::verifyModule(Module, &llvm::errs()));
+    LayoutTypeSystem TS;
+    DLATypeSystemLLVMBuilder Builder(TS, *Model);
+    std::vector<llvm::Module *> Modules{ &Module };
+    Builder.buildFromLLVMModules(Modules, { "register_mapping" });
+    auto Node = [&](llvm::Value *Value) {
+      auto &Values = Builder.getValues();
+      auto It = llvm::find(Values, LayoutTypePtr(Value));
+      revng_assert(It != Values.end());
+      auto ID = static_cast<uint64_t>(std::distance(Values.begin(), It));
+      for (auto *Node : TS.getLayoutsRange())
+        if (Node->ID == ID)
+          return Node;
+      revng_abort();
+    };
+    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
+                                   Node(Callee->getArg(1)))
+                == (NarrowArgument ? 0 : 1));
+    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
+                                   Node(Callee->getArg(2)))
+                == 1);
+    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
+                                   Node(Callee->getArg(0)))
+                == 0);
+    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
+                                   Node(Callee->getArg(1)))
+                == 0);
+  }
 }
