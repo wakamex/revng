@@ -64,9 +64,9 @@ private:
   std::unique_ptr<mlir::PassManager>
   makePassManager(mlir::MLIRContext *Context) const;
 
-  /// With -function-pipe-jobs above one, run the passes on that many threads,
-  /// each with its own pass manager. Return false, having done nothing, if
-  /// the passes are to run on this thread.
+  /// With -function-pipe-jobs set, run the passes on that many threads, each
+  /// with its own pass manager. Return false, having done nothing, if the
+  /// option is not set.
   bool runInParallel(const std::vector<const ObjectID *> &Objects,
                      CliftFunctionContainer &Container,
                      llvm::Task &Progress) const;

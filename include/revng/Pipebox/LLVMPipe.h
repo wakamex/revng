@@ -106,10 +106,11 @@ public:
   }
 
 private:
-  /// With -function-pipe-jobs above one, run the passes on that many threads,
-  /// each with its own context into which functions are moved through
-  /// bitcode, and move the results back in object order. Return false, having
-  /// done nothing, if the passes are to run on this thread.
+  /// With -function-pipe-jobs set, run the passes on that many threads, each
+  /// with its own context into which functions are moved through bitcode, and
+  /// move the results back. A function's result depends only on its bitcode,
+  /// so it is the same for any number of threads. Return false, having done
+  /// nothing, if the option is not set.
   bool runInParallel(const std::vector<const ObjectID *> &Objects,
                      LLVMFunctionContainer &Container,
                      llvm::Task &Progress) const;

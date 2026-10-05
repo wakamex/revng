@@ -137,8 +137,12 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
                                        llvm::Task &Progress) const {
   using namespace clift;
   unsigned Workers = FunctionPipeJobs;
-  if (Workers <= 1 or Objects.size() <= 1 or anyLoggerEnabled())
+  if (Workers == 0)
     return false;
+
+  // Loggers are not thread-safe: log from one worker, on the same path
+  if (anyLoggerEnabled())
+    Workers = 1;
 
   // Every function is in its own module, and the passes change nothing
   // outside the function they run on. What the functions share is the

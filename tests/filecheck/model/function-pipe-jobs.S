@@ -1,16 +1,18 @@
 #
 # This file is distributed under the MIT License. See LICENSE.md for details.
 #
-# With -function-pipe-jobs, function pipes that can (collect-cfg) run their
-# optimization pipelines on worker threads, and their results and recorded
-# model reads are those of one thread: the model after detect-stack-size and
-# the emitted C are the same as with one thread.
+# With -function-pipe-jobs, collect-cfg runs its optimization pipeline on
+# worker threads, and the per-function pass pipes move each function to a
+# worker through bitcode. The C emitted with one worker and with four is the
+# same, and on this program it is also the same as without the option.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -nostdlib -static %s -o %t
-# RUN: rm -rf %t.one %t.four && mkdir -p %t.one %t.four
-# RUN: cd %t.one && %root/bin/revng quick artifact emit-c-as-single-file --analyses=parse-binary,detect-abi,detect-stack-size %t -o %t.one.c.ptml > %t.one.log 2>&1
+# RUN: rm -rf %t.none %t.one %t.four && mkdir -p %t.none %t.one %t.four
+# RUN: cd %t.none && %root/bin/revng quick artifact emit-c-as-single-file --analyses=parse-binary,detect-abi,detect-stack-size %t -o %t.none.c.ptml > %t.none.log 2>&1
+# RUN: cd %t.one && env REVNG_OPTIONS=-function-pipe-jobs=1 %root/bin/revng quick artifact emit-c-as-single-file --analyses=parse-binary,detect-abi,detect-stack-size %t -o %t.one.c.ptml > %t.one.log 2>&1
 # RUN: cd %t.four && env REVNG_OPTIONS=-function-pipe-jobs=4 %root/bin/revng quick artifact emit-c-as-single-file --analyses=parse-binary,detect-abi,detect-stack-size %t -o %t.four.c.ptml > %t.four.log 2>&1
 # RUN: diff %t.one.c.ptml %t.four.c.ptml
+# RUN: diff %t.none.c.ptml %t.one.c.ptml
 
     .intel_syntax noprefix
     .text

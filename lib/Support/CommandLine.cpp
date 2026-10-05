@@ -15,9 +15,14 @@ cl::opt<unsigned> FunctionPipeJobs("function-pipe-jobs",
                                    cl::desc("Worker threads for the function "
                                             "pipes that can run their "
                                             "expensive part on another "
-                                            "thread. Results and recorded "
-                                            "model reads are those of one "
-                                            "thread. Enabling a logger forces "
-                                            "one."),
-                                   cl::init(1),
+                                            "thread. 0, the default, runs "
+                                            "every pipe on the calling "
+                                            "thread. From 1 up, the per-"
+                                            "function pass pipes move each "
+                                            "function to a worker through "
+                                            "bitcode, and results are the "
+                                            "same for every value; "
+                                            "collect-cfg's results equal "
+                                            "those of 0."),
+                                   cl::init(0),
                                    cl::cat(MainCategory));

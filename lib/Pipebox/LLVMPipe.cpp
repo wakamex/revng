@@ -77,8 +77,12 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
                                        LLVMFunctionContainer &Container,
                                        llvm::Task &Progress) const {
   unsigned Workers = FunctionPipeJobs;
-  if (Workers <= 1 or Objects.size() <= 1 or anyLoggerEnabled())
+  if (Workers == 0)
     return false;
+
+  // Loggers are not thread-safe: log from one worker, on the same path
+  if (anyLoggerEnabled())
+    Workers = 1;
 
   using Bitcode = LLVMFunctionContainer::Bitcode;
   std::map<const ObjectID *, Bitcode> Inputs;

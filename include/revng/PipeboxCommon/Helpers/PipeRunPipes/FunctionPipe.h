@@ -75,7 +75,7 @@ public:
 
     if constexpr (IsShippingFunctionPipeRun<T>) {
       unsigned Workers = FunctionPipeJobs;
-      if (Workers > 1 and Instance.canRunInParallel()
+      if (Workers >= 1 and Instance.canRunInParallel()
           and not anyLoggerEnabled()) {
         runInParallel(Instance, Binary, RequestedFunctions, ODH, T2, Workers);
         T1.advance("epilogue");
