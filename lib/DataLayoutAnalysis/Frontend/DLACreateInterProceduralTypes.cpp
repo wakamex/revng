@@ -178,6 +178,16 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
         if (auto *Call = getCallToIsolatedFunction(&I)) {
 
           const Function *Callee = getCallee(Call);
+          if (not Callee) {
+            const Value *Target = Call->getCalledOperand();
+            if (auto *Cast = dyn_cast<IntToPtrInst>(Target);
+                Cast and Cast->getOperand(0)->getType()->isIntegerTy(64))
+              Target = Cast->getOperand(0);
+            auto *Load = dyn_cast<LoadInst>(Target);
+            auto It = LoadedFunctions.find(Load);
+            if (It != LoadedFunctions.end())
+              Callee = It->second;
+          }
           if (not Callee)
             continue;
 

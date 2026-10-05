@@ -9,6 +9,7 @@
 
 #include "revng/DataLayoutAnalysis/DLA.h"
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
+#include "revng/Pipebox/Helpers.h"
 
 #include "Backend/DLAMakeModelTypes.h"
 #include "Frontend/DLATypeSystemBuilder.h"
@@ -21,11 +22,12 @@ namespace revng::pypeline::analyses {
 llvm::Error AnalyzeDataLayout::run(Model &Model,
                                    const Request &Incoming,
                                    llvm::StringRef Configuration,
+                                   const BinariesContainer &Binaries,
                                    LLVMFunctionContainer &ModuleContainer) {
   // Run DLA directly over the requested per-function modules, without linking
   // them into a temporary root module. The modules are visited lazily through
   // a transform view and stay valid in the container afterwards.
-  auto Modules = Incoming[0]
+  auto Modules = Incoming[1]
                  | std::views::transform([&](const ObjectID *Object)
                                            -> llvm::Module * {
                      return &ModuleContainer.getModule(*Object);
@@ -33,7 +35,7 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
 
   // Name each module's progress steps by the address of its function
   std::vector<std::string> ModuleNames;
-  for (const ObjectID *Object : Incoming[0])
+  for (const ObjectID *Object : Incoming[1])
     ModuleNames.push_back(std::get<MetaAddress>(Object->key()).toString());
 
   llvm::Task T(3, "runDataLayoutAnalysis");
@@ -41,7 +43,9 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
 
   // Front-end: Create the LayoutTypeSystem graph from the LLVM modules
   dla::LayoutTypeSystem TS;
-  dla::DLATypeSystemLLVMBuilder Builder{ TS, *Model.get() };
+  auto View = makeBinaryView(Model, Binaries);
+  auto Targets = dla::collectReadOnlyFunctionPointers(*Model.get(), View);
+  dla::DLATypeSystemLLVMBuilder Builder{ TS, *Model.get(), std::move(Targets) };
   Builder.buildFromLLVMModules(Modules, ModuleNames);
 
   if (BuilderLog.isEnabled())

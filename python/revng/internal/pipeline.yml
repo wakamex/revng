@@ -407,7 +407,7 @@ branches:
               program and detects the layout of data structures.
               The produced data structures are the result of merging the
               information obtained from each function interprocedurally.
-            containers: [llvm-functions]
+            containers: [binaries-container, llvm-functions]
   clift-functions:
     from: segregate-stack-accesses
     tasks:

@@ -16,8 +16,11 @@
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
 #include "revng/Model/Binary.h"
+#include "revng/Model/FunctionTags.h"
+#include "revng/Model/IRHelpers.h"
 
 #include "../FuncOrCallInst.h"
+#include "StaticFunctionPointers.h"
 
 namespace dla {
 
@@ -106,6 +109,11 @@ private:
 
   /// The Model used by this builder to get type information.
   const model::Binary &Model;
+  StaticFunctionTargets StaticTargets;
+  std::map<MetaAddress, const llvm::Function *> FunctionsByEntry;
+  std::map<const llvm::LoadInst *, const llvm::Function *> LoadedFunctions;
+
+  void collectLoadedFunctions(llvm::Module &M);
 
   /// Ordered vector, each element is indexed with the ID of the
   /// corresponding Node
@@ -164,8 +172,10 @@ public:
   void debug_function dumpValuesMapping(const llvm::StringRef Name) const;
 
 public:
-  DLATypeSystemLLVMBuilder(LayoutTypeSystem &TS, const model::Binary &M) :
-    TS(TS), Model(M){};
+  DLATypeSystemLLVMBuilder(LayoutTypeSystem &TS,
+                           const model::Binary &M,
+                           StaticFunctionTargets Targets = {}) :
+    TS(TS), Model(M), StaticTargets(std::move(Targets)) {}
 
   /// Create a DLATypeSystem graph from a range of LLVM modules
   ///
@@ -199,6 +209,18 @@ public:
     SegmentNodeMapT SegmentNodes;
     initializeSegments(SegmentNodes);
 
+    if (not StaticTargets.empty()) {
+      for (llvm::Module *M : Modules)
+        for (const llvm::Function &F : *M)
+          if (FunctionTags::Isolated.isTagOf(&F)) {
+            auto Entry = getMetaAddressMetadata(&F, FunctionEntryMDName);
+            if (Entry.isValid())
+              FunctionsByEntry.try_emplace(Entry, &F);
+          }
+      for (llvm::Module *M : Modules)
+        collectLoadedFunctions(*M);
+    }
+
     llvm::Task T(3, "DLA type system");
     T.advance("Create interprocedural types");
     {
@@ -222,6 +244,8 @@ public:
     createValuesList();
     VisitedValues.clear();
     VisitedFunctions.clear();
+    FunctionsByEntry.clear();
+    LoadedFunctions.clear();
   }
 };
 

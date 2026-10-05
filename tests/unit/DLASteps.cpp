@@ -5,7 +5,6 @@
 #define BOOST_TEST_MODULE DLASteps
 bool init_unit_test();
 
-#include "llvm/IR/Verifier.h"
 #include <compare>
 #include <map>
 #include <optional>
@@ -27,6 +26,8 @@ bool init_unit_test();
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Object/ELFTypes.h"
 #include "llvm/Support/Progress.h"
 
 #include "revng/DataLayoutAnalysis/DLATypeSystem.h"
@@ -3474,100 +3475,137 @@ BOOST_AUTO_TEST_CASE(ConstantStoresDoNotUnifyIndependentStorage) {
 }
 
 BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
-  for (bool NarrowArgument : { false, true }) {
-    TupleTree<model::Binary> Model;
-    Model->Architecture() = model::Architecture::x86_64;
-    auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic, 8);
-    auto &&[CallerPrototype, CallerType] = Model->makeRawFunctionDefinition();
-    CallerPrototype.Architecture() = Model->Architecture();
-    CallerPrototype.FinalStackOffset() = 8;
-    CallerPrototype
-      .addArgument(model::Register::rdx_x86_64,
-                   model::PrimitiveType::make(model::PrimitiveKind::Generic,
-                                              NarrowArgument ? 4 : 8));
-    CallerPrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
-    CallerPrototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
-    auto &&[CalleePrototype, CalleeType] = Model->makeRawFunctionDefinition();
-    CalleePrototype.Architecture() = Model->Architecture();
-    CalleePrototype.FinalStackOffset() = 8;
-    CalleePrototype.addArgument(model::Register::rcx_x86_64, Generic.copy());
-    CalleePrototype.addArgument(model::Register::rdx_x86_64, Generic.copy());
-    CalleePrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
-    CalleePrototype.addReturnValue(model::Register::rax_x86_64, Generic.copy());
-    model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
-                                                    0x1000));
-    Segment.VirtualSize() = 0x100;
-    Segment.FileSize() = 0x100;
-    Segment.IsExecutable() = true;
-    Model->Segments().insert(std::move(Segment));
-    llvm::LLVMContext Context;
-    llvm::Module Module("register_mapping", Context);
-    Module.setDataLayout("e-p:64:64");
-    auto *Integer = llvm::Type::getInt64Ty(Context);
-    auto *FirstInteger = NarrowArgument ? llvm::Type::getInt32Ty(Context) :
-                                          Integer;
-    auto *CallerLLVMType = llvm::FunctionType::get(Integer,
-                                                   { FirstInteger, Integer },
-                                                   false);
-    auto *CalleeLLVMType = llvm::FunctionType::get(Integer,
-                                                   { Integer,
-                                                     Integer,
-                                                     Integer },
-                                                   false);
-    auto Declare = [&](llvm::FunctionType *Type,
-                       llvm::StringRef Name,
-                       uint64_t PC,
-                       const model::UpcastableType &Prototype) {
-      auto Entry = MetaAddress::fromPC(Model->Architecture(), PC);
-      Model->Functions()[Entry].Prototype() = Prototype.copy();
-      auto
-        *Function = llvm::Function::Create(Type,
-                                           llvm::GlobalValue::ExternalLinkage,
-                                           Name,
-                                           Module);
-      FunctionTags::Isolated.addTo(Function);
-      setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
-      return Function;
-    };
-    auto *Caller = Declare(CallerLLVMType, "caller", 0x1000, CallerType);
-    auto *Callee = Declare(CalleeLLVMType, "callee", 0x1010, CalleeType);
-    llvm::IRBuilder<> IR(llvm::BasicBlock::Create(Context, "entry", Caller));
-    auto *Call = IR.CreateCall(CallerLLVMType,
-                               Callee,
-                               { Caller->getArg(0), Caller->getArg(1) });
-    setStringMetadata(Call,
-                      PrototypeMDName,
-                      Model->getTypeDefinitionReference(CallerPrototype.key())
-                        .toString());
-    IR.CreateRet(Call);
-    BOOST_REQUIRE(Model->verify(true));
-    BOOST_REQUIRE(not llvm::verifyModule(Module, &llvm::errs()));
-    LayoutTypeSystem TS;
-    DLATypeSystemLLVMBuilder Builder(TS, *Model);
-    std::vector<llvm::Module *> Modules{ &Module };
-    Builder.buildFromLLVMModules(Modules, { "register_mapping" });
-    auto Node = [&](llvm::Value *Value) {
-      auto &Values = Builder.getValues();
-      auto It = llvm::find(Values, LayoutTypePtr(Value));
-      revng_assert(It != Values.end());
-      auto ID = static_cast<uint64_t>(std::distance(Values.begin(), It));
-      for (auto *Node : TS.getLayoutsRange())
-        if (Node->ID == ID)
-          return Node;
-      revng_abort();
-    };
-    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
-                                   Node(Callee->getArg(1)))
-                == (NarrowArgument ? 0 : 1));
-    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
-                                   Node(Callee->getArg(2)))
-                == 1);
-    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
-                                   Node(Callee->getArg(0)))
-                == 0);
-    BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
-                                   Node(Callee->getArg(1)))
-                == 0);
+  for (unsigned Mode = 0; Mode != 8; ++Mode) {
+    for (bool NarrowArgument : { false, true }) {
+      TupleTree<model::Binary> Model;
+      Model->Architecture() = model::Architecture::x86_64;
+      auto Generic = model::PrimitiveType::make(model::PrimitiveKind::Generic,
+                                                8);
+      auto &&[CallerPrototype, CallerType] = Model->makeRawFunctionDefinition();
+      CallerPrototype.Architecture() = Model->Architecture();
+      CallerPrototype.FinalStackOffset() = 8;
+      CallerPrototype
+        .addArgument(model::Register::rdx_x86_64,
+                     model::PrimitiveType::make(model::PrimitiveKind::Generic,
+                                                NarrowArgument ? 4 : 8));
+      CallerPrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+      CallerPrototype.addReturnValue(model::Register::rax_x86_64,
+                                     Generic.copy());
+      auto &&[CalleePrototype, CalleeType] = Model->makeRawFunctionDefinition();
+      CalleePrototype.Architecture() = Model->Architecture();
+      CalleePrototype.FinalStackOffset() = 8;
+      CalleePrototype.addArgument(model::Register::rcx_x86_64, Generic.copy());
+      CalleePrototype.addArgument(model::Register::rdx_x86_64, Generic.copy());
+      CalleePrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
+      CalleePrototype.addReturnValue(model::Register::rax_x86_64,
+                                     Generic.copy());
+      model::Segment Segment(MetaAddress::fromGeneric(Model->Architecture(),
+                                                      0x1000));
+      Segment.VirtualSize() = 0x100;
+      Segment.FileSize() = 0x100;
+      Segment.IsExecutable() = true;
+      Model->Segments().insert(std::move(Segment));
+      llvm::LLVMContext Context;
+      llvm::Module Module("register_mapping", Context);
+      llvm::Module OtherModule("callee_module", Context);
+      OtherModule.setDataLayout("e-p:64:64");
+      Module.setDataLayout("e-p:64:64");
+      auto *Integer = llvm::Type::getInt64Ty(Context);
+      auto *FirstInteger = NarrowArgument ? llvm::Type::getInt32Ty(Context) :
+                                            Integer;
+      auto *CallerLLVMType = llvm::FunctionType::get(Integer,
+                                                     { FirstInteger, Integer },
+                                                     false);
+      auto *CalleeLLVMType = llvm::FunctionType::get(Integer,
+                                                     { Integer,
+                                                       Integer,
+                                                       Integer },
+                                                     false);
+      auto Declare = [&](llvm::FunctionType *Type,
+                         llvm::StringRef Name,
+                         uint64_t PC,
+                         const model::UpcastableType &Prototype) {
+        auto Entry = MetaAddress::fromPC(Model->Architecture(), PC);
+        Model->Functions()[Entry].Prototype() = Prototype.copy();
+        auto
+          *Function = llvm::Function::Create(Type,
+                                             llvm::GlobalValue::ExternalLinkage,
+                                             Name,
+                                             Mode == 7 and Name == "callee" ?
+                                               OtherModule :
+                                               Module);
+        FunctionTags::Isolated.addTo(Function);
+        setMetaAddressMetadata(Function, FunctionEntryMDName, Entry);
+        return Function;
+      };
+      auto *Caller = Declare(CallerLLVMType, "caller", 0x1000, CallerType);
+      auto *Callee = Declare(CalleeLLVMType, "callee", 0x1010, CalleeType);
+      llvm::IRBuilder<> IR(llvm::BasicBlock::Create(Context, "entry", Caller));
+      llvm::Value *Target = Callee;
+      auto Slot = MetaAddress::fromGeneric(Model->Architecture(), 0x1080);
+      StaticFunctionTargets Targets;
+      if (Mode != 0) {
+        auto &
+          Global = SegmentGlobal::get(Module,
+                                      Model->Segments().begin()->StartAddress(),
+                                      0x100);
+        auto *AddressInteger = Mode == 5 ? IR.getInt32Ty() : Integer;
+        auto *Address = IR.CreateAdd(IR.CreatePtrToInt(&Global, AddressInteger),
+                                     llvm::ConstantInt::get(AddressInteger,
+                                                            0x80));
+        auto *Pointer = IR.CreateIntToPtr(Address, IR.getPtrTy());
+        auto *Load = IR.CreateLoad(Integer, Pointer);
+        if (Mode == 3)
+          Load->setVolatile(true);
+        if (Mode == 4)
+          Load->setAtomic(llvm::AtomicOrdering::Acquire);
+        llvm::Value *Value = Load;
+        if (Mode == 6)
+          Value = IR.CreateTrunc(Value, IR.getInt32Ty());
+        Target = IR.CreateIntToPtr(Value, IR.getPtrTy());
+        if (Mode != 2)
+          Targets.emplace(Slot,
+                          MetaAddress::fromPC(Model->Architecture(), 0x1010));
+      }
+      auto *Call = IR.CreateCall(CallerLLVMType,
+                                 Target,
+                                 { Caller->getArg(0), Caller->getArg(1) });
+      setStringMetadata(Call,
+                        PrototypeMDName,
+                        Model->getTypeDefinitionReference(CallerPrototype.key())
+                          .toString());
+      IR.CreateRet(Call);
+      BOOST_REQUIRE(Model->verify(true));
+      BOOST_REQUIRE(not llvm::verifyModule(Module, &llvm::errs()));
+      LayoutTypeSystem TS;
+      DLATypeSystemLLVMBuilder Builder(TS, *Model, std::move(Targets));
+      std::vector<llvm::Module *> Modules{ &Module, &OtherModule };
+      Builder.buildFromLLVMModules(Modules,
+                                   { "register_mapping", "callee_module" });
+      auto Node = [&](llvm::Value *Value) {
+        auto &Values = Builder.getValues();
+        auto It = llvm::find(Values, LayoutTypePtr(Value));
+        revng_assert(It != Values.end());
+        auto ID = static_cast<uint64_t>(std::distance(Values.begin(), It));
+        for (auto *Node : TS.getLayoutsRange())
+          if (Node->ID == ID)
+            return Node;
+        revng_abort();
+      };
+      bool Connected = Mode == 0 or Mode == 1 or Mode == 7;
+      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
+                                     Node(Callee->getArg(1)))
+                  == (not NarrowArgument and Connected ? 1 : 0));
+      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
+                                     Node(Callee->getArg(2)))
+                  == (Connected ? 1 : 0));
+      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
+                                     Node(Callee->getArg(0)))
+                  == 0);
+      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
+                                     Node(Callee->getArg(1)))
+                  == 0);
+    }
   }
 }
 
@@ -3671,6 +3709,80 @@ BOOST_AUTO_TEST_CASE(SpilledValuesRetainOnlyProvenReachingStores) {
                         Scenario == 0 or Scenario == 7);
       BOOST_CHECK_EQUAL(TS.getEqClasses().haveSameEqClass(ReloadID, SecondID),
                         Scenario == 1 or Scenario == 9);
+    }
+  }
+}
+
+BOOST_AUTO_TEST_CASE(StaticFunctionPointersRequireProtectedUniqueRelocations) {
+  using ELF = llvm::object::ELF64LE;
+  for (unsigned Scenario = 0; Scenario != 8; ++Scenario) {
+    TupleTree<model::Binary> Model;
+    Model->Architecture() = model::Architecture::x86_64;
+    Model->OperatingSystem() = model::OperatingSystem::Linux;
+    auto Generic = [](uint64_t Address) {
+      return MetaAddress::fromGeneric(model::Architecture::x86_64, Address);
+    };
+    auto Target = MetaAddress::fromPC(Model->Architecture(), 0x1100);
+    Model->Functions()[Target];
+    model::Segment Text(Generic(0x1000));
+    Text.VirtualSize() = Text.FileSize() = 0x2000;
+    Text.IsExecutable() = true;
+    model::Relocation Relocation(Generic(0x4200),
+                                 model::RelocationType::AddAbsoluteAddress64,
+                                 0x100);
+    if (Scenario == 4)
+      Relocation.Addend() = 0x108;
+    if (Scenario == 5)
+      Relocation.Type() = model::RelocationType::AddAbsoluteAddress32;
+    Text.Relocations().insert(Relocation);
+    if (Scenario == 3)
+      Text.Relocations()
+        .insert(model::Relocation(Generic(0x4204),
+                                  model::RelocationType::AddAbsoluteAddress32,
+                                  0x100));
+    Model->Segments().insert(std::move(Text));
+    model::Segment Data(Generic(0x4000));
+    Data.StartOffset() = 0x2000;
+    Data.VirtualSize() = Data.FileSize() = 0x1000;
+    Data.IsReadable() = true;
+    Data.IsWriteable() = Scenario != 2;
+    if (Scenario == 6)
+      Data.VirtualSize() = Data.FileSize() = 0x204;
+    Model->Segments().insert(std::move(Data));
+
+    // Exercise LLVM's real ELF parser with a minimal executable header and
+    // loader program header; the model relocations are already normalized.
+    std::vector<uint8_t> Bytes(0x3000);
+    ELF::Ehdr Header{};
+    memcpy(Header.e_ident, llvm::ELF::ElfMagic, 4);
+    Header.e_ident[llvm::ELF::EI_CLASS] = llvm::ELF::ELFCLASS64;
+    Header.e_ident[llvm::ELF::EI_DATA] = llvm::ELF::ELFDATA2LSB;
+    Header.e_ident[llvm::ELF::EI_VERSION] = llvm::ELF::EV_CURRENT;
+    Header.e_type = llvm::ELF::ET_DYN;
+    Header.e_machine = llvm::ELF::EM_X86_64;
+    Header.e_version = llvm::ELF::EV_CURRENT;
+    Header.e_ehsize = sizeof(Header);
+    Header.e_phoff = sizeof(Header);
+    Header.e_phentsize = sizeof(ELF::Phdr);
+    Header.e_phnum = 1;
+    ELF::Phdr Protection{};
+    Protection.p_type = llvm::ELF::PT_GNU_RELRO;
+    Protection.p_flags = llvm::ELF::PF_R;
+    Protection.p_offset = 0x2100;
+    Protection.p_vaddr = 0x4100;
+    Protection.p_memsz = 0xf00;
+    if (Scenario == 1 or Scenario == 2)
+      Protection.p_type = llvm::ELF::PT_NULL;
+    if (Scenario == 7)
+      Protection.p_memsz = 0x107;
+    memcpy(Bytes.data(), &Header, sizeof(Header));
+    memcpy(Bytes.data() + sizeof(Header), &Protection, sizeof(Protection));
+    RawBinaryView View(*Model, llvm::ArrayRef<uint8_t>(Bytes));
+    auto Targets = collectReadOnlyFunctionPointers(*Model, View);
+    BOOST_TEST_CONTEXT("scenario " << Scenario) {
+      BOOST_CHECK_EQUAL(Targets.size(), Scenario == 0 or Scenario == 2 ? 1 : 0);
+      if (Targets.contains(Generic(0x4200)))
+        BOOST_CHECK(Targets.at(Generic(0x4200)) == Target);
     }
   }
 }
