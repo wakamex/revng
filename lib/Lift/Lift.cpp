@@ -69,18 +69,30 @@ findExternalFilePaths(const model::Architecture::Values Architecture) {
 /// model functions (true).
 using JumpTargetMap = std::map<MetaAddress, bool>;
 
-template<>
-struct llvm::yaml::CustomMappingTraits<JumpTargetMap> {
-  static void inputOne(IO &IO, StringRef Key, JumpTargetMap &Data) {
-    MetaAddress Address = MetaAddress::fromString(Key);
-    IO.mapRequired(Key.str().c_str(), Data[Address]);
-  }
+/// Write \p JumpTargets one per line, as the address and 0 or 1. A YAML
+/// mapping would be parsed in quadratic time: LLVM's YAML input checks every
+/// key of a mapping against a list of the keys it has seen, and a whole binary
+/// has millions of jump targets.
+static void serializeJumpTargets(llvm::raw_ostream &OS,
+                                 const JumpTargetMap &JumpTargets) {
+  for (const auto &[Address, DependsOnModelFunction] : JumpTargets)
+    OS << Address.toString() << " " << (DependsOnModelFunction ? 1 : 0)
+       << "\n";
+}
 
-  static void output(IO &IO, JumpTargetMap &Data) {
-    for (auto &[Key, Value] : Data)
-      IO.mapRequired(Key.toString().c_str(), Value);
+static JumpTargetMap parseJumpTargets(llvm::StringRef Text) {
+  JumpTargetMap Result;
+  while (not Text.empty()) {
+    auto [Line, Rest] = Text.split('\n');
+    Text = Rest;
+    auto [Address, Flag] = Line.rsplit(' ');
+    revng_assert(Flag == "0" or Flag == "1");
+    MetaAddress Parsed = MetaAddress::fromString(Address);
+    revng_assert(Parsed.isValid());
+    Result.emplace_hint(Result.end(), Parsed, Flag == "1");
   }
-};
+  return Result;
+}
 
 static std::tuple<bool, std::map<MetaAddress, bool>>
 collectJumpTargets(const llvm::Module &Module) {
@@ -232,7 +244,7 @@ CustomInvalidationData Lift::run() {
     auto [HasRoot, JumpTargets] = collectJumpTargets(Module);
     revng_assert(HasRoot);
     llvm::raw_svector_ostream OS(SerializedInvalidation.data());
-    serialize(OS, JumpTargets);
+    serializeJumpTargets(OS, JumpTargets);
   }
 
   return { {}, { { ObjectID(), SerializedInvalidation } } };
@@ -265,7 +277,7 @@ Lift::processCustomInvalidation(const InvalidationData &Data,
   auto DataBuffer = std::get<1>(LLVMModuleData[0]);
   llvm::StringRef String(reinterpret_cast<const char *>(DataBuffer.data()),
                          DataBuffer.size());
-  auto JumpTargets = llvm::cantFail(fromString<JumpTargetMap>(String));
+  JumpTargetMap JumpTargets = parseJumpTargets(String);
 
   if (shouldInvalidateRoot(JumpTargets, Diff.get()))
     return { {}, { ObjectID() } };
