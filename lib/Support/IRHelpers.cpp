@@ -1093,10 +1093,9 @@ cloneSelected(llvm::Module &Module,
 }
 
 void writeBitcode(const llvm::Module &Module,
-                  llvm::SmallVectorImpl<char> &Output,
-                  bool PreserveUseListOrder) {
+                  llvm::SmallVectorImpl<char> &Output) {
   llvm::BitcodeWriter Writer(Output);
-  Writer.writeModule(Module, PreserveUseListOrder);
+  Writer.writeModule(Module);
   Writer.writeSymtab();
   Writer.writeStrtab();
 }
