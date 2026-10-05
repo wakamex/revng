@@ -4,6 +4,7 @@
 
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <system_error>
@@ -124,7 +125,9 @@ static constexpr unsigned MaxUnrolledTripCount = 64;
 /// once per function. Built specializations are therefore also kept for the
 /// whole process, as bitcode keyed by a description of the helper, the
 /// module's `@env` and the constant arguments, and are cloned into later
-/// modules instead of being rebuilt.
+/// modules instead of being rebuilt. The module that builds a specialization
+/// clones it from that bitcode too, so every module gets the same function
+/// whichever module, on whichever thread, built it first.
 class HelperSpecializations {
 private:
   using Key = std::pair<Function *, std::vector<Constant *>>;
@@ -134,6 +137,9 @@ private:
   /// definition is the specialization, or no value when specializing did not
   /// make the helper smaller
   static std::map<std::string, std::optional<std::string>> Shared;
+
+  /// Guards `Shared`; its entries are never changed once inserted
+  static std::mutex SharedLock;
 
 public:
   ~HelperSpecializations() {
@@ -158,6 +164,7 @@ private:
 
 std::map<std::string, std::optional<std::string>>
   HelperSpecializations::Shared;
+std::mutex HelperSpecializations::SharedLock;
 
 /// Describe everything a specialization depends on that can differ between
 /// modules: the helper, the `@env` offset it folds against, the data layout
@@ -218,10 +225,8 @@ static SmallPtrSet<GlobalValue *, 32> referencedGlobals(Function &F) {
 ///
 /// The module it was built in can be a whole lifted binary, as in
 /// `detect-abi`, so copying the declarations of everything in it would make
-/// each cached entry as large as the module's symbol table. The declarations
-/// keep the order of the module they come from, as a whole-module copy did,
-/// since `materialize` declares missing intrinsics in that order. If the
-/// result does not verify, for example because a global is reached through
+/// each cached entry as large as the module's symbol table. If the result
+/// does not verify, for example because a global is reached through
 /// metadata, fall back to the whole-module copy.
 std::string HelperSpecializations::serialize(Function *Specialized) {
   Module &Source = *Specialized->getParent();
@@ -325,10 +330,19 @@ Function *HelperSpecializations::materialize(const std::string &Bitcode,
       Original = &F;
   revng_assert(Original != nullptr);
 
+  // Bind, and declare, in name order: the order of the module that built the
+  // specialization would make this module depend on which module that was
+  SmallVector<GlobalValue *, 32> Used;
+  for (GlobalValue &Global : Source.global_values())
+    if (&Global != Original and not Global.use_empty())
+      Used.push_back(&Global);
+  llvm::sort(Used, [](const GlobalValue *LHS, const GlobalValue *RHS) {
+    return LHS->getName() < RHS->getName();
+  });
+
   ValueToValueMapTy VMap;
-  for (GlobalValue &Global : Source.global_values()) {
-    if (&Global == Original or Global.use_empty())
-      continue;
+  for (GlobalValue *UsedGlobal : Used) {
+    GlobalValue &Global = *UsedGlobal;
     GlobalValue *Target = M.getNamedValue(Global.getName());
 
     // Optimizing the specialization can introduce intrinsics that this module
@@ -496,16 +510,26 @@ CallInst *HelperSpecializations::specialize(CallInst *Call) {
   auto [It, New] = Cache.try_emplace({ Helper, Arguments }, nullptr);
   if (New) {
     std::string Key = sharedKey(Helper, Arguments);
-    auto SharedIt = Shared.find(Key);
-    revng_log(CacheLog,
-              (SharedIt == Shared.end() ? "miss " : "hit ") << Key);
-    if (SharedIt == Shared.end()) {
-      It->second = build(Helper, Arguments);
-      Shared[Key] = It->second == nullptr ?
-                      std::nullopt :
-                      std::optional(serialize(It->second));
-    } else if (SharedIt->second.has_value()) {
-      It->second = materialize(*SharedIt->second, Helper);
+    const std::optional<std::string> *Entry = nullptr;
+    {
+      std::lock_guard Guard(SharedLock);
+      if (auto SharedIt = Shared.find(Key); SharedIt != Shared.end())
+        Entry = &SharedIt->second;
+    }
+    revng_log(CacheLog, (Entry == nullptr ? "miss " : "hit ") << Key);
+    if (Entry == nullptr) {
+      std::optional<std::string> Bitcode;
+      if (Function *Built = build(Helper, Arguments)) {
+        Bitcode = serialize(Built);
+        Built->eraseFromParent();
+      }
+      // Another thread may have inserted the same key meanwhile: keep the
+      // first entry, which every module then uses
+      std::lock_guard Guard(SharedLock);
+      Entry = &Shared.try_emplace(Key, std::move(Bitcode)).first->second;
+    }
+    if (Entry->has_value()) {
+      It->second = materialize(**Entry, Helper);
       if (It->second == nullptr) {
         revng_log(Log, "rebuilding " << Helper->getName() << " locally");
         It->second = build(Helper, Arguments);
