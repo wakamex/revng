@@ -18,7 +18,7 @@ from .storage.storage_provider import SavePointsRange, StorageProvider
 from .task.pipe import Pipe, PipeDependencies
 from .task.requests import Requests
 from .task.savepoint import SavePoint
-from .task.task import TaskArgument
+from .task.task import TaskArgument, TaskArgumentAccess
 
 PipelineConfiguration = Annotated[
     Mapping[Pipe | Analysis, str],
@@ -183,8 +183,21 @@ class PipelineNode:
                 savepoint_range=self.savepoint_range,
             )
         elif isinstance(self.task, Pipe):
+            # Read-only requests pass through this node. Asking for prerequisites
+            # when no output is needed can expand them into unrelated mutable
+            # inputs and defeat a downstream cache hit.
+            if not any(
+                argument.access != TaskArgumentAccess.READ and len(requests.get(declaration)) > 0
+                for argument, declaration in zip(self.task.arguments, self.bindings)
+            ):
+                return requests.clone()
             # Use the bindings to map the requests to the pipe arguments
-            pipe_requests: list[ObjectSet] = [requests.get(decl) for decl in self.bindings]
+            pipe_requests: list[ObjectSet] = [
+                requests.get(declaration)
+                if argument.access != TaskArgumentAccess.READ
+                else ObjectSet(declaration.container_type.kind)
+                for argument, declaration in zip(self.task.arguments, self.bindings)
+            ]
             # Ask the pipe for its prerequisites
             outgoing = self.task.prerequisites_for(
                 model=model,
@@ -192,7 +205,9 @@ class PipelineNode:
             )
             # Map back the requests to the pipeline declarations
             result = requests.clone()
-            for decl, request in zip(self.bindings, outgoing):
+            for argument, decl, request in zip(self.task.arguments, self.bindings, outgoing):
+                if argument.access == TaskArgumentAccess.READ:
+                    request = request | requests.get(decl)
                 result[decl] = request
             return result
         else:

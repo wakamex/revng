@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import unittest
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Generator, Optional, TypeVar, Union
@@ -35,6 +36,7 @@ from revng.pypeline.storage.storage_provider import SavePointsRange, StorageProv
 from revng.pypeline.task.pipe import Pipe
 from revng.pypeline.task.requests import Requests
 from revng.pypeline.task.savepoint import SavePoint
+from revng.pypeline.task.task import TaskArgument, TaskArgumentAccess
 
 # Fill the registries
 initialize_pypeline()
@@ -1006,3 +1008,39 @@ def test_local_provider_v3_migration_keeps_inline_objects():
         assert provider.get(location, [root]) == {root: b"inline"}
         assert db.execute("SELECT chunk_count FROM objects").fetchall() == [(0,)]
         assert db.execute("SELECT COUNT(*) FROM object_chunks").fetchone()[0] == 0
+
+
+class TestReadOnlyPassThrough(unittest.TestCase):
+    def test_read_requests_do_not_rebuild_unrequested_outputs(self):
+        class ReadAndModifyPipe(ToHigherKindPipe):
+            @classmethod
+            def signature(cls):
+                return (
+                    TaskArgument("source", RootDictContainer, TaskArgumentAccess.READ),
+                    TaskArgument("destination", ChildDictContainer, TaskArgumentAccess.READ_WRITE),
+                )
+
+        source = ContainerDeclaration("raw_input", RootDictContainer)
+        destination = ContainerDeclaration("prepared", ChildDictContainer)
+        node = PipelineNode(ReadAndModifyPipe(), [source, destination])
+        model = ReadOnlyModel(DictModel())
+        storage = InMemoryStorageProvider()
+        root = ObjectSet(MyKind.ROOT, {MyObjectID.root()})
+        child = ObjectSet(MyKind.CHILD, {MyObjectID(MyKind.CHILD, "one")})
+        requests = Requests({source: root})
+        result = node.prerequisites_for(model, requests, {}, storage)
+        self.assertEqual(result.get(source), root)
+        self.assertEqual(len(result.get(destination)), 0)
+        self.assertEqual(len(requests.get(destination)), 0)
+
+        # A requested mutable output must still acquire its source and its
+        # previous contents. The early exit applies only to pass-through work.
+        result = node.prerequisites_for(model, Requests({destination: child}), {}, storage)
+        self.assertEqual(result.get(source), root)
+        self.assertEqual(result.get(destination), child)
+
+        result = node.prerequisites_for(
+            model, Requests({source: root, destination: child}), {}, storage
+        )
+        self.assertEqual(result.get(source), root)
+        self.assertEqual(result.get(destination), child)
