@@ -77,7 +77,7 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
   if (Workers <= 1 or Objects.size() <= 1 or anyLoggerEnabled())
     return false;
 
-  using Bitcode = llvm::SmallVector<char, 0>;
+  using Bitcode = LLVMFunctionContainer::Bitcode;
   SpeculativeWorklist<const ObjectID *, Bitcode, Bitcode> Functions;
   for (const ObjectID *Object : Objects) {
     revng_assert(Object->kind() == Kinds::Function);
@@ -87,11 +87,7 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
   using Worklist = decltype(Functions);
   Worklist::Callbacks C;
   C.Prepare = [&](const ObjectID *Object) -> std::optional<Bitcode> {
-    Bitcode Input;
-    writeBitcode(Container.getModule(*Object), Input);
-    // The result replaces the module: free it now
-    Container.takeModule(*Object).reset();
-    return Input;
+    return Container.takeBitcode(*Object);
   };
   C.Cost = [](const Bitcode &Input) -> size_t { return Input.size(); };
   C.Work = [this](const Bitcode &Input) {
@@ -101,24 +97,23 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
     }
     std::unique_ptr<llvm::Module> Module = readBitcode(Input,
                                                        Worker->Context);
-    std::vector<llvm::StructType *> Types = Module->getIdentifiedStructTypes();
     Worker->Manager.run(*Module);
+
+    // A struct's name in a context depends on the names other types there
+    // already hold, here on which functions this worker ran before: write
+    // the function with unnamed structs, so its bitcode depends only on its
+    // content. Nothing that runs on single functions looks a type up by name.
+    for (llvm::StructType *Type : Module->getIdentifiedStructTypes())
+      Type->setName("");
     Bitcode Output;
     writeBitcode(*Module, Output);
-
-    // Named types outlive their module in the context: free the names this
-    // function's types took, or the next function's types would get suffixes
-    // depending on which functions this worker ran before
-    Module.reset();
-    for (llvm::StructType *Type : Types)
-      Type->setName("");
     return Output;
   };
   C.Commit = [&](const ObjectID *Object,
                  std::optional<Bitcode> &,
                  std::optional<Bitcode> &Output) {
     Progress.advance(std::get<MetaAddress>(Object->key()).toString(), true);
-    Container.assign(*Object, readBitcode(*Output, Container.getContext()));
+    Container.assignBitcode(*Object, std::move(*Output));
     return true;
   };
   C.Reads = [](const ObjectID *) { return std::vector<const ObjectID *>(); };
