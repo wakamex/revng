@@ -175,7 +175,9 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
   };
   C.Reads = [](const ObjectID *) { return std::vector<const ObjectID *>(); };
 
-  Functions.run(C, Workers, 16 * Workers, 16 * Workers);
+  // Commits do not depend on each other: admit every function, so a slow one
+  // at the head of the queue does not leave the workers idle
+  Functions.run(C, Workers, Objects.size(), Objects.size());
   Context->enableMultithreading(WasMultithreaded);
   return true;
 }

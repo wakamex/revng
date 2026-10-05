@@ -2,6 +2,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -118,9 +119,10 @@ bool PureLLVMPassesPipe::runInParallel(const std::vector<const ObjectID *>
   };
   C.Reads = [](const ObjectID *) { return std::vector<const ObjectID *>(); };
 
-  // Bitcode is about two bytes per instruction: keep a few million
-  // instructions in flight
-  Functions.run(C, Workers, 16 * Workers, 16'000'000);
+  // Commits do not depend on each other, and a function in flight is its own
+  // bitcode moved out of the container: admit every function, so a slow one
+  // at the head of the queue does not leave the workers idle
+  Functions.run(C, Workers, Objects.size(), SIZE_MAX);
   return true;
 }
 
