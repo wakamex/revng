@@ -4,6 +4,11 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <memory>
+
+#include "llvm/Support/Progress.h"
+
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 
 #include "revng/PipeboxCommon/CliftContainers.h"
@@ -54,6 +59,17 @@ public:
                  const revng::pypeline::Request &Outgoing,
                  llvm::StringRef Configuration,
                  CliftFunctionContainer &Container);
+
+private:
+  std::unique_ptr<mlir::PassManager>
+  makePassManager(mlir::MLIRContext *Context) const;
+
+  /// With -function-pipe-jobs above one, run the passes on that many threads,
+  /// each with its own pass manager. Return false, having done nothing, if
+  /// the passes are to run on this thread.
+  bool runInParallel(const std::vector<const ObjectID *> &Objects,
+                     CliftFunctionContainer &Container,
+                     llvm::Task &Progress) const;
 };
 
 } // namespace revng::pypeline::pipes
