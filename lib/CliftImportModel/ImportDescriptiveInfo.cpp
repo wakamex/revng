@@ -2,13 +2,16 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <functional>
 #include <ranges>
 #include <type_traits>
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/IR/RegionGraphTraits.h"
+#include "mlir/IR/SubElementInterfaces.h"
 
 #include "revng/Clift/Clift.h"
 #include "revng/Clift/CliftTypes.h"
@@ -169,13 +172,51 @@ class Importer : public clift::ModuleVisitor<Importer> {
   SymbolRenamer &Symbols;
   model::CNameBuilder NameBuilder;
 
+  // Name the class types a module references directly, without descending
+  // into their definitions: their own fields' and members' types are named
+  // where those are used, and by the container that defines the types
+  bool DirectTypesOnly = false;
+
   std::optional<CurrentFunctionState> CurrentFunction;
 
 public:
-  explicit Importer(const model::Binary &Model, SymbolRenamer &Symbols) :
-    Model(Model), Symbols(Symbols), NameBuilder(Model) {}
+  explicit Importer(const model::Binary &Model,
+                    SymbolRenamer &Symbols,
+                    bool DirectTypesOnly = false) :
+    Model(Model),
+    Symbols(Symbols),
+    NameBuilder(Model),
+    DirectTypesOnly(DirectTypesOnly) {}
 
   //===---------------------- ModuleVisitor interface ---------------------===//
+
+  bool visitSubElementsOf(mlir::Type Type) {
+    if (not DirectTypesOnly)
+      return true;
+
+    // Name the class type and its fields, but do not walk the fields' types
+    auto Definition = llvm::TypeSwitch<mlir::Type, mlir::Attribute>(Type)
+                        .Case([](clift::StructType T) {
+                          return T.getDefinition();
+                        })
+                        .Case([](clift::UnionType T) {
+                          return T.getDefinition();
+                        })
+                        .Default([](mlir::Type) { return mlir::Attribute(); });
+    if (not Definition)
+      return true;
+
+    if (VisitedDefinitions.insert(Definition).second) {
+      auto R = visitAttr(Definition);
+      revng_assert(R.succeeded());
+    }
+    return false;
+  }
+
+private:
+  llvm::DenseSet<mlir::Attribute> VisitedDefinitions;
+
+public:
 
   mlir::LogicalResult visitType(mlir::Type Type) {
     if (auto T = mlir::dyn_cast<clift::FunctionType>(Type)) {
@@ -727,6 +768,45 @@ void clift::importDescriptiveInfo(const model::Binary &Model,
   Symbols.apply(Module);
 }
 
+void clift::importModelTypeNames(llvm::ArrayRef<mlir::ModuleOp> Modules,
+                                 const model::Binary &Model) {
+  // Name every type the modules reach once, walking the types they share
+  // once instead of once per module
+  SymbolRenamer Symbols;
+  Importer Names(Model, Symbols);
+  llvm::DenseSet<mlir::Type> VisitedTypes;
+  llvm::DenseSet<mlir::Attribute> VisitedAttributes;
+  std::function<void(mlir::Attribute)> VisitAttribute;
+  std::function<void(mlir::Type)> VisitType = [&](mlir::Type Type) {
+    if (not VisitedTypes.insert(Type).second)
+      return;
+    auto R = Names.visitType(Type);
+    revng_assert(R.succeeded());
+    if (auto T = mlir::dyn_cast<mlir::SubElementTypeInterface>(Type))
+      T.walkImmediateSubElements(VisitAttribute, VisitType);
+  };
+  VisitAttribute = [&](mlir::Attribute Attribute) {
+    if (not VisitedAttributes.insert(Attribute).second)
+      return;
+    auto R = Names.visitAttr(Attribute);
+    revng_assert(R.succeeded());
+    if (auto A = mlir::dyn_cast<mlir::SubElementAttrInterface>(Attribute))
+      A.walkImmediateSubElements(VisitAttribute, VisitType);
+  };
+
+  for (mlir::ModuleOp Module : Modules) {
+    Module->walk([&](mlir::Operation *Op) {
+      for (mlir::Type Type : Op->getResultTypes())
+        VisitType(Type);
+      VisitAttribute(Op->getAttrDictionary());
+      for (mlir::Region &Region : Op->getRegions())
+        for (mlir::Block &Block : Region)
+          for (mlir::BlockArgument Argument : Block.getArguments())
+            VisitType(Argument.getType());
+    });
+  }
+}
+
 void clift::importDescriptiveInfo(const model::Function &Function,
                                   const model::Binary &Model,
                                   mlir::ModuleOp Module) {
@@ -743,17 +823,20 @@ void clift::importDescriptiveInfo(const model::Function &Function,
 
   SymbolRenamer Symbols;
 
-  auto R = Importer::visit(CliftFunction, Model, Symbols);
+  // The container names every type its modules reach; here only the types
+  // this function references are named, which also records the reads its C
+  // depends on
+  auto R = Importer::visit(CliftFunction, Model, Symbols, true);
   revng_assert(R.succeeded());
 
   for (mlir::Operation &Op : Module.getBody()->getOperations()) {
     if (auto F = mlir::dyn_cast<clift::FunctionOp>(Op)) {
       if (getMetaAddress(F).isInvalid()) {
-        auto R = Importer::visit(F, Model, Symbols);
+        auto R = Importer::visit(F, Model, Symbols, true);
         revng_assert(R.succeeded());
       }
     } else if (auto G = mlir::dyn_cast<clift::GlobalVariableOp>(Op)) {
-      auto R = Importer::visit(G, Model, Symbols);
+      auto R = Importer::visit(G, Model, Symbols, true);
       revng_assert(R.succeeded());
     }
   }

@@ -107,6 +107,12 @@ private:
         return mlir::failure();
     }
 
+    // A visitor can stop the walk from descending into a type
+    if constexpr (requires { getVisitor().visitSubElementsOf(Type); }) {
+      if (not getVisitor().visitSubElementsOf(Type))
+        return mlir::success();
+    }
+
     if (auto T = mlir::dyn_cast<mlir::SubElementTypeInterface>(Type)) {
       if (visitSubElements(T).failed())
         return mlir::failure();

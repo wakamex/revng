@@ -443,6 +443,7 @@ set(FILECHECK_TESTS
     lift/added-function-relift.S
     lift/cpu-state-initializers-layout.S
     lift/globaldata-instruction-interiors.S
+    model/clift-shared-types.S
     model/function-pipe-jobs.S
     model/prototype-set-after-use.S
     segment-references/c-strings-outside-code.S
