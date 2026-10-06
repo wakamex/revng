@@ -4,6 +4,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <optional>
+
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include "mlir/IR/Builders.h"
@@ -227,5 +230,30 @@ bool isCallableType(mlir::Type Type);
 /// If the type, after unwrapping typedefs, is a function type or a pointer to a
 /// function type, returns that function type.
 FunctionType getFunctionOrFunctionPointerFunctionType(mlir::Type Type);
+
+/// While an instance is alive, bytecode written on this thread stores each
+/// class type whose handle \p Omit accepts as its handle alone, without its
+/// definition. Reading such a type gives the class type of that handle in the
+/// reader's context, which is incomplete until whoever owns the context
+/// defines it. This lets modules that share a context also share the
+/// definitions of types that context can supply, instead of each carrying
+/// every definition it reaches.
+class OmittedClassDefinitions {
+public:
+  using Predicate = llvm::function_ref<bool(llvm::StringRef Handle)>;
+
+private:
+  std::optional<Predicate> Previous;
+
+public:
+  explicit OmittedClassDefinitions(Predicate Omit);
+  ~OmittedClassDefinitions();
+
+  OmittedClassDefinitions(const OmittedClassDefinitions &) = delete;
+  OmittedClassDefinitions &operator=(const OmittedClassDefinitions &) = delete;
+
+  /// Whether bytecode written now omits the definition of \p Handle
+  static bool omits(llvm::StringRef Handle);
+};
 
 } // namespace clift

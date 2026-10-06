@@ -1173,7 +1173,19 @@ static TypeT readClassType(mlir::DialectBytecodeReader &Reader) {
   if (readBool(Const, Reader).failed())
     return {};
 
+  bool HasDefinition;
+  if (readBool(HasDefinition, Reader).failed())
+    return {};
+
   auto Type = TypeT::get(Reader.getContext(), Handle);
+
+  // The writer omitted the definition: the context supplies it
+  if (not HasDefinition) {
+    if (Const)
+      return mlir::cast<TypeT>(Type.addConst());
+    return Type;
+  }
+
   const void *Opaque = Type.getAsOpaquePointer();
   auto [Iterator, Inserted] = BytecodeClassTypeSet.insert(Opaque);
 
@@ -1240,7 +1252,30 @@ static void writeClassType(TypeT Type, mlir::DialectBytecodeWriter &Writer) {
 
   Writer.writeOwnedString(Type.getHandle());
   writeBool(Type.getIsConst(), Writer);
-  Writer.writeAttribute(BytecodeClassAttr::get(Type.getContext(), Type));
+
+  // The definition, and with it every type it reaches, is written only when
+  // it is not omitted
+  bool HasDefinition = not OmittedClassDefinitions::omits(Type.getHandle());
+  writeBool(HasDefinition, Writer);
+  if (HasDefinition)
+    Writer.writeAttribute(BytecodeClassAttr::get(Type.getContext(), Type));
+}
+
+static thread_local std::optional<OmittedClassDefinitions::Predicate>
+  OmittedClassDefinitionsPredicate;
+
+OmittedClassDefinitions::OmittedClassDefinitions(Predicate Omit) :
+  Previous(OmittedClassDefinitionsPredicate) {
+  OmittedClassDefinitionsPredicate = Omit;
+}
+
+OmittedClassDefinitions::~OmittedClassDefinitions() {
+  OmittedClassDefinitionsPredicate = Previous;
+}
+
+bool OmittedClassDefinitions::omits(llvm::StringRef Handle) {
+  return OmittedClassDefinitionsPredicate.has_value()
+         and (*OmittedClassDefinitionsPredicate)(Handle);
 }
 
 template<typename TypeT, typename AttrT>
