@@ -6,7 +6,11 @@
 
 #include <optional>
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/Support/LogicalResult.h"
 #include "mlir/IR/Types.h"
 
 #include "revng/ADT/MutableSet.h"
@@ -64,6 +68,11 @@ void importAllModelSegmentDeclarations(const model::Binary &Model,
 void importDescriptiveInfo(const model::Binary &Model, mlir::ModuleOp Module);
 
 // NOTE: this overload can be dropped together with the old pipeline.
+/// Name, from \p Model, every type \p Modules reach. All of \p Modules share
+/// one context, and the names live in that context's type definitions.
+void importModelTypeNames(llvm::ArrayRef<mlir::ModuleOp> Modules,
+                          const model::Binary &Model);
+
 void importDescriptiveInfo(const model::Function &Function,
                            const model::Binary &Model,
                            mlir::ModuleOp Module);
@@ -79,5 +88,18 @@ makeHeaderModule(const model::Binary &Model, bool IncludeGlobals);
 
 clift::StructType makeOpaqueStruct(mlir::MLIRContext *Context,
                                    uint64_t NumBytes);
+
+/// Whether \p Handle names a class type the model defines: a type definition,
+/// or the register set a raw function returns. Modules can omit these
+/// definitions from their bytecode (see `OmittedClassDefinitions`), because
+/// `importIncompleteModelTypes` restores them from the model.
+bool isModelTypeHandle(llvm::StringRef Handle);
+
+/// Define, from \p Model, every class type that \p Modules reach and their
+/// context has not defined yet. All of \p Modules share one context. Fails if
+/// such a type is not a model type or the model no longer has it.
+mlir::LogicalResult
+importIncompleteModelTypes(llvm::ArrayRef<mlir::ModuleOp> Modules,
+                           const model::Binary &Model);
 
 } // namespace clift

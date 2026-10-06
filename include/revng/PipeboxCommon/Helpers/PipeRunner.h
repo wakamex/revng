@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <tuple>
 #include <utility>
 
 #include "revng/PipeboxCommon/Common.h"
@@ -26,6 +27,15 @@ inline PipeOutput runPipe(T &Pipe,
   using Traits = PipeRunTraits<T>;
   revng_assert(Incoming.size() == Traits::ContainerCount);
   revng_assert(Outgoing.size() == Traits::ContainerCount);
+
+  // Containers that hold data derived from the model, such as types, update
+  // it from this run's model before anything reads them
+  std::apply([&](auto &...Container) {
+    ([&](auto &C) {
+      if constexpr (requires { C.prepareFor(TheModel); })
+        C.prepareFor(TheModel);
+    }(Container), ...);
+  }, Containers);
 
   using CT = Traits::ContainerTypes;
   return compile_time::callWithIndexSequence<CT>([&]<size_t... I>() {

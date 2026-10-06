@@ -13,7 +13,10 @@
 
 #include "revng/Clift/Clift.h"
 #include "revng/Clift/CliftDialect.h"
+#include "revng/Clift/CliftTypes.h"
+#include "revng/CliftImportModel/ImportModel.h"
 #include "revng/PipeboxCommon/Common.h"
+#include "revng/PipeboxCommon/Model.h"
 #include "revng/PipeboxCommon/ObjectID.h"
 
 namespace revng::pypeline {
@@ -41,7 +44,13 @@ public:
 
   void
   deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
-    const mlir::ParserConfig Config(Context.get());
+    deserialize(Data, /*Verify=*/true);
+  }
+
+protected:
+  void deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data,
+                   bool Verify) {
+    const mlir::ParserConfig Config(Context.get(), Verify);
     for (auto const &[Object, Buffer] : Data) {
       revng_assert(Object->kind() == Kind);
       llvm::StringRef String(Buffer.data(), Buffer.size());
@@ -52,6 +61,7 @@ public:
     }
   }
 
+public:
   std::map<ObjectID, Buffer>
   serialize(const std::vector<const ObjectID *> Objects) const {
     std::map<ObjectID, Buffer> Result;
@@ -92,15 +102,50 @@ public:
     revng_assert(&*Context == NewModule->getContext());
     Modules[ID] = std::move(NewModule);
   }
+
+protected:
+  std::vector<mlir::ModuleOp> modules() const {
+    std::vector<mlir::ModuleOp> Result;
+    for (const auto &[_, Module] : Modules)
+      Result.push_back(*Module);
+    return Result;
+  }
 };
 
 } // namespace detail
 
+/// Function modules share their context, and with it the definitions of the
+/// model's types: a function's bytecode names a model type by its handle
+/// alone, and `prepareFor` defines the types the modules reach from the model
+/// of the run, before any pipe uses them.
 class CliftFunctionContainer
   : public detail::CliftMultiObjectContainerBase<Kinds::Function> {
+  using Base = detail::CliftMultiObjectContainerBase<Kinds::Function>;
+
 public:
   static constexpr llvm::StringRef Name = "CliftFunctionContainer";
   static constexpr llvm::StringRef Compression = "zstd;level=3";
+
+  /// Modules are not verified on reading: until `prepareFor` defines their
+  /// model types they reach incomplete class types, which a Clift module
+  /// cannot contain
+  void
+  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+    Base::deserialize(Data, /*Verify=*/false);
+  }
+
+  std::map<ObjectID, Buffer>
+  serialize(const std::vector<const ObjectID *> Objects) const {
+    clift::OmittedClassDefinitions Omitted(clift::isModelTypeHandle);
+    return Base::serialize(Objects);
+  }
+
+  void prepareFor(const Model &TheModel) {
+    const model::Binary &Binary = *TheModel.get().get();
+    std::vector<mlir::ModuleOp> Modules = modules();
+    revng_check(clift::importIncompleteModelTypes(Modules, Binary).succeeded());
+    clift::importModelTypeNames(Modules, Binary);
+  }
 };
 
 class CliftSingleTypeContainer

@@ -2,10 +2,16 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <functional>
+#include <set>
+#include <string>
+
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include "mlir/IR/SubElementInterfaces.h"
 #include "mlir/IR/BuiltinOps.h"
 
 #include "revng/ADT/RecursiveCoroutine.h"
@@ -873,4 +879,87 @@ clift::StructType clift::makeOpaqueStruct(mlir::MLIRContext *Context,
   Def.getMutableName().setValue(UnconfiguredNB.opaqueTypeName(ByteSize));
 
   return clift::StructType::get(Def);
+}
+
+/// The model type definition \p Handle names: a type definition, or the raw
+/// function whose register set an artificial struct is
+static const model::TypeDefinition *
+getModelTypeDefinition(llvm::StringRef Handle, const model::Binary &Model) {
+  auto Find = [&](const auto &Location) -> const model::TypeDefinition * {
+    auto It = Model.TypeDefinitions().find(Location.back());
+    return It == Model.TypeDefinitions().end() ? nullptr : It->get();
+  };
+
+  if (auto L = pipeline::locationFromString(revng::ranks::TypeDefinition,
+                                            Handle))
+    return Find(*L);
+  if (auto L = pipeline::locationFromString(revng::ranks::ArtificialStruct,
+                                            Handle))
+    return Find(*L);
+  return nullptr;
+}
+
+bool clift::isModelTypeHandle(llvm::StringRef Handle) {
+  return pipeline::locationFromString(revng::ranks::TypeDefinition, Handle)
+         or pipeline::locationFromString(revng::ranks::ArtificialStruct,
+                                         Handle);
+}
+
+mlir::LogicalResult
+clift::importIncompleteModelTypes(llvm::ArrayRef<mlir::ModuleOp> Modules,
+                                  const model::Binary &Model) {
+  if (Modules.empty())
+    return mlir::success();
+
+  // Collect the incomplete class types the modules reach. A complete class
+  // type's definition reaches only complete types, since importing a type
+  // defines everything it reaches, so the walk stops there; one walk covers
+  // every module, so shared types are visited once.
+  std::set<std::string> Incomplete;
+  llvm::DenseSet<mlir::Type> VisitedTypes;
+  llvm::DenseSet<mlir::Attribute> VisitedAttributes;
+  std::function<void(mlir::Attribute)> VisitAttribute;
+  std::function<void(mlir::Type)> VisitType = [&](mlir::Type Type) {
+    if (not VisitedTypes.insert(Type).second)
+      return;
+    if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
+      if (not Class.isComplete())
+        Incomplete.insert(mlir::cast<clift::DefinedType>(Type)
+                            .getHandle()
+                            .str());
+      return;
+    }
+    if (auto T = mlir::dyn_cast<mlir::SubElementTypeInterface>(Type))
+      T.walkImmediateSubElements(VisitAttribute, VisitType);
+  };
+  VisitAttribute = [&](mlir::Attribute Attribute) {
+    if (not VisitedAttributes.insert(Attribute).second)
+      return;
+    if (auto A = mlir::dyn_cast<mlir::SubElementAttrInterface>(Attribute))
+      A.walkImmediateSubElements(VisitAttribute, VisitType);
+  };
+
+  for (mlir::ModuleOp Module : Modules) {
+    Module->walk([&](mlir::Operation *Op) {
+      for (mlir::Type Type : Op->getResultTypes())
+        VisitType(Type);
+      VisitAttribute(Op->getAttrDictionary());
+      for (mlir::Region &Region : Op->getRegions())
+        for (mlir::Block &Block : Region)
+          for (mlir::BlockArgument Argument : Block.getArguments())
+            VisitType(Argument.getType());
+    });
+  }
+
+  mlir::ModuleOp First = Modules.front();
+  mlir::MLIRContext *Context = First.getContext();
+  for (const std::string &Handle : Incomplete) {
+    const model::TypeDefinition *Definition = getModelTypeDefinition(Handle,
+                                                                     Model);
+    if (Definition == nullptr or not importType(Context, *Definition))
+      return First->emitError() << "Cannot define class type '" << Handle
+                                << "' from the model";
+  }
+
+  return mlir::success();
 }
