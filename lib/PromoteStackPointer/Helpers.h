@@ -14,6 +14,10 @@ inline MetaAddress getCallerBlockAddress(llvm::Instruction *I) {
   return MaybeLocation->parent().back().start();
 }
 
+/// The call a stack-size marker belongs to, or nullptr if the optimizer
+/// deleted it, for example because it called through an undefined register.
+/// The call is in the marker's caller block: the first call found past it
+/// that belongs to another caller block is someone else's.
 inline llvm::CallInst *findAssociatedCall(llvm::CallInst *SSACSCall) {
   using namespace llvm;
 
@@ -22,7 +26,8 @@ inline llvm::CallInst *findAssociatedCall(llvm::CallInst *SSACSCall) {
   while (I != SSACSCall) {
     if (auto *Call = getCallToIsolatedFunction(I)) {
       MetaAddress SSACSBlockAddress = getCallerBlockAddress(SSACSCall);
-      revng_assert(getCallerBlockAddress(I) == SSACSBlockAddress);
+      if (getCallerBlockAddress(I) != SSACSBlockAddress)
+        return nullptr;
       return Call;
     } else if (I->isTerminator()) {
       if (I->getNumSuccessors() != 1)
