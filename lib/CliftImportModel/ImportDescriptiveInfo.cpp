@@ -759,10 +759,11 @@ public:
 } // namespace
 
 void clift::importDescriptiveInfo(const model::Binary &Model,
-                                  mlir::ModuleOp Module) {
+                                  mlir::ModuleOp Module,
+                                  bool DirectTypesOnly) {
   SymbolRenamer Symbols;
 
-  auto R = Importer::visit(Module, Model, Symbols);
+  auto R = Importer::visit(Module, Model, Symbols, DirectTypesOnly);
   revng_assert(R.succeeded());
 
   Symbols.apply(Module);
@@ -823,20 +824,17 @@ void clift::importDescriptiveInfo(const model::Function &Function,
 
   SymbolRenamer Symbols;
 
-  // The container names every type its modules reach; here only the types
-  // this function references are named, which also records the reads its C
-  // depends on
-  auto R = Importer::visit(CliftFunction, Model, Symbols, true);
+  auto R = Importer::visit(CliftFunction, Model, Symbols);
   revng_assert(R.succeeded());
 
   for (mlir::Operation &Op : Module.getBody()->getOperations()) {
     if (auto F = mlir::dyn_cast<clift::FunctionOp>(Op)) {
       if (getMetaAddress(F).isInvalid()) {
-        auto R = Importer::visit(F, Model, Symbols, true);
+        auto R = Importer::visit(F, Model, Symbols);
         revng_assert(R.succeeded());
       }
     } else if (auto G = mlir::dyn_cast<clift::GlobalVariableOp>(Op)) {
-      auto R = Importer::visit(G, Model, Symbols, true);
+      auto R = Importer::visit(G, Model, Symbols);
       revng_assert(R.succeeded());
     }
   }

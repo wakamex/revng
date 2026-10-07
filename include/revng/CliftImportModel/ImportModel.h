@@ -86,13 +86,21 @@ void importAllModelFunctionDeclarations(const model::Binary &Model,
 void importAllModelSegmentDeclarations(const model::Binary &Model,
                                        mlir::ModuleOp Module);
 
-void importDescriptiveInfo(const model::Binary &Model, mlir::ModuleOp Module);
+/// Name the operations and types of \p Module from \p Model. With
+/// \p DirectTypesOnly, the walk names the class types \p Module references and
+/// their fields, but does not descend into the fields' types: a module whose
+/// types were named by importModelTypeNames needs only the names its own C
+/// depends on.
+void importDescriptiveInfo(const model::Binary &Model,
+                           mlir::ModuleOp Module,
+                           bool DirectTypesOnly = false);
 
-// NOTE: this overload can be dropped together with the old pipeline.
 /// Name, from \p Model, every type \p Modules reach. All of \p Modules share
 /// one context, and the names live in that context's type definitions.
 void importModelTypeNames(llvm::ArrayRef<mlir::ModuleOp> Modules,
                           const model::Binary &Model);
+
+// NOTE: this overload can be dropped together with the old pipeline.
 
 void importDescriptiveInfo(const model::Function &Function,
                            const model::Binary &Model,

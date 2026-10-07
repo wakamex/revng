@@ -98,7 +98,10 @@ public:
 
   mlir::LogicalResult mutate(mlir::StorageUniquer::StorageAllocator &Allocator,
                              llvm::StringRef Value) {
-    TheKey.Value = Allocator.copyInto(Value);
+    // Every copy stays allocated until the context is destroyed, so do not
+    // copy a value that is already set
+    if (TheKey.Value != Value)
+      TheKey.Value = Allocator.copyInto(Value);
     return mlir::success();
   }
 
