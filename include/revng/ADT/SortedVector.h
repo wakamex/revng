@@ -330,9 +330,10 @@ public:
   class BatchInserterBase {
   private:
     SortedVector *SV = nullptr;
+    size_t SortedSize = 0;
 
   public:
-    BatchInserterBase(SortedVector &SV) : SV(&SV) {
+    BatchInserterBase(SortedVector &SV) : SV(&SV), SortedSize(SV.size()) {
       revng_assert(not SV.BatchInsertInProgress);
       SV.BatchInsertInProgress = true;
     }
@@ -342,11 +343,13 @@ public:
 
     BatchInserterBase(BatchInserterBase &&Other) {
       SV = Other.SV;
+      SortedSize = Other.SortedSize;
       Other.SV = nullptr;
     }
 
     BatchInserterBase &operator=(BatchInserterBase &&Other) {
       SV = Other.SV;
+      SortedSize = Other.SortedSize;
       Other.SV = nullptr;
     }
 
@@ -355,7 +358,7 @@ public:
     void commit() {
       if (SV != nullptr && SV->BatchInsertInProgress) {
         SV->BatchInsertInProgress = false;
-        SV->sort<EnsureUnique>();
+        SV->sort<EnsureUnique>(SortedSize);
       }
     }
 
@@ -439,15 +442,38 @@ private:
     return not compareKeys(LHS, RHS) and not compareKeys(RHS, LHS);
   }
 
+  /// Sort the vector, whose first \p SortedSize elements are already sorted
+  /// and unique.
+  ///
+  /// Only the elements after the sorted prefix are sorted, then merged into
+  /// it, so adding a few elements to a large vector costs linear time at most,
+  /// and less when the new elements all come after the prefix.
   template<bool EnsureUnique>
-  void sort() {
+  void sort(size_t SortedSize = 0) {
+    auto Middle = begin() + SortedSize;
+    if (Middle == end())
+      return;
+
+    if constexpr (EnsureUnique)
+      std::sort(Middle, end(), compareElements);
+    else
+      std::stable_sort(Middle, end(), compareElements);
+
+    // Equal elements keep their order: the sorted prefix's first, then the new
+    // ones in insertion order
+    auto First = begin();
+    if (Middle != begin()) {
+      if (compareElements(*std::prev(Middle), *Middle))
+        First = std::prev(Middle);
+      else
+        std::inplace_merge(begin(), Middle, end(), compareElements);
+    }
+
     if constexpr (EnsureUnique) {
-      std::sort(begin(), end(), compareElements);
-      revng_check(std::adjacent_find(begin(), end(), elementsEqual) == end(),
+      revng_check(std::adjacent_find(First, end(), elementsEqual) == end(),
                   "Multiples of the same element in a `SortedVector`.");
     } else {
-      std::stable_sort(begin(), end(), compareElements);
-      auto NewEnd = unique_last(begin(), end(), elementsEqual);
+      auto NewEnd = unique_last(First, end(), elementsEqual);
       TheVector.erase(NewEnd, end());
     }
   }
