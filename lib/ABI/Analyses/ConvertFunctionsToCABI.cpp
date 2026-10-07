@@ -2,6 +2,8 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
+
 #include "revng/ABI/Analyses/ConvertFunctionsToCABI.h"
 #include "revng/ABI/FunctionType/Conversion.h"
 #include "revng/ABI/FunctionType/Support.h"
@@ -230,7 +232,11 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
     }
   };
 
-  // And convert them.
+  // And convert them. Each conversion adds the new definition; the references
+  // to the old ones are replaced afterwards in one pass over the model, since
+  // a pass per function costs as much as the model has references.
+  std::map<model::TypeDefinition::Key, model::TypeDefinitionReference>
+    Replacements;
   for (model::RawFunctionDefinition *Old : ToConvert) {
     LogFunctionName(Old->key());
 
@@ -243,9 +249,11 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
     }
 
     namespace FT = abi::FunctionType;
-    if (auto New = FT::tryConvertToCABI(*Old, Model, ABI, SoftDeductions)) {
+    if (auto New = FT::tryMakeCABIFunction(*Old, Model, ABI, SoftDeductions)) {
       // If the conversion succeeds, make sure the returned type is valid,
       revng_assert(!New->isEmpty());
+      const auto &Defined = llvm::cast<model::DefinedType>(**New);
+      Replacements.emplace(Old->key(), Defined.Definition());
 
       // and verifies
       if (VerifyLog.isEnabled())
@@ -259,6 +267,16 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
       revng_log(Log, "Function Conversion Failed.");
     }
   }
+
+  using Reference = model::TypeDefinitionReference;
+  Model.remapReferences<Reference>([&](const Reference &R) -> const Reference * {
+    if (R.empty())
+      return nullptr;
+    auto It = Replacements.find(R.getConst()->key());
+    return It == Replacements.end() ? nullptr : &It->second;
+  });
+  for (const auto &[OldKey, _] : Replacements)
+    Model->TypeDefinitions().erase(OldKey);
 
   // Don't forget to clean up any possible remainders of removed types.
   purgeUnnamedAndUnreachableTypes(Model);

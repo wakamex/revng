@@ -154,10 +154,10 @@ private:
 };
 
 std::optional<model::UpcastableType>
-tryConvertToCABI(const model::RawFunctionDefinition &FunctionType,
-                 TupleTree<model::Binary> &Binary,
-                 std::optional<model::ABI::Values> MaybeABI,
-                 bool UseSoftRegisterStateDeductions) {
+tryMakeCABIFunction(const model::RawFunctionDefinition &FunctionType,
+                    TupleTree<model::Binary> &Binary,
+                    std::optional<model::ABI::Values> MaybeABI,
+                    bool UseSoftRegisterStateDeductions) {
   if (!MaybeABI.has_value())
     MaybeABI = Binary->DefaultABI();
 
@@ -213,14 +213,30 @@ tryConvertToCABI(const model::RawFunctionDefinition &FunctionType,
     }
   }
 
+  return std::move(Type);
+}
+
+std::optional<model::UpcastableType>
+tryConvertToCABI(const model::RawFunctionDefinition &FunctionType,
+                 TupleTree<model::Binary> &Binary,
+                 std::optional<model::ABI::Values> MaybeABI,
+                 bool UseSoftRegisterStateDeductions) {
+  auto Type = tryMakeCABIFunction(FunctionType,
+                                  Binary,
+                                  MaybeABI,
+                                  UseSoftRegisterStateDeductions);
+  if (not Type)
+    return std::nullopt;
+
   // To finish up the conversion, remove all the references to the old type by
   // carefully replacing them with references to the new one.
-  replaceTypeDefinition(FunctionType.key(), *Type, Binary);
+  model::TypeDefinition::Key Old = FunctionType.key();
+  replaceTypeDefinition(Old, **Type, Binary);
 
   // And don't forget to remove the old type.
-  Binary->TypeDefinitions().erase(FunctionType.key());
+  Binary->TypeDefinitions().erase(Old);
 
-  return std::move(Type);
+  return Type;
 }
 
 using TCC = ToCABIConverter;

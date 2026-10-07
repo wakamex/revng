@@ -21,4 +21,13 @@ tryConvertToCABI(const model::RawFunctionDefinition &Function,
                  std::optional<model::ABI::Values> ABI = std::nullopt,
                  bool UseSoftRegisterStateDeductions = true);
 
+/// Like `tryConvertToCABI`, but leave \p Function and the references to it in
+/// place: the caller replaces them, for example for many functions in one
+/// pass over the model, and erases \p Function afterwards.
+std::optional<model::UpcastableType>
+tryMakeCABIFunction(const model::RawFunctionDefinition &Function,
+                    TupleTree<model::Binary> &Binary,
+                    std::optional<model::ABI::Values> ABI = std::nullopt,
+                    bool UseSoftRegisterStateDeductions = true);
+
 } // namespace abi::FunctionType

@@ -150,6 +150,21 @@ public:
     disableReferenceCaching();
   }
 
+  /// Replace every reference of type `TTR` for which \p Remap returns a
+  /// reference with that reference, visiting the tree once
+  template<StrictSpecializationOf<TupleTreeReference> TTR, typename RemapType>
+    requires std::is_invocable_r_v<const TTR *, RemapType, const TTR &>
+  void remapReferences(RemapType &&Remap) {
+    auto Visitor = [&Remap]<typename TTRA>(TTRA &Reference) {
+      if constexpr (std::is_same_v<TTR, TTRA>) {
+        if (const TTR *NewReference = Remap(std::as_const(Reference)))
+          Reference = *NewReference;
+      }
+    };
+    visitReferencesInternal(Visitor);
+    disableReferenceCaching();
+  }
+
   template<StrictSpecializationOf<TupleTreeReference> TTR,
            std::predicate<const TTR &> PredicateType>
   void replaceReferencesIf(const TTR &NewReference, PredicateType &&Predicate) {
