@@ -127,6 +127,11 @@ class ClifterImpl final : public Clifter {
   const model::Binary &Model;
   mlir::OpBuilder Builder;
 
+  // One per clifted function: the prototype, call sites, stack frame,
+  // variables and segments of a function reach the same types, and each is
+  // walked once
+  clift::ModelTypeImporter ModelTypes;
+
   const llvm::DataLayout *DataLayout;
 
   /* Per-module mappings - persisted between imported functions */
@@ -153,6 +158,7 @@ public:
     CurrentModule(Module),
     Model(Model),
     Builder(Context),
+    ModelTypes(Context),
     DataLayout(nullptr) {
     revng_assert(clift::isCliftModule(Module));
     Builder.setInsertionPointToEnd(Module.getBody());
@@ -264,7 +270,7 @@ private:
 
   template<typename TypeT, typename ModelTypeT>
   TypeT importType(const ModelTypeT &Type) {
-    return mlir::cast<TypeT>(clift::importType(Context, Type));
+    return mlir::cast<TypeT>(ModelTypes.importType(Type));
   }
 
   //===------------------------- LLVM type import -------------------------===//
@@ -606,7 +612,7 @@ private:
     const model::Segment *Segment = Model.getSegmentFor(MA).first;
     revng_check(Segment != nullptr);
 
-    auto VariableType = clift::importType(Context, *Segment->Type());
+    auto VariableType = ModelTypes.importType(*Segment->Type());
     auto Handle = pipeline::locationString(revng::ranks::Segment,
                                            Segment->key());
 

@@ -693,6 +693,33 @@ mlir::Type clift::importType(mlir::MLIRContext *Context,
   return CliftConverter(Context, EmitError).convertType(ModelType);
 }
 
+struct clift::ModelTypeImporter::Impl {
+  std::function<mlir::InFlightDiagnostic()> EmitError;
+  CliftConverter Converter;
+
+  explicit Impl(mlir::MLIRContext *Context) :
+    EmitError([Context]() -> mlir::InFlightDiagnostic {
+      return Context->getDiagEngine().emit(mlir::UnknownLoc::get(Context),
+                                           mlir::DiagnosticSeverity::Error);
+    }),
+    Converter(Context, EmitError) {}
+};
+
+clift::ModelTypeImporter::ModelTypeImporter(mlir::MLIRContext *Context) :
+  TheImpl(std::make_unique<Impl>(Context)) {
+}
+
+clift::ModelTypeImporter::~ModelTypeImporter() = default;
+
+mlir::Type
+clift::ModelTypeImporter::importType(const model::TypeDefinition &ModelType) {
+  return TheImpl->Converter.convertTypeDefinition(ModelType);
+}
+
+mlir::Type clift::ModelTypeImporter::importType(const model::Type &ModelType) {
+  return TheImpl->Converter.convertType(ModelType);
+}
+
 using AttributeSet = MutableSet<model::FunctionAttribute::Values>;
 clift::FunctionOp
 clift::importFunctionDeclaration(mlir::ModuleOp Module,

@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <memory>
 #include <optional>
 
 #include "llvm/ADT/ArrayRef.h"
@@ -37,6 +38,26 @@ mlir::Type importType(llvm::function_ref<mlir::InFlightDiagnostic()> EmitError,
                       mlir::MLIRContext *Context,
                       const model::Type &ModelType);
 mlir::Type importType(mlir::MLIRContext *Context, const model::Type &ModelType);
+
+/// Imports model types into \p Context, keeping what it has imported: every
+/// import after the first of a type returns it without walking the types it
+/// reaches again. Use one for a group of imports whose reads of the model are
+/// recorded together, such as those of one function.
+class ModelTypeImporter {
+public:
+  explicit ModelTypeImporter(mlir::MLIRContext *Context);
+  ~ModelTypeImporter();
+
+  ModelTypeImporter(const ModelTypeImporter &) = delete;
+  ModelTypeImporter &operator=(const ModelTypeImporter &) = delete;
+
+  mlir::Type importType(const model::TypeDefinition &ModelType);
+  mlir::Type importType(const model::Type &ModelType);
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> TheImpl;
+};
 
 /// Convert the specified model function into a clift function declaration.
 ///
