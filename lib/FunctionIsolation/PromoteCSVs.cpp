@@ -358,6 +358,18 @@ void PromoteCSVs::promoteCSVs(Function *F) {
 
       CSVForInitializer[Initializer] = CSV;
       InitializerForCSV[CSV] = Initializer;
+    } else if (CSVName == "_fs_base" or CSVName == "_gs_base") {
+      // The fs and gs bases hold the thread pointer, which the process sets
+      // and every function reads: an opaque value, like a register's on
+      // entry. The static initializer, 0, would make every thread-local
+      // access an access to an absolute address.
+      llvm::StringRef Prefix = Configuration.OpaqueCSVValuePrefix();
+      auto *Initializer = CSVInitializers.get(CSVName,
+                                              CSVType,
+                                              {},
+                                              Prefix + CSVName);
+      CSVForInitializer[Initializer] = CSV;
+      InitializerForCSV[CSV] = Initializer;
     }
   }
 
