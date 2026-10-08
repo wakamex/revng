@@ -110,8 +110,10 @@ AnalysisKey IntegerAddressAA::Key;
 
 } // namespace
 
-static int64_t getSCEVConstantSExtVal(const SCEV *S) {
-  return cast<SCEVConstant>(S)->getAPInt().getSExtValue();
+/// The value of a constant SCEV, or std::nullopt if it does not fit in 64 bits,
+/// as with 128-bit integers
+static std::optional<int64_t> getSCEVConstantSExtVal(const SCEV *S) {
+  return cast<SCEVConstant>(S)->getAPInt().trySExtValue();
 }
 
 class DLATypeSystemLLVMBuilder::InstanceLinkAdder {
@@ -227,11 +229,12 @@ protected:
 
       auto StrideValue = getSCEVConstantSExtVal(StrideExpr);
 
-      // Don't add links for recurring expressions with non-positive strides.
-      if (StrideValue <= 0LL)
+      // Don't add links for recurring expressions with non-positive strides,
+      // or with strides that no layout can have.
+      if (not StrideValue or *StrideValue <= 0LL)
         return Created;
 
-      OE.Strides.push_back(StrideValue);
+      OE.Strides.push_back(*StrideValue);
       const Loop *L = Rec->getLoop();
       revng_assert(L != nullptr);
       std::optional<int64_t> TripCount;
@@ -256,11 +259,13 @@ protected:
             // This number is the trip count of the loop, which in
             // loop-simplified form is SCEVBackedgeCount + 1, because in
             // loop-simplified form we only have one back edge.
-            TripCount = Count->getAPInt().getSExtValue() + 1;
+            if (auto BackedgeCount = Count->getAPInt().trySExtValue();
+                BackedgeCount and *BackedgeCount < INT64_MAX)
+              TripCount = *BackedgeCount + 1;
           } else if (PDT.dominates(L->getHeader(), &B)) {
             // If the loop header postdominates B, B is executed the same
             // number of times as the only backedge
-            TripCount = Count->getAPInt().getSExtValue();
+            TripCount = Count->getAPInt().trySExtValue();
           } // In all the other cases we know nothing
         }
       } else {
@@ -299,10 +304,12 @@ protected:
     if (not isa<SCEVConstant>(OffsetSCEV))
       return Created;
 
-    // Don't add links for instances at negative offsets.
-    OE.Offset = getSCEVConstantSExtVal(OffsetSCEV);
-    if (OE.Offset < 0LL)
+    // Don't add links for instances at negative offsets, or at offsets that no
+    // layout can have.
+    auto Offset = getSCEVConstantSExtVal(OffsetSCEV);
+    if (not Offset or *Offset < 0LL)
       return Created;
+    OE.Offset = *Offset;
 
     Created |= Builder.TS.addInstanceLink(Src, Tgt, std::move(OE)).second;
     return Created;
