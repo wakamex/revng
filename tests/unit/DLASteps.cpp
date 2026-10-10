@@ -3820,3 +3820,62 @@ BOOST_AUTO_TEST_CASE(StaticFunctionPointersRequireProtectedUniqueRelocations) {
     }
   }
 }
+
+BOOST_AUTO_TEST_CASE(SimplifyInstanceAtOffset0KeepsTheNodeWithMoreLinks) {
+  // Root and Middle each contain only the next node at offset 0. Leaf is
+  // pointed to from four other types, so it keeps its links and absorbs its
+  // containers, which yields the same single node.
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 8);
+  auto *Middle = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Leaf = addInstanceAtOffset(TS, Middle, 0, 8);
+  llvm::SmallVector<LTSN *> Pointers;
+  for (int I = 0; I < 4; ++I) {
+    Pointers.push_back(createRoot(TS, 8));
+    TS.addPointerLink(Pointers.back(), Leaf);
+  }
+  unsigned RootID = Root->ID;
+  unsigned MiddleID = Middle->ID;
+  unsigned LeafID = Leaf->ID;
+
+  BOOST_CHECK(SimplifyInstanceAtOffset0().runOnTypeSystem(TS));
+
+  BOOST_CHECK(TS.verifyConsistency());
+  const auto &EqClasses = TS.getEqClasses();
+  BOOST_CHECK(EqClasses.haveSameEqClass(RootID, LeafID));
+  BOOST_CHECK(EqClasses.haveSameEqClass(MiddleID, LeafID));
+  BOOST_CHECK_EQUAL(Leaf->Size, 8U);
+  BOOST_CHECK(Leaf->Successors.empty());
+  BOOST_CHECK_EQUAL(Leaf->Predecessors.size(), 4U);
+  for (auto *Pointer : Pointers) {
+    BOOST_REQUIRE_EQUAL(Pointer->Successors.size(), 1U);
+    BOOST_CHECK(Pointer->Successors.begin()->first == Leaf);
+  }
+}
+
+BOOST_AUTO_TEST_CASE(SimplifyInstanceAtOffset0ResumesAfterTheMergedChild) {
+  // Root contains A and C at offset 0, each with Root as its only predecessor.
+  // A has three fields of its own, so it has more links than Root: A stays and
+  // Root goes away. C must still be visited afterwards and collapsed into the
+  // merged node, as when Root stays.
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 16);
+  auto *A = addInstanceAtOffset(TS, Root, 0, 16);
+  auto *C = addInstanceAtOffset(TS, Root, 0, 16);
+  llvm::SmallVector<LTSN *> Fields;
+  for (unsigned Offset : { 4U, 8U, 12U })
+    Fields.push_back(addInstanceAtOffset(TS, A, Offset, 4));
+  unsigned RootID = Root->ID;
+  unsigned CID = C->ID;
+
+  BOOST_CHECK(SimplifyInstanceAtOffset0().runOnTypeSystem(TS));
+
+  BOOST_CHECK(TS.verifyConsistency());
+  const auto &EqClasses = TS.getEqClasses();
+  BOOST_CHECK(EqClasses.haveSameEqClass(RootID, A->ID));
+  BOOST_CHECK(EqClasses.haveSameEqClass(CID, A->ID));
+  BOOST_CHECK_EQUAL(A->Size, 16U);
+  BOOST_CHECK_EQUAL(A->Successors.size(), 3U);
+  for (auto *Field : Fields)
+    BOOST_CHECK_EQUAL(countInstanceEdges(A, Field), 1U);
+}

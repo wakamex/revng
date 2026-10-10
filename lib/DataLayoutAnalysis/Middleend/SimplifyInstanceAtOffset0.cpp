@@ -2,7 +2,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <algorithm>
 #include <iostream>
+#include <optional>
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DepthFirstIterator.h"
@@ -33,6 +35,7 @@ using CPointerT = EdgeFilteredGraph<const dla::LayoutTypeSystemNode *,
                                     dla::isPointerEdge>;
 
 static Logger Log{ "dla-simplify-instance-off0" };
+static Logger StatsLog{ "dla-simplify-instance-off0-stats" };
 
 namespace dla {
 
@@ -187,6 +190,22 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
   bool Changed = false;
 
   uint64_t I = 0;
+  uint64_t Merges = 0;
+  uint64_t MovedLinks = 0;
+  uint64_t ChildLinks = 0;
+
+  using Key = std::pair<uint64_t, const TypeLinkTag *>;
+  const auto Degree = [](const LayoutTypeSystemNode *N) {
+    return N->Successors.size() + N->Predecessors.size();
+  };
+  // The first instance-at-offset-0 child of Current at or after From
+  const auto NextChild = [](LayoutTypeSystemNode *Current,
+                            LayoutTypeSystemNode::NeighborIterator From) {
+    auto End = Current->Successors.end();
+    return std::find_if(From, End, [](const auto &Link) {
+      return isInstanceOff0(Link);
+    });
+  };
 
   revng_log(Log, "Process Nodes:");
   LoggerIndent Indent(Log);
@@ -202,18 +221,34 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
 
     // For each instance children of Node at offset 0, compute if it can be
     // collapsed into Node, and if it's possible collapse it.
-    for (LayoutTypeSystemNode *Child :
-         llvm::make_early_inc_range(llvm::children<InstanceZeroT>(Node))) {
+    //
+    // Merging two nodes moves every link of the node that goes away, so the
+    // node with fewer links goes away and the other one stays as the merged
+    // node. Otherwise a node with many links at offset 0 of a chain of
+    // containers has its links moved again for each container. The merged
+    // node is the same either way, except for its ID. After a merge the loop
+    // resumes with the next child it would have visited, looked up by its key,
+    // which does not depend on which node stayed.
+    LayoutTypeSystemNode *Current = Node;
+    auto It = NextChild(Current, Current->Successors.begin());
+    while (It != Current->Successors.end()) {
+      LayoutTypeSystemNode *Child = It->first;
+      auto Next = NextChild(Current, std::next(It));
 
       revng_log(Log, "Child: " << Child->ID);
       LoggerIndent ChildIndent(Log);
 
-      if (not canBeCollapsed(RC, Node, Child)) {
+      if (not canBeCollapsed(RC, Current, Child)) {
         revng_log(Log, "NOT canBeCollapsed()");
+        It = Next;
         continue;
       }
 
       revng_log(Log, "canBeCollapsed()");
+
+      std::optional<Key> NextKey;
+      if (Next != Current->Successors.end())
+        NextKey = Key{ Next->first->ID, Next->second };
 
       auto IDToCollapse = Child->ID;
       if (Log.isEnabled()) {
@@ -223,7 +258,16 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
                          true);
       }
 
-      TS.mergeNodes({ Node, Child });
+      ++Merges;
+      ChildLinks += Degree(Child);
+      if (Degree(Child) > Degree(Current)) {
+        MovedLinks += Degree(Current);
+        TS.mergeNodes({ Child, Current });
+        Current = Child;
+      } else {
+        MovedLinks += Degree(Child);
+        TS.mergeNodes({ Current, Child });
+      }
       Changed = true;
 
       if (Log.isEnabled()) {
@@ -234,10 +278,19 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
         ++I;
         revng_assert(TS.verifyInstanceDAG());
       }
+
+      if (not NextKey)
+        break;
+      It = NextChild(Current, Current->Successors.lower_bound(*NextKey));
     }
   }
 
   TS.removeNode(FakeRoot);
+
+  revng_log(StatsLog,
+            Merges << " merges moved " << MovedLinks
+                   << " links; merging each child into its parent moves "
+                   << ChildLinks);
 
   if (Log.isEnabled())
     TS.dumpDotOnFile("after-SimplifyInstanceAtOffset0.dot", true);
