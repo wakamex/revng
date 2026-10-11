@@ -502,6 +502,7 @@ set(FILECHECK_TESTS
     segment-references/c-strings-outside-code.S
     lift/got-pointer-function.S
     lift/unwind-entry-after-call.S
+    lift/unwind-entry-after-call-pe.S
     lift/branch-to-copied-entry.S
     lift/gvec-equality.S
     lift/helper-abort-message.S

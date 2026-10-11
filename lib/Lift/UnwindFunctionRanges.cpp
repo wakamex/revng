@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <optional>
 
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/DebugInfo/DWARF/DWARFDataExtractor.h"
@@ -19,6 +20,7 @@
 #include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Object/COFF.h"
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/TargetSelect.h"
@@ -119,6 +121,78 @@ readEHFrame(const RawBinaryView &BinaryView,
   return Result;
 }
 
+/// Collect the ranges of the `RUNTIME_FUNCTION` entries in the exception
+/// directory (`.pdata`) of an x86-64 PE file, in the addresses of
+/// \p BinaryView. An entry whose unwind information chains to another entry
+/// describes a part of that entry's function, entered with its frame set up.
+static std::vector<std::tuple<uint64_t, uint64_t, bool>>
+readPData(const RawBinaryView &BinaryView, ArrayRef<uint8_t> File) {
+  std::vector<std::tuple<uint64_t, uint64_t, bool>> Result;
+
+  StringRef Buffer(reinterpret_cast<const char *>(File.data()), File.size());
+  auto MaybeObject = object::ObjectFile::createObjectFile({ Buffer, "" });
+  if (not MaybeObject) {
+    consumeError(MaybeObject.takeError());
+    return Result;
+  }
+
+  auto *COFF = dyn_cast<object::COFFObjectFile>(MaybeObject->get());
+  if (COFF == nullptr or COFF->getMachine() != COFF::IMAGE_FILE_MACHINE_AMD64)
+    return Result;
+
+  const object::data_directory *Directory = COFF->getDataDirectory(
+    COFF::EXCEPTION_TABLE);
+  if (Directory == nullptr or Directory->Size == 0)
+    return Result;
+
+  // File offset of the byte at RVA, if a section holds it
+  auto ToOffset = [&](uint32_t RVA) -> std::optional<uint64_t> {
+    uintptr_t Pointer = 0;
+    if (Error E = COFF->getRvaPtr(RVA, Pointer)) {
+      consumeError(std::move(E));
+      return std::nullopt;
+    }
+    return Pointer - reinterpret_cast<uintptr_t>(File.data());
+  };
+
+  auto DirectoryOffset = ToOffset(Directory->RelativeVirtualAddress);
+  if (not DirectoryOffset or *DirectoryOffset + Directory->Size > File.size())
+    return Result;
+
+  // The table holds addresses relative to the image base: rebase them on
+  // where the table lies in the binary as the model maps it
+  MetaAddress Mapped = BinaryView.offsetToAddress(*DirectoryOffset);
+  if (Mapped.isInvalid()) {
+    revng_log(Log, ".pdata is not mapped, ignoring it");
+    return Result;
+  }
+  uint64_t Bias = Mapped.address() - Directory->RelativeVirtualAddress;
+
+  using namespace llvm::support::endian;
+  const uint8_t UNW_FLAG_CHAININFO = 4;
+  const size_t EntrySize = 12;
+  for (uint64_t I = 0; I + EntrySize <= Directory->Size; I += EntrySize) {
+    const uint8_t *Entry = File.data() + *DirectoryOffset + I;
+    uint32_t Begin = read32le(Entry);
+    uint32_t End = read32le(Entry + 4);
+    uint32_t UnwindInfo = read32le(Entry + 8);
+    if (Begin == 0 or End <= Begin)
+      continue;
+
+    // The low bit set means the entry points to another entry instead
+    bool StartsMidFrame = (UnwindInfo & 1) != 0;
+    if (not StartsMidFrame) {
+      auto UnwindOffset = ToOffset(UnwindInfo);
+      if (UnwindOffset and *UnwindOffset < File.size())
+        StartsMidFrame = ((File[*UnwindOffset] >> 3) & UNW_FLAG_CHAININFO) != 0;
+    }
+
+    Result.emplace_back(Begin + Bias, End + Bias, StartsMidFrame);
+  }
+
+  return Result;
+}
+
 UnwindFunctionRanges::UnwindFunctionRanges(
   const RawBinaryView &BinaryView,
   ArrayRef<uint8_t> File,
@@ -128,6 +202,10 @@ UnwindFunctionRanges::UnwindFunctionRanges(
   for (auto [Start, End, StartsMidFrame] :
        readEHFrame(BinaryView, File, Architecture))
     Ranges.push_back({ Start, End, StartsMidFrame });
+
+  if (Ranges.empty() and Architecture == model::Architecture::x86_64)
+    for (auto [Start, End, StartsMidFrame] : readPData(BinaryView, File))
+      Ranges.push_back({ Start, End, StartsMidFrame });
 
   llvm::sort(Ranges, [](const Range &LHS, const Range &RHS) {
     return std::tie(LHS.Start, LHS.End) < std::tie(RHS.Start, RHS.End);

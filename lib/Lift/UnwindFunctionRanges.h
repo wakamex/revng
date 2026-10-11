@@ -29,8 +29,8 @@ class MCSubtargetInfo;
 } // namespace llvm
 
 /// The code ranges of the functions described by a binary's unwind
-/// information (`.eh_frame`), used to tell the entries of a jump table from the
-/// data that follows it.
+/// information (`.eh_frame`, or `.pdata` in an x86-64 PE file), used to tell
+/// the entries of a jump table from the data that follows it.
 ///
 /// A function the compiler split into a hot and one or more cold parts has one
 /// range per part. Each part other than the entry begins with the frame of the
