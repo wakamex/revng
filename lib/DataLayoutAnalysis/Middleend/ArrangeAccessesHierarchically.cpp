@@ -31,6 +31,8 @@
 #include "FieldSizeComputation.h"
 
 static Logger Log{ "sort-accesses-hierarchically" };
+// Check every answer of the field range index against a scan of the fields
+static Logger FieldRangeCheckLog{ "dla-check-field-ranges" };
 
 namespace dla {
 
@@ -219,12 +221,183 @@ static bool wouldCloseInstanceLoop(const LayoutTypeSystemNode *Parent,
   return false;
 }
 
+static bool isFieldInside(const LayoutTypeSystemNode *Outer,
+                          const LayoutTypeSystemNode::Link &L) {
+  const auto &[Field, Tag] = L;
+  if (not isInstanceEdge(L))
+    return false;
+  const auto &OE = Tag->getOffsetExpr();
+  return OE.Strides.empty() and OE.Offset <= Outer->Size
+         and Field->Size <= Outer->Size - OE.Offset;
+}
+
+/// Whether a field of \p Outer partially overlaps the bytes [Begin, End): the
+/// two ranges share bytes and neither contains the other
+static bool hasPartiallyOverlappingFieldScan(const LayoutTypeSystemNode *Outer,
+                                             uint64_t Begin,
+                                             uint64_t End) {
+  for (const auto &L : Outer->Successors) {
+    if (not isFieldInside(Outer, L))
+      continue;
+    uint64_t FieldBegin = L.second->getOffsetExpr().Offset;
+    uint64_t FieldEnd = FieldBegin + L.first->Size;
+    bool Overlaps = Begin < FieldEnd and FieldBegin < End;
+    bool Inside = Begin >= FieldBegin and End <= FieldEnd;
+    bool Contains = Begin <= FieldBegin and End >= FieldEnd;
+    if (Overlaps and not Inside and not Contains)
+      return true;
+  }
+  return false;
+}
+
+/// Answers hasPartiallyOverlappingFieldScan from an index of each node's field
+/// ranges. A type root can have more than a hundred thousand fields and as
+/// many parents, each of which asks about it for every pair of its own fields.
+///
+/// A field [B, E) partially overlaps [Begin, End) in one of two ways: it
+/// starts before Begin and ends inside (B < Begin < E < End), or it starts
+/// inside and ends after End (Begin < B < End < E). The first is a range
+/// minimum of B over the fields ordered by E, the second a range maximum of E
+/// over the fields ordered by B.
+///
+/// An entry describes a node's successors, their sizes and its own size, so
+/// whoever changes one of those calls invalidate.
+class FieldRangeIndex {
+private:
+  struct Entry {
+    // Sorted by begin, and a maximum segment tree of the ends in that order
+    std::vector<std::pair<uint64_t, uint64_t>> ByBegin;
+    std::vector<uint64_t> MaxEnd;
+    // (end, begin) sorted by end, and a minimum tree of the begins
+    std::vector<std::pair<uint64_t, uint64_t>> ByEnd;
+    std::vector<uint64_t> MinBegin;
+  };
+  llvm::DenseMap<const LayoutTypeSystemNode *, Entry> Entries;
+
+private:
+  template<typename Combine>
+  static std::vector<uint64_t>
+  build(const std::vector<std::pair<uint64_t, uint64_t>> &Sorted,
+        Combine &&C) {
+    size_t N = Sorted.size();
+    std::vector<uint64_t> Tree(2 * N);
+    for (size_t I = 0; I < N; ++I)
+      Tree[N + I] = Sorted[I].second;
+    for (size_t I = N; I-- > 1;)
+      Tree[I] = C(Tree[2 * I], Tree[2 * I + 1]);
+    return Tree;
+  }
+
+  /// Combine the leaves [From, To), which is not empty
+  template<typename Combine>
+  static uint64_t query(const std::vector<uint64_t> &Tree,
+                        size_t From,
+                        size_t To,
+                        Combine &&C) {
+    size_t N = Tree.size() / 2;
+    std::optional<uint64_t> Result;
+    auto Add = [&](uint64_t V) { Result = Result ? C(*Result, V) : V; };
+    for (From += N, To += N; From < To; From /= 2, To /= 2) {
+      if (From & 1)
+        Add(Tree[From++]);
+      if (To & 1)
+        Add(Tree[--To]);
+    }
+    return *Result;
+  }
+
+  const Entry &get(const LayoutTypeSystemNode *Outer) {
+    auto [It, New] = Entries.try_emplace(Outer);
+    Entry &E = It->second;
+    if (not New)
+      return E;
+
+    for (const auto &L : Outer->Successors) {
+      if (not isFieldInside(Outer, L))
+        continue;
+      uint64_t Begin = L.second->getOffsetExpr().Offset;
+      E.ByBegin.emplace_back(Begin, Begin + L.first->Size);
+    }
+    llvm::sort(E.ByBegin);
+    E.ByBegin.erase(std::unique(E.ByBegin.begin(), E.ByBegin.end()),
+                    E.ByBegin.end());
+    for (const auto &[Begin, End] : E.ByBegin)
+      E.ByEnd.emplace_back(End, Begin);
+    llvm::sort(E.ByEnd);
+    auto Max = [](uint64_t A, uint64_t B) { return std::max(A, B); };
+    auto Min = [](uint64_t A, uint64_t B) { return std::min(A, B); };
+    E.MaxEnd = build(E.ByBegin, Max);
+    E.MinBegin = build(E.ByEnd, Min);
+    return E;
+  }
+
+public:
+  void invalidate(const LayoutTypeSystemNode *N) { Entries.erase(N); }
+
+  /// \p N's size or identity changes: so do the ranges of whoever has it as a
+  /// field
+  void invalidateWithParents(const LayoutTypeSystemNode *N) {
+    invalidate(N);
+    for (const auto &[Parent, Tag] : N->Predecessors)
+      invalidate(Parent);
+  }
+
+  bool hasPartiallyOverlappingField(const LayoutTypeSystemNode *Outer,
+                                    uint64_t Begin,
+                                    uint64_t End) {
+    const Entry &E = get(Outer);
+    using Pair = std::pair<uint64_t, uint64_t>;
+    auto FirstAfter = [](const std::vector<Pair> &V, uint64_t Key) {
+      return std::upper_bound(V.begin(),
+                              V.end(),
+                              Key,
+                              [](uint64_t K, const Pair &P) {
+                                return K < P.first;
+                              })
+             - V.begin();
+    };
+    auto FirstNotBefore = [](const std::vector<Pair> &V, uint64_t Key) {
+      return std::lower_bound(V.begin(),
+                              V.end(),
+                              Key,
+                              [](const Pair &P, uint64_t K) {
+                                return P.first < K;
+                              })
+             - V.begin();
+    };
+
+    bool Result = false;
+    if (Begin < End) {
+      // Fields that begin strictly inside: does one end after End?
+      size_t From = FirstAfter(E.ByBegin, Begin);
+      size_t To = FirstNotBefore(E.ByBegin, End);
+      auto Max = [](uint64_t A, uint64_t B) { return std::max(A, B); };
+      if (From < To and query(E.MaxEnd, From, To, Max) > End)
+        Result = true;
+
+      // Fields that end strictly inside: does one begin before Begin?
+      From = FirstAfter(E.ByEnd, Begin);
+      To = FirstNotBefore(E.ByEnd, End);
+      auto Min = [](uint64_t A, uint64_t B) { return std::min(A, B); };
+      if (not Result and From < To
+          and query(E.MinBegin, From, To, Min) < Begin)
+        Result = true;
+    }
+
+    if (FieldRangeCheckLog.isEnabled())
+      revng_assert(Result
+                   == hasPartiallyOverlappingFieldScan(Outer, Begin, End));
+    return Result;
+  }
+};
+
 // Compare the edges *AIt and *BIt to check if any of them can be pushed through
 // the other. If so return proper info.
 static std::optional<PushThroughComparisonResult>
 canPushThrough(const LayoutTypeSystemNode *Parent,
                const NeighborIterator &AIt,
-               const NeighborIterator &BIt) {
+               const NeighborIterator &BIt,
+               FieldRangeIndex &FieldRanges) {
   revng_log(Log, "canPushThrough");
   LoggerIndent Indent{ Log };
 
@@ -357,22 +530,11 @@ canPushThrough(const LayoutTypeSystemNode *Parent,
   // A partially overlapping access does not establish a field of a function
   // subobject. Keep it in the containing object instead of spreading it to
   // every caller of the function. Exact and contained accesses remain valid.
-  if (Outer->IsTypeRoot) {
-    for (const auto &[Field, Tag] : Outer->Successors) {
-      if (not isInstanceEdge({ Field, Tag }))
-        continue;
-      const auto &OE = Tag->getOffsetExpr();
-      if (not OE.Strides.empty() or OE.Offset > Outer->Size
-          or Field->Size > Outer->Size - OE.Offset)
-        continue;
-      uint64_t FieldEnd = OE.Offset + Field->Size;
-      bool Overlaps = OffsetInElem < FieldEnd and OE.Offset < EndByteInElem;
-      bool Inside = OffsetInElem >= OE.Offset and EndByteInElem <= FieldEnd;
-      bool Contains = OffsetInElem <= OE.Offset and EndByteInElem >= FieldEnd;
-      if (Overlaps and not Inside and not Contains)
-        return std::nullopt;
-    }
-  }
+  if (Outer->IsTypeRoot
+      and FieldRanges.hasPartiallyOverlappingField(Outer,
+                                                   OffsetInElem,
+                                                   EndByteInElem))
+    return std::nullopt;
 
   return PushThroughComparisonResult{
     .ToPush = InnerIt,
@@ -499,7 +661,8 @@ private:
 static llvm::SmallPtrSet<LayoutTypeSystemNode *, 8>
 absorbVolatileChildren(LayoutTypeSystem &TS,
                        LayoutTypeSystemNode *Parent,
-                       PendingParents *Pending = nullptr) {
+                       PendingParents *Pending = nullptr,
+                       FieldRangeIndex *FieldRanges = nullptr) {
   revng_log(Log, "absorbVolatileChildren of: " << Parent->ID);
   LoggerIndent Indent{ Log };
 
@@ -547,6 +710,14 @@ absorbVolatileChildren(LayoutTypeSystem &TS,
         };
         CompoundEdges.insert(New);
       }
+    }
+
+    // Parent gets other successors and can change size, and the volatile
+    // nodes go away
+    if (FieldRanges != nullptr) {
+      FieldRanges->invalidateWithParents(Parent);
+      for (LayoutTypeSystemNode *Volatile : VolatileChildren)
+        FieldRanges->invalidateWithParents(Volatile);
     }
 
     // Remove all volatile nodes
@@ -697,6 +868,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
   revng_assert(Position.size() == TS.getNumLayouts());
 
   PendingParents Pending(TS);
+  FieldRangeIndex FieldRanges;
   using ReadyEntry = std::pair<unsigned, LayoutTypeSystemNode *>;
   std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, std::greater<>>
     Ready;
@@ -729,7 +901,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // For instance if we had A->B, A->C, B->C, and C was pushed down B, then
       // C becomes volatile inside B.
       {
-        absorbVolatileChildren(TS, Parent, &Pending);
+        absorbVolatileChildren(TS, Parent, &Pending, &FieldRanges);
       }
 
       // What is pushed through an edge E, in the order it arrives: single
@@ -889,7 +1061,10 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                     "with BEdge: " << BEdgeIt->first->ID
                                    << " label: " << BEdgeIt->second);
 
-          auto MaybePushThrough = canPushThrough(Parent, AEdgeIt, BEdgeIt);
+          auto MaybePushThrough = canPushThrough(Parent,
+                                                 AEdgeIt,
+                                                 BEdgeIt,
+                                                 FieldRanges);
           if (not MaybePushThrough.has_value())
             continue;
 
@@ -991,6 +1166,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
 
             revng_assert(not isLeaf(ToPushThrough));
             Pending.beforeLink(ToPushThrough, ToPushDown);
+            FieldRanges.invalidate(ToPushThrough);
             TS.addInstanceLink(ToPushThrough, ToPushDown, std::move(FinalOE));
           }
         }
@@ -1005,6 +1181,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                     "erase: " << Parent->ID << " -> " << ToErase->first->ID
                               << " label: " << ToErase->second);
           LayoutTypeSystemNode *Child = ToErase->first;
+          FieldRanges.invalidate(Parent);
           TS.eraseEdge(Parent, ToErase);
           Pending.afterUnlink(Parent, Child);
         }
