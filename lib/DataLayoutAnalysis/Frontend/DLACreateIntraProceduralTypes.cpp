@@ -274,8 +274,10 @@ protected:
         // Just set it as missing and keep going.
       }
 
-      // Don't add links for recurring expressions with negative trip counts.
-      if (TripCount.has_value() and TripCount.value() < 0LL)
+      // Don't add links for recurring expressions with negative trip counts,
+      // or with a trip count of zero: a backedge count of all ones, taken one
+      // more time, wraps around.
+      if (TripCount.has_value() and TripCount.value() <= 0LL)
         return Created;
 
       OE.TripCounts.push_back(std::move(TripCount));
