@@ -41,7 +41,7 @@ bool MergePointerNodes::runOnTypeSystem(LayoutTypeSystem &TS) {
            llvm::children<InversePointerGraphNodeT>(Node)) {
         revng_log(Log, "#### PointerToMerge: " << PointerToMerge->ID);
         revng_assert(PointerToMerge != Node);
-        revng_assert(PointerToMerge->Successors.size() == 1);
+        revng_assert(PointerToMerge->successors().size() == 1);
         revng_assert(ToMerge.empty()
                      or ToMerge[0]->Size == PointerToMerge->Size);
         ToMerge.push_back(PointerToMerge);

@@ -46,9 +46,8 @@ static DFVisitSet getGrandParentsAtOffset0(const LayoutTypeSystemNode *N) {
 
 static DFVisitSet getChildrenAtOffset0(const LayoutTypeSystemNode *Parent) {
   DFVisitSet Children;
-  const auto
-    &Instance0SuccessorsRange = llvm::make_filter_range(Parent->Successors,
-                                                        isInstanceAtOffset0);
+  const auto &Instance0SuccessorsRange =
+      llvm::make_filter_range(Parent->successors(), isInstanceAtOffset0);
   for (const LayoutTypeSystemNode *Child :
        llvm::make_first_range(Instance0SuccessorsRange))
     Children.insert(Child);
@@ -83,18 +82,18 @@ bool PushDownPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
     size_t Wanted = 0;
     for (const LayoutTypeSystemNode *GrandParent : GrandParentsAtOffset0)
       if (GrandParent != Parent)
-        Wanted += llvm::count_if(GrandParent->Predecessors, isPointerEdge);
+        Wanted += llvm::count_if(GrandParent->predecessors(), isPointerEdge);
 
     if (Wanted != 0) {
       llvm::SmallPtrSet<LayoutTypeSystemNode *, 8> Visited;
       for (LayoutTypeSystemNode *Child :
-           llvm::make_first_range(Parent->Successors)) {
+           llvm::make_first_range(Parent->successors())) {
         for (LayoutTypeSystemNode *Pointer :
              llvm::post_order_ext(Child, Visited)) {
           if (not isPointerNode(Pointer))
             continue;
-          revng_assert(Pointer->Successors.size() == 1);
-          LayoutTypeSystemNode *Pointee = Pointer->Successors.begin()->first;
+          revng_assert(Pointer->successors().size() == 1);
+          LayoutTypeSystemNode *Pointee = Pointer->successors().begin()->first;
           if (Pointee != Parent and GrandParentsAtOffset0.count(Pointee))
             PointersToGrandParents.push_back(Pointer);
           if (PointersToGrandParents.size() == Wanted)
@@ -106,8 +105,9 @@ bool PushDownPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
     }
 
     for (LayoutTypeSystemNode *Pointer : PointersToGrandParents) {
-      revng_assert(isPointerNode(Pointer) and Pointer->Successors.size() == 1);
-      auto PointerEdgeIt = Pointer->Successors.begin();
+      revng_assert(isPointerNode(Pointer) and
+                   Pointer->successors().size() == 1);
+      auto PointerEdgeIt = Pointer->successors().begin();
       LayoutTypeSystemNode *Pointee = PointerEdgeIt->first;
       LayoutTypeSystemNode *NewPointee = nullptr;
       DFVisitSet Visited = getChildrenAtOffset0(Parent);

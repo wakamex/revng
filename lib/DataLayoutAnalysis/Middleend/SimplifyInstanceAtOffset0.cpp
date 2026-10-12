@@ -130,15 +130,15 @@ static bool canBeCollapsed(ReachabilityCache Cache,
   // Otherwise it is allowed when the only predecessor of Child is
   // Node, because in that case we there is no risk of other predecessors of
   // Child to see other nodes that were originally other children of Node.
-  if (Node->Successors.size() > 1
-      and (Child->IsTypeRoot or Child->Predecessors.size() > 1)) {
+  if (Node->successors().size() > 1 and
+      (Child->IsTypeRoot or Child->predecessors().size() > 1)) {
     revng_log(Log, "parent has other children");
     return false;
   }
 
-  revng_assert(Node->Successors.size() > 1
-               or (isInstanceOff0(*Node->Successors.begin())
-                   and Node->Successors.begin()->first == Child));
+  revng_assert(Node->successors().size() > 1 or
+               (isInstanceOff0(*Node->successors().begin()) and
+                Node->successors().begin()->first == Child));
 
   // In all the other cases we can collapse.
   return true;
@@ -196,12 +196,12 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
 
   using Key = std::pair<uint64_t, const TypeLinkTag *>;
   const auto Degree = [](const LayoutTypeSystemNode *N) {
-    return N->Successors.size() + N->Predecessors.size();
+    return N->successors().size() + N->predecessors().size();
   };
   // The first instance-at-offset-0 child of Current at or after From
   const auto NextChild = [](LayoutTypeSystemNode *Current,
                             LayoutTypeSystemNode::NeighborIterator From) {
-    auto End = Current->Successors.end();
+    auto End = Current->successors().end();
     return std::find_if(From, End, [](const auto &Link) {
       return isInstanceOff0(Link);
     });
@@ -230,8 +230,8 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
     // resumes with the next child it would have visited, looked up by its key,
     // which does not depend on which node stayed.
     LayoutTypeSystemNode *Current = Node;
-    auto It = NextChild(Current, Current->Successors.begin());
-    while (It != Current->Successors.end()) {
+    auto It = NextChild(Current, Current->successors().begin());
+    while (It != Current->successors().end()) {
       LayoutTypeSystemNode *Child = It->first;
       auto Next = NextChild(Current, std::next(It));
 
@@ -247,7 +247,7 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
       revng_log(Log, "canBeCollapsed()");
 
       std::optional<Key> NextKey;
-      if (Next != Current->Successors.end())
+      if (Next != Current->successors().end())
         NextKey = Key{ Next->first->ID, Next->second };
 
       auto IDToCollapse = Child->ID;
@@ -281,7 +281,7 @@ bool SimplifyInstanceAtOffset0::runOnTypeSystem(LayoutTypeSystem &TS) {
 
       if (not NextKey)
         break;
-      It = NextChild(Current, Current->Successors.lower_bound(*NextKey));
+      It = NextChild(Current, Current->successors().lower_bound(*NextKey));
     }
   }
 

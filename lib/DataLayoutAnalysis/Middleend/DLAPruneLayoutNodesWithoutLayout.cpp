@@ -68,7 +68,7 @@ bool PruneLayoutNodesWithoutLayout::runOnTypeSystem(LayoutTypeSystem &TS) {
   // Removing a pointee does not disprove the pointer use of its storage.
   // Preserve that alternative without adding new layout constraints.
   for (LTSN *N : ToRemove)
-    for (const auto &[Pred, Tag] : N->Predecessors)
+    for (const auto &[Pred, Tag] : N->predecessors())
       if (Tag->getKind() == TypeLinkTag::LK_Pointer
           and not ToRemove.contains(Pred))
         Pred->HasUnknownPointee = true;

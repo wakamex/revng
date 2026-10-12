@@ -75,8 +75,8 @@ bool ComputeNonInterferingComponents::runOnTypeSystem(LayoutTypeSystem &TS) {
       // that has a dedicated <=> operator so that we can later sort the vector
       // according to it.
       ChildrenVec Children;
-      auto NChildIt = N->Successors.begin();
-      auto NChildEnd = N->Successors.end();
+      auto NChildIt = N->successors().begin();
+      auto NChildEnd = N->successors().end();
       for (; NChildIt != NChildEnd; ++NChildIt) {
         if (isPointerEdge(*NChildIt))
           continue;

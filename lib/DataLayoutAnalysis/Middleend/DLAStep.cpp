@@ -152,7 +152,7 @@ static void logDigest(const LayoutTypeSystem &TS, llvm::StringRef When) {
   uint64_t Edges = 0;
   for (const LayoutTypeSystemNode *N : TS.getLayoutsRange()) {
     ++Nodes;
-    Edges += N->Successors.size();
+    Edges += N->successors().size();
     OS << N->ID << " " << N->Size << " " << N->InterferingInfo << " "
        << N->NonScalar;
     if (N->IsTypeRoot)
@@ -160,10 +160,10 @@ static void logDigest(const LayoutTypeSystem &TS, llvm::StringRef When) {
     if (N->HasUnknownPointee)
       OS << " unknown-pointee";
     OS << " >";
-    for (const auto &L : N->Successors)
+    for (const auto &L : N->successors())
       PrintLink(L);
     OS << " <";
-    for (const auto &L : N->Predecessors)
+    for (const auto &L : N->predecessors())
       PrintLink(L);
     OS << "\n";
     if (Buffer.size() > (1 << 20))

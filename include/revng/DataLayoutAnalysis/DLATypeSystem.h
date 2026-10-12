@@ -202,8 +202,17 @@ struct LayoutTypeSystemNode {
 
   using NeighborsSet = std::set<Link, NeighborLinkComparison>;
   using NeighborIterator = NeighborsSet::iterator;
+  const NeighborsSet &successors() const { return Successors; }
+  const NeighborsSet &predecessors() const { return Predecessors; }
+
+private:
+  // Only LayoutTypeSystem changes the links, so that it can keep both
+  // directions of each link consistent
+  friend class LayoutTypeSystem;
   NeighborsSet Successors{};
   NeighborsSet Predecessors{};
+
+public:
   uint64_t Size{};
   InterferingChildrenInfo InterferingInfo{ Unknown };
   bool NonScalar{ false };
@@ -403,6 +412,18 @@ public:
   void dropOutgoingEdges(LayoutTypeSystemNode *N);
 
 private:
+  static void fixPredSucc(LayoutTypeSystemNode *From,
+                          LayoutTypeSystemNode *Into);
+
+  static void moveEdgeTargetWithoutSumming(LayoutTypeSystemNode *OldTgt,
+                                           LayoutTypeSystemNode *NewTgt,
+                                           NeighborIterator InverseEdgeIt);
+
+  static void moveEdgeSourceWithoutSumming(LayoutTypeSystemNode *OldSrc,
+                                           LayoutTypeSystemNode *NewSrc,
+                                           NeighborIterator EdgeIt);
+
+private:
   uint64_t NID = 0ULL;
 
   // Holds all the LayoutTypeSystemNode
@@ -469,17 +490,17 @@ public:
   static NodeRef getEntryNode(const NodeRef &N) { return N; }
 
   static ChildIteratorType child_begin(NodeRef N) {
-    return llvm::map_iterator(N->Successors.begin(), edge_dest);
+    return llvm::map_iterator(N->successors().begin(), edge_dest);
   }
   static ChildIteratorType child_end(NodeRef N) {
-    return llvm::map_iterator(N->Successors.end(), edge_dest);
+    return llvm::map_iterator(N->successors().end(), edge_dest);
   }
 
   static ChildEdgeIteratorType child_edge_begin(NodeRef N) {
-    return N->Successors.begin();
+    return N->successors().begin();
   }
   static ChildEdgeIteratorType child_edge_end(NodeRef N) {
-    return N->Successors.end();
+    return N->successors().end();
   }
 }; // end struct llvm::GraphTraits<dla::LayoutTypeSystemNode *>
 
@@ -502,17 +523,17 @@ public:
   static NodeRef getEntryNode(const NodeRef &N) { return N; }
 
   static ChildIteratorType child_begin(NodeRef N) {
-    return llvm::map_iterator(N->Successors.begin(), edge_dest);
+    return llvm::map_iterator(N->successors().begin(), edge_dest);
   }
   static ChildIteratorType child_end(NodeRef N) {
-    return llvm::map_iterator(N->Successors.end(), edge_dest);
+    return llvm::map_iterator(N->successors().end(), edge_dest);
   }
 
   static ChildEdgeIteratorType child_edge_begin(NodeRef N) {
-    return N->Successors.begin();
+    return N->successors().begin();
   }
   static ChildEdgeIteratorType child_edge_end(NodeRef N) {
-    return N->Successors.end();
+    return N->successors().end();
   }
 }; // end struct llvm::GraphTraits<dla::LayoutTypeSystemNode *>
 
@@ -535,17 +556,17 @@ public:
   static NodeRef getEntryNode(const NodeRef &N) { return N; }
 
   static ChildIteratorType child_begin(NodeRef N) {
-    return llvm::map_iterator(N->Predecessors.begin(), edge_dest);
+    return llvm::map_iterator(N->predecessors().begin(), edge_dest);
   }
   static ChildIteratorType child_end(NodeRef N) {
-    return llvm::map_iterator(N->Predecessors.end(), edge_dest);
+    return llvm::map_iterator(N->predecessors().end(), edge_dest);
   }
 
   static ChildEdgeIteratorType child_edge_begin(NodeRef N) {
-    return N->Predecessors.begin();
+    return N->predecessors().begin();
   }
   static ChildEdgeIteratorType child_edge_end(NodeRef N) {
-    return N->Predecessors.end();
+    return N->predecessors().end();
   }
 }; // end struct llvm::GraphTraits<dla::LayoutTypeSystemNode *>
 
@@ -568,17 +589,17 @@ public:
   static NodeRef getEntryNode(const NodeRef &N) { return N; }
 
   static ChildIteratorType child_begin(NodeRef N) {
-    return llvm::map_iterator(N->Predecessors.begin(), edge_dest);
+    return llvm::map_iterator(N->predecessors().begin(), edge_dest);
   }
   static ChildIteratorType child_end(NodeRef N) {
-    return llvm::map_iterator(N->Predecessors.end(), edge_dest);
+    return llvm::map_iterator(N->predecessors().end(), edge_dest);
   }
 
   static ChildEdgeIteratorType child_edge_begin(NodeRef N) {
-    return N->Predecessors.begin();
+    return N->predecessors().begin();
   }
   static ChildEdgeIteratorType child_edge_end(NodeRef N) {
-    return N->Predecessors.end();
+    return N->predecessors().end();
   }
 }; // end struct llvm::GraphTraits<dla::LayoutTypeSystemNode *>
 
@@ -693,12 +714,12 @@ isNotPointerEdge(const llvm::GraphTraits<LayoutTypeSystemNode *>::EdgeRef &E) {
 }
 
 inline bool isPointerNode(const LayoutTypeSystemNode *N) {
-  return llvm::any_of(N->Successors, isPointerEdge);
+  return llvm::any_of(N->successors(), isPointerEdge);
 }
 
 inline bool isStructNode(const LayoutTypeSystemNode *N) {
-  return N->InterferingInfo == AllChildrenAreNonInterfering
-         and llvm::any_of(N->Successors, isNotPointerEdge);
+  return N->InterferingInfo == AllChildrenAreNonInterfering and
+         llvm::any_of(N->successors(), isNotPointerEdge);
 }
 
 inline bool isUnionNode(const LayoutTypeSystemNode *N) {

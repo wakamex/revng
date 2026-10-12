@@ -63,8 +63,8 @@ static std::weak_ordering weakOrderNodes(const LTSN *A, const LTSN *B) {
 
   // If they have a different number of successors, order the one with less
   // successor first;
-  size_t NChild1 = A->Successors.size();
-  size_t NChild2 = B->Successors.size();
+  size_t NChild1 = A->successors().size();
+  size_t NChild2 = B->successors().size();
   const auto NChildCmp = NChild1 <=> NChild2;
   if (NChildCmp != std::weak_ordering::equivalent) {
     revng_log(CmpLog,
@@ -79,7 +79,8 @@ static std::weak_ordering weakOrderNodes(const LTSN *A, const LTSN *B) {
   size_t NInstanceChild2 = 0;
   size_t NPointerChild1 = 0;
   size_t NPointerChild2 = 0;
-  for (const auto &[Child1, Child2] : llvm::zip(A->Successors, B->Successors)) {
+  for (const auto &[Child1, Child2] :
+       llvm::zip(A->successors(), B->successors())) {
     if (isInstanceEdge(Child1))
       ++NInstanceChild1;
     else
@@ -217,13 +218,13 @@ exploreAndCompare(const Link &Child1, const Link &Child2) {
 
     // Enqueue the successors of the current nodes
     EdgeVec NextToVisit1, NextToVisit2;
-    size_t NChildren = Node1->Successors.size();
-    revng_assert(NChildren == Node2->Successors.size());
+    size_t NChildren = Node1->successors().size();
+    revng_assert(NChildren == Node2->successors().size());
 
     NextToVisit1.reserve(NChildren);
     NextToVisit2.reserve(NChildren);
-    llvm::copy(Node1->Successors, std::back_inserter(NextToVisit1));
-    llvm::copy(Node2->Successors, std::back_inserter(NextToVisit2));
+    llvm::copy(Node1->successors(), std::back_inserter(NextToVisit1));
+    llvm::copy(Node2->successors(), std::back_inserter(NextToVisit2));
 
     // Sort the newly enqueued instance children
     llvm::sort(NextToVisit1, orderLinks);
@@ -350,7 +351,7 @@ mergeIfTopologicallyEq(LayoutTypeSystem &TS,
 }
 
 static auto getSuccEdgesToChild(LTSN *Parent, LTSN *Child) {
-  auto &Succ = Parent->Successors;
+  auto &Succ = Parent->successors();
   using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
   return llvm::iterator_range(Succ.lower_bound(IDBasedKey{ Child->ID,
                                                            nullptr }),
@@ -375,7 +376,7 @@ static std::optional<StorageFields> storageFields(LTSN *Root, LTSN *OtherRoot) {
       continue;
     bool Pointer = false;
     bool Instance = false;
-    for (const Link &L : Node->Successors) {
+    for (const Link &L : Node->successors()) {
       if (isPointerEdge(L)) {
         Pointer = true;
         continue;
@@ -419,7 +420,7 @@ static bool mergeCompatibleFunctionViews(LayoutTypeSystem &TS) {
     if (Erased.contains(Parent))
       continue;
     llvm::SmallVector<Link> Views;
-    for (const Link &L : Parent->Successors)
+    for (const Link &L : Parent->successors())
       if (isInstanceEdge(L) and L.first->IsTypeRoot
           and not isInstanceLeaf(L.first) and isPointerLeaf(L.first)
           and L.second->getOffsetExpr().Strides.empty())
@@ -496,7 +497,7 @@ bool DeduplicateFields::runOnTypeSystem(LayoutTypeSystem &TS) {
       // some of them.
       revng_log(Log, "Children are:");
       LoggerIndent TmpIndent{ Log };
-      for (const Link &L : NodeWithFields->Successors) {
+      for (const Link &L : NodeWithFields->successors()) {
         revng_log(Log, L.first->ID);
         FieldsToCompare.insert(L.first);
         OriginalFields.insert(L.first);

@@ -98,7 +98,7 @@ static void addStridedInstance(LayoutTypeSystem &TS,
 // Counts the instance edges going from Src to Tgt.
 static unsigned countInstanceEdges(const LTSN *Src, const LTSN *Tgt) {
   unsigned Result = 0;
-  for (const auto &Edge : Src->Successors)
+  for (const auto &Edge : Src->successors())
     if (Edge.first == Tgt and isInstanceEdge(Edge))
       ++Result;
   return Result;
@@ -151,7 +151,7 @@ BOOST_AUTO_TEST_CASE(CollapseEquality) {
   revng_check(TS.getNumLayouts() == 2);
   revng_check(llvm::is_contained(TS.getLayoutsRange(), Node2));
   revng_check(llvm::is_contained(TS.getLayoutsRange(), PtrNode));
-  revng_check(Node2->Successors.size() == 1);
+  revng_check(Node2->successors().size() == 1);
   // Check that the pointer edge is still alive
   const auto &[Child, Tag] = *(llvm::children_edges<LTSN *>(Node2).begin());
   revng_check(Child == PtrNode);
@@ -187,7 +187,7 @@ BOOST_AUTO_TEST_CASE(CollapseInstanceAtOffset0SCC_instance0) {
   revng_check(llvm::is_contained(TS.getLayoutsRange(), Node1));
   revng_check(llvm::is_contained(TS.getLayoutsRange(), Node4));
   revng_check(llvm::is_contained(TS.getLayoutsRange(), PtrNode));
-  revng_check(Node3->Successors.size() == 1);
+  revng_check(Node3->successors().size() == 1);
   // Check that the pointer edge is still alive
   const auto &[Child, Tag] = *(llvm::children_edges<LTSN *>(Node4).begin());
   revng_check(Child == PtrNode);
@@ -231,7 +231,7 @@ BOOST_AUTO_TEST_CASE(CollapseInstanceSCC_instancenon0) {
   revng_check(Tag->getKind() == dla::TypeLinkTag::LK_Pointer);
 
   // Check that the instance back-edge has been removed
-  revng_check(Node3->Successors.size() == 0);
+  revng_check(Node3->successors().size() == 0);
 
   // Check Eq Classes
   dla::VectEqClasses &Eq = TS.getEqClasses();
@@ -277,17 +277,17 @@ BOOST_AUTO_TEST_CASE(PruneLayoutNodesWithoutLayout_basic) {
 
   // Check final tree
   revng_check(TS.getNumLayouts() == 6);
-  revng_check(Root->Successors.size() == 1);
+  revng_check(Root->successors().size() == 1);
   revng_check(llvm::is_contained(llvm::children<LTSN *>(Root), Level0[0]));
   revng_check(not llvm::is_contained(llvm::children<LTSN *>(Root), Level0[1]));
 
-  revng_check(Level0[0]->Successors.size() == 2);
+  revng_check(Level0[0]->successors().size() == 2);
   revng_check(llvm::is_contained(llvm::children<LTSN *>(Level0[0]), Level1[0]));
   revng_check(llvm::is_contained(llvm::children<LTSN *>(Level0[0]), Level1[1]));
 
-  revng_check(Level1[0]->Successors.size() == 1);
+  revng_check(Level1[0]->successors().size() == 1);
   revng_check(llvm::is_contained(llvm::children<LTSN *>(Level1[0]), Leaves[0]));
-  revng_check(Level1[1]->Successors.size() == 1);
+  revng_check(Level1[1]->successors().size() == 1);
   revng_check(llvm::is_contained(llvm::children<LTSN *>(Level1[1]), Leaves[1]));
 
   revng_check(isLeaf(Leaves[0]) and isLeaf(Leaves[1]));
@@ -624,8 +624,8 @@ BOOST_AUTO_TEST_CASE(ComputeNonInterferingComponents_basic) {
   revng_check(PtrNode->InterferingInfo = AllChildrenAreNonInterfering);
   revng_check(UnionNode->InterferingInfo = AllChildrenAreNonInterfering);
   // Check new node
-  const auto &[FinalChild1, Tag1] = *(Child2->Predecessors.begin());
-  const auto &[FinalChild2, Tag2] = *(Child3->Predecessors.begin());
+  const auto &[FinalChild1, Tag1] = *(Child2->predecessors().begin());
+  const auto &[FinalChild2, Tag2] = *(Child3->predecessors().begin());
   revng_check(Tag1->getOffsetExpr().Offset == 0U);
   revng_check(Tag2->getOffsetExpr().Offset == 20U);
 
@@ -958,7 +958,7 @@ BOOST_AUTO_TEST_CASE(ArrangeAccessesHierarchically_sameBytesSameNode) {
 
   // The plain edge has been dropped and the strided one survives.
   revng_check(countInstanceEdges(Parent, Child) == 1);
-  for (const auto &[Successor, Tag] : Parent->Successors)
+  for (const auto &[Successor, Tag] : Parent->successors())
     if (Successor == Child)
       revng_check(Tag->getOffsetExpr().Strides.size() == 1);
 
@@ -1655,13 +1655,11 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
       using Edge = LTSN::NeighborsSet::value_type;
       revng_log(Log,
                 "# Removing backedge: " << Pred->ID << " -> " << Child->ID);
-      revng_assert(SCC::BackedgeNodeView::filter()({ Pred, T }));
-      Edge ChildToPred = std::make_pair(Pred, T);
-      bool Erased = Child->Predecessors.erase(ChildToPred);
-      revng_assert(Erased);
+      revng_assert(SCC::BackedgeNodeView::filter()({Pred, T}));
       Edge PredToChild = std::make_pair(Child, T);
-      Erased = Pred->Successors.erase(PredToChild);
-      revng_assert(Erased);
+      auto EdgeIt = Pred->successors().find(PredToChild);
+      revng_assert(EdgeIt != Pred->successors().end());
+      TS.eraseEdge(Pred, EdgeIt);
       Changed = true;
     }
 
@@ -1718,9 +1716,9 @@ static std::string describe(LayoutTypeSystem &TS) {
   for (const LTSN *N : llvm::nodes(&TS)) {
     OS << N->ID << " size " << N->Size << " info " << N->InterferingInfo
        << " nonscalar " << N->NonScalar << " successors";
-    PrintEdges(N->Successors);
+    PrintEdges(N->successors());
     OS << " predecessors";
-    PrintEdges(N->Predecessors);
+    PrintEdges(N->predecessors());
     OS << "\n";
   }
   VectEqClasses &Eq = TS.getEqClasses();
@@ -1762,7 +1760,7 @@ static void buildRandomTypeSystem(LayoutTypeSystem &TS,
     unsigned Kind = PickKind(Generator);
     if (IsPointer(Src) != (Kind == 3) or (Kind == 0 and IsPointer(Tgt)))
       continue;
-    if (Kind == 3 and not Src->Successors.empty())
+    if (Kind == 3 and not Src->successors().empty())
       continue;
     switch (Kind) {
     case 0:
@@ -1923,7 +1921,7 @@ static void buildRandomOffset0DAG(LayoutTypeSystem &TS,
     unsigned Kind = PickKind(Generator);
     if (IsPointer(Src) != (Kind == 2))
       continue;
-    if (Kind == 2 and not Nodes[Src]->Successors.empty())
+    if (Kind == 2 and not Nodes[Src]->successors().empty())
       continue;
     switch (Kind) {
     case 0:
@@ -2936,10 +2934,10 @@ BOOST_AUTO_TEST_CASE(PushDownPointersRedirectsOnlyPointersBelowTheParent) {
 
   BOOST_CHECK(PushDownPointers().runOnTypeSystem(TS));
 
-  BOOST_REQUIRE_EQUAL(Inside->Successors.size(), 1);
-  BOOST_CHECK(Inside->Successors.begin()->first == Parent);
-  BOOST_REQUIRE_EQUAL(Outside->Successors.size(), 1);
-  BOOST_CHECK(Outside->Successors.begin()->first == Root);
+  BOOST_REQUIRE_EQUAL(Inside->successors().size(), 1);
+  BOOST_CHECK(Inside->successors().begin()->first == Parent);
+  BOOST_REQUIRE_EQUAL(Outside->successors().size(), 1);
+  BOOST_CHECK(Outside->successors().begin()->first == Root);
   BOOST_CHECK(not PushDownPointers().runOnTypeSystem(TS));
 }
 
@@ -2959,7 +2957,7 @@ BOOST_AUTO_TEST_CASE(PruningRetainsPointerAlternativeWithoutChangingLayout) {
     BOOST_CHECK(TS.getEqClasses().isRemoved(UnknownID));
     BOOST_CHECK(not Prune.runOnTypeSystem(TS));
     BOOST_CHECK(TS.verifyConsistency() and TS.verifyLeafs());
-    BOOST_REQUIRE(Access->Successors.empty());
+    BOOST_REQUIRE(Access->successors().empty());
     BOOST_CHECK(Access->HasUnknownPointee);
     ComputeUpperMemberAccesses().runOnTypeSystem(TS);
     SimplifyInstanceAtOffset0().runOnTypeSystem(TS);
@@ -3019,8 +3017,8 @@ BOOST_AUTO_TEST_CASE(PruningKeepsKnownPointees) {
   TS.addPointerLink(Pointer, Known);
   BOOST_CHECK(not PruneLayoutNodesWithoutLayout().runOnTypeSystem(TS));
   BOOST_CHECK(not Pointer->HasUnknownPointee);
-  BOOST_REQUIRE_EQUAL(Pointer->Successors.size(), 1);
-  BOOST_CHECK(Pointer->Successors.begin()->first == Known);
+  BOOST_REQUIRE_EQUAL(Pointer->successors().size(), 1);
+  BOOST_CHECK(Pointer->successors().begin()->first == Known);
 }
 
 BOOST_AUTO_TEST_CASE(StackFrameClippingPreservesSharedUnion) {
@@ -3108,7 +3106,7 @@ BOOST_AUTO_TEST_CASE(PointeeUnionPreservesContainedAggregateViews) {
     BOOST_CHECK_EQUAL(Inner->Size, 16);
     BOOST_CHECK_EQUAL(Consumer->Size, 24);
     BOOST_CHECK_EQUAL(countInstanceEdges(Consumer, Inner), 1);
-    BOOST_CHECK_EQUAL(InnerPointer->Successors.begin()->first, Inner);
+    BOOST_CHECK_EQUAL(InnerPointer->successors().begin()->first, Inner);
   }
 }
 
@@ -3127,10 +3125,10 @@ BOOST_AUTO_TEST_CASE(PointeeUnionStillMergesIndependentAggregateViews) {
   MergePointeesOfPointerUnion Step(8);
   Step.runOnTypeSystem(TS);
   BOOST_CHECK(TS.verifyDAG());
-  BOOST_CHECK_EQUAL(FirstPointer->Successors.begin()->first,
-                    SecondPointer->Successors.begin()->first);
+  BOOST_CHECK_EQUAL(FirstPointer->successors().begin()->first,
+                    SecondPointer->successors().begin()->first);
   BOOST_CHECK_EQUAL(Second->Size, 24);
-  BOOST_CHECK_EQUAL(Second->Successors.size(), 2);
+  BOOST_CHECK_EQUAL(Second->successors().size(), 2);
 }
 
 BOOST_AUTO_TEST_CASE(FunctionIdentitySeparatesSharedPrototypeLayouts) {
@@ -3282,8 +3280,8 @@ BOOST_AUTO_TEST_CASE(PointeeUnionPreservesFunctionLayoutAlternatives) {
     BOOST_REQUIRE(not TS.getEqClasses().haveSameEqClass(FirstID, SecondID));
     BOOST_CHECK_EQUAL(First->Size, 16);
     BOOST_CHECK_EQUAL(Second->Size, 24);
-    BOOST_CHECK_EQUAL(FirstPointer->Successors.begin()->first, First);
-    BOOST_CHECK_EQUAL(SecondPointer->Successors.begin()->first, Second);
+    BOOST_CHECK_EQUAL(FirstPointer->successors().begin()->first, First);
+    BOOST_CHECK_EQUAL(SecondPointer->successors().begin()->first, Second);
     BOOST_CHECK(TS.verifyDAG());
   }
 }
@@ -3354,8 +3352,8 @@ BOOST_AUTO_TEST_CASE(DeduplicateFunctionViewsPreservesPointerAlternatives) {
   unsigned FirstID = First->ID, SecondID = Second->ID;
   DeduplicateFields().runOnTypeSystem(TS);
   BOOST_REQUIRE(not TS.getEqClasses().haveSameEqClass(FirstID, SecondID));
-  BOOST_CHECK_EQUAL(First->Successors.size(), 1);
-  BOOST_CHECK_EQUAL(Second->Successors.size(), 1);
+  BOOST_CHECK_EQUAL(First->successors().size(), 1);
+  BOOST_CHECK_EQUAL(Second->successors().size(), 1);
   BOOST_CHECK(TS.verifyDAG());
 }
 
@@ -3481,7 +3479,7 @@ BOOST_AUTO_TEST_CASE(ConstantStoresDoNotUnifyIndependentStorage) {
     auto Node = llvm::find_if(Nodes, [ID](auto *N) { return N->ID == ID; });
     BOOST_REQUIRE(Node != Nodes.end());
     llvm::SmallVector<unsigned> Fields;
-    for (const auto &Edge : (*Node)->Successors)
+    for (const auto &Edge : (*Node)->successors())
       if (isInstanceEdge(Edge) and Edge.first->Size == 8)
         Fields.push_back(Edge.first->ID);
     BOOST_REQUIRE_EQUAL(Fields.size(), 1);
@@ -3864,11 +3862,11 @@ BOOST_AUTO_TEST_CASE(SimplifyInstanceAtOffset0KeepsTheNodeWithMoreLinks) {
   BOOST_CHECK(EqClasses.haveSameEqClass(RootID, LeafID));
   BOOST_CHECK(EqClasses.haveSameEqClass(MiddleID, LeafID));
   BOOST_CHECK_EQUAL(Leaf->Size, 8U);
-  BOOST_CHECK(Leaf->Successors.empty());
-  BOOST_CHECK_EQUAL(Leaf->Predecessors.size(), 4U);
+  BOOST_CHECK(Leaf->successors().empty());
+  BOOST_CHECK_EQUAL(Leaf->predecessors().size(), 4U);
   for (auto *Pointer : Pointers) {
-    BOOST_REQUIRE_EQUAL(Pointer->Successors.size(), 1U);
-    BOOST_CHECK(Pointer->Successors.begin()->first == Leaf);
+    BOOST_REQUIRE_EQUAL(Pointer->successors().size(), 1U);
+    BOOST_CHECK(Pointer->successors().begin()->first == Leaf);
   }
 }
 
@@ -3894,7 +3892,7 @@ BOOST_AUTO_TEST_CASE(SimplifyInstanceAtOffset0ResumesAfterTheMergedChild) {
   BOOST_CHECK(EqClasses.haveSameEqClass(RootID, A->ID));
   BOOST_CHECK(EqClasses.haveSameEqClass(CID, A->ID));
   BOOST_CHECK_EQUAL(A->Size, 16U);
-  BOOST_CHECK_EQUAL(A->Successors.size(), 3U);
+  BOOST_CHECK_EQUAL(A->successors().size(), 3U);
   for (auto *Field : Fields)
     BOOST_CHECK_EQUAL(countInstanceEdges(A, Field), 1U);
 }

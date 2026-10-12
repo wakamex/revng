@@ -72,8 +72,8 @@ bool RemoveInvalidStrideEdges::runOnTypeSystem(LayoutTypeSystem &TS) {
     for (LayoutTypeSystemNode *N :
          llvm::post_order_ext(InstanceNodeT(Root), Visited)) {
 
-      auto It = N->Successors.begin();
-      auto End = N->Successors.end();
+      auto It = N->successors().begin();
+      auto End = N->successors().end();
       auto Next = End;
       bool RemovedChild = false;
       for (; It != End; It = Next) {
@@ -88,11 +88,7 @@ bool RemoveInvalidStrideEdges::runOnTypeSystem(LayoutTypeSystem &TS) {
 
         // If we reach this point the edges has invalid strides, so we need to
         // remove it, taking care of the fact that it's bidirectional.
-        LayoutTypeSystemNode *Succ = It->first;
-        auto PredIt = Succ->Predecessors.find({ N, It->second });
-        revng_assert(PredIt != Succ->Predecessors.end());
-        Succ->Predecessors.erase(PredIt);
-        N->Successors.erase(It);
+        TS.eraseEdge(N, It);
         RemovedChild = true;
         Changed = true;
       }

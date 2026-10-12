@@ -150,27 +150,25 @@ void debug_function LayoutTypeSystem::dumpDotOnFile(const char *FName,
 
     uint64_t SrcNodeId = L->ID;
 
-    for (const auto &PredP : L->Predecessors) {
+    for (const auto &PredP : L->predecessors()) {
       const TypeLinkTag *PredTag = PredP.second;
       const auto SameLink = [&](auto &OtherPair) {
         return SrcNodeId == OtherPair.first->ID and PredTag == OtherPair.second;
       };
-      revng_assert(std::any_of(PredP.first->Successors.begin(),
-                               PredP.first->Successors.end(),
-                               SameLink));
+      revng_assert(std::any_of(PredP.first->successors().begin(),
+                               PredP.first->successors().end(), SameLink));
     }
 
     std::string Extra;
     std::string Color;
     std::string Style;
-    for (const auto &SuccP : L->Successors) {
+    for (const auto &SuccP : L->successors()) {
       const TypeLinkTag *EdgeTag = SuccP.second;
       const auto SameLink = [&](auto &OtherPair) {
         return SrcNodeId == OtherPair.first->ID and EdgeTag == OtherPair.second;
       };
-      revng_assert(std::any_of(SuccP.first->Predecessors.begin(),
-                               SuccP.first->Predecessors.end(),
-                               SameLink));
+      revng_assert(std::any_of(SuccP.first->predecessors().begin(),
+                               SuccP.first->predecessors().end(), SameLink));
       const auto *TgtNode = SuccP.first;
       const char *EdgeLabel = nullptr;
       size_t LabelSize = 0;
@@ -228,8 +226,8 @@ LayoutTypeSystem::createArtificialLayoutTypes(unsigned N) {
   return Result;
 }
 
-static void fixPredSucc(LayoutTypeSystemNode *From,
-                        LayoutTypeSystemNode *Into) {
+void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
+                                   LayoutTypeSystemNode *Into) {
 
   revng_assert(From != Into);
 
@@ -367,9 +365,9 @@ void LayoutTypeSystem::removeNode(LayoutTypeSystemNode *ToRemove) {
 
 using NeighborIterator = LayoutTypeSystem::NeighborIterator;
 
-static void moveEdgeTargetWithoutSumming(LayoutTypeSystemNode *OldTgt,
-                                         LayoutTypeSystemNode *NewTgt,
-                                         NeighborIterator InverseEdgeIt) {
+void LayoutTypeSystem::moveEdgeTargetWithoutSumming(
+    LayoutTypeSystemNode *OldTgt, LayoutTypeSystemNode *NewTgt,
+    NeighborIterator InverseEdgeIt) {
 
   // First, move the successor from OldTgt to NewTgt
   LayoutTypeSystemNode *Src = InverseEdgeIt->first;
@@ -384,9 +382,9 @@ static void moveEdgeTargetWithoutSumming(LayoutTypeSystemNode *OldTgt,
   NewTgt->Predecessors.insert(std::move(PredHandle));
 }
 
-static void moveEdgeSourceWithoutSumming(LayoutTypeSystemNode *OldSrc,
-                                         LayoutTypeSystemNode *NewSrc,
-                                         NeighborIterator EdgeIt) {
+void LayoutTypeSystem::moveEdgeSourceWithoutSumming(
+    LayoutTypeSystemNode *OldSrc, LayoutTypeSystemNode *NewSrc,
+    NeighborIterator EdgeIt) {
   // First, move the predecessor edge from OldSrc to NewSrc.
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
   auto PredHandle = Tgt->Predecessors.extract({ OldSrc, EdgeIt->second });
@@ -489,8 +487,8 @@ NeighborIterator LayoutTypeSystem::eraseEdge(LayoutTypeSystemNode *Src,
 }
 
 void LayoutTypeSystem::dropOutgoingEdges(LayoutTypeSystemNode *N) {
-  auto It = N->Successors.begin();
-  auto End = N->Successors.end();
+  auto It = N->successors().begin();
+  auto End = N->successors().end();
   while (It != End)
     It = eraseEdge(N, It);
 }
@@ -505,7 +503,7 @@ bool LayoutTypeSystem::verifyConsistency() const {
       return false;
     }
     // Check that predecessors and successors are consistent
-    for (auto &P : NodePtr->Predecessors) {
+    for (auto &P : NodePtr->predecessors()) {
       if (P.first == nullptr) {
         if (VerifyDLALog.isEnabled())
           revng_check(false);
@@ -513,13 +511,13 @@ bool LayoutTypeSystem::verifyConsistency() const {
       }
 
       // same edge with same tag
-      if (!P.first->Successors.contains({ NodePtr, P.second })) {
+      if (!P.first->successors().contains({NodePtr, P.second})) {
         if (VerifyDLALog.isEnabled())
           revng_check(false);
         return false;
       }
     }
-    for (auto &P : NodePtr->Successors) {
+    for (auto &P : NodePtr->successors()) {
       if (P.first == nullptr) {
         if (VerifyDLALog.isEnabled())
           revng_check(false);
@@ -527,7 +525,7 @@ bool LayoutTypeSystem::verifyConsistency() const {
       }
 
       // same edge with same tag
-      if (!P.first->Predecessors.contains({ NodePtr, P.second })) {
+      if (!P.first->predecessors().contains({NodePtr, P.second})) {
         if (VerifyDLALog.isEnabled())
           revng_check(false);
         return false;
@@ -535,7 +533,7 @@ bool LayoutTypeSystem::verifyConsistency() const {
     }
 
     // Check that there are no self-edges
-    for (auto &P : NodePtr->Predecessors) {
+    for (auto &P : NodePtr->predecessors()) {
       LayoutTypeSystemNode *Pred = P.first;
       if (Pred == NodePtr) {
         if (VerifyDLALog.isEnabled())
@@ -544,7 +542,7 @@ bool LayoutTypeSystem::verifyConsistency() const {
       }
     }
 
-    for (auto &P : NodePtr->Successors) {
+    for (auto &P : NodePtr->successors()) {
       LayoutTypeSystemNode *Succ = P.first;
       if (Succ == NodePtr) {
         if (VerifyDLALog.isEnabled())
@@ -556,7 +554,7 @@ bool LayoutTypeSystem::verifyConsistency() const {
     // Verify that pointers are not also structs or unions
     unsigned NonPtrChildren = 0U;
     bool IsPointer = false;
-    for (const auto &Edge : NodePtr->Successors) {
+    for (const auto &Edge : NodePtr->successors()) {
       if (isPointerEdge(Edge)) {
         // Node with outgoing pointer edges, only have one pointer edge.
         if (IsPointer) {
@@ -728,8 +726,8 @@ bool LayoutTypeSystem::verifyLeafs() const {
 bool LayoutTypeSystem::verifyUnions() const {
   using GraphNodeT = const LayoutTypeSystemNode *;
   for (GraphNodeT Node : llvm::nodes(this)) {
-    if (Node->InterferingInfo == AllChildrenAreInterfering
-        and Node->Successors.size() <= 1) {
+    if (Node->InterferingInfo == AllChildrenAreInterfering and
+        Node->successors().size() <= 1) {
       if (VerifyDLALog.isEnabled())
         revng_check(false);
       return false;

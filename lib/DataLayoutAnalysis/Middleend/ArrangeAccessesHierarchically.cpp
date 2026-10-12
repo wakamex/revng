@@ -236,7 +236,7 @@ static bool isFieldInside(const LayoutTypeSystemNode *Outer,
 static bool hasPartiallyOverlappingFieldScan(const LayoutTypeSystemNode *Outer,
                                              uint64_t Begin,
                                              uint64_t End) {
-  for (const auto &L : Outer->Successors) {
+  for (const auto &L : Outer->successors()) {
     if (not isFieldInside(Outer, L))
       continue;
     uint64_t FieldBegin = L.second->getOffsetExpr().Offset;
@@ -312,7 +312,7 @@ private:
     if (not New)
       return E;
 
-    for (const auto &L : Outer->Successors) {
+    for (const auto &L : Outer->successors()) {
       if (not isFieldInside(Outer, L))
         continue;
       uint64_t Begin = L.second->getOffsetExpr().Offset;
@@ -338,7 +338,7 @@ public:
   /// field
   void invalidateWithParents(const LayoutTypeSystemNode *N) {
     invalidate(N);
-    for (const auto &[Parent, Tag] : N->Predecessors)
+    for (const auto &[Parent, Tag] : N->predecessors())
       invalidate(Parent);
   }
 
@@ -603,7 +603,7 @@ public:
   static bool isParent(const LayoutTypeSystemNode *Parent,
                        const LayoutTypeSystemNode *Child) {
     using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
-    auto &Predecessors = Child->Predecessors;
+    auto &Predecessors = Child->predecessors();
     auto It = Predecessors.lower_bound(IDBasedKey{ Parent->ID, nullptr });
     auto End = Predecessors.upper_bound(IDBasedKey{ Parent->ID + 1,
                                                     nullptr });

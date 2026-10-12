@@ -25,15 +25,15 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
   bool Changed = false;
 
   auto HasSingleNonStridedChild = [](const LTSN *Node) {
-    const auto &SuccBegin = Node->Successors.begin();
-    return (Node->Successors.size() == 1) and isInstanceEdge(*SuccBegin)
-           and SuccBegin->second->getOffsetExpr().Strides.empty();
+    const auto &SuccBegin = Node->successors().begin();
+    return (Node->successors().size() == 1) and isInstanceEdge(*SuccBegin) and
+           SuccBegin->second->getOffsetExpr().Strides.empty();
   };
 
   // Get nodes that have a single instance-at-offset-0 child
   bool Merged = true;
   while (Merged and HasSingleNonStridedChild(Node)) {
-    auto &ChildEdge = *(Node->Successors.begin());
+    auto &ChildEdge = *(Node->successors().begin());
     auto &Off = ChildEdge.second->getOffsetExpr().Offset;
     LTSN *Child = ChildEdge.first;
 
@@ -98,8 +98,8 @@ bool CollapseSingleChild::collapseSingle(LayoutTypeSystem &TS,
       }
 
       // Move Node's predecessor edges to Child, adding Off.
-      auto PredIt = Node->Predecessors.begin();
-      auto PredEnd = Node->Predecessors.end();
+      auto PredIt = Node->predecessors().begin();
+      auto PredEnd = Node->predecessors().end();
       while (PredIt != PredEnd) {
         auto Next = std::next(PredIt);
         TS.moveEdgeTarget(Node, Child, PredIt, Off);

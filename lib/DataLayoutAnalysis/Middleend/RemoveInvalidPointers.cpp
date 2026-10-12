@@ -14,8 +14,8 @@ bool dla::RemoveInvalidPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
     if (PtrNode->Size == PointerSize)
       continue;
 
-    auto It = PtrNode->Successors.begin();
-    auto End = PtrNode->Successors.end();
+    auto It = PtrNode->successors().begin();
+    auto End = PtrNode->successors().end();
     auto Next = End;
     for (; It != End; It = Next) {
 
@@ -29,11 +29,7 @@ bool dla::RemoveInvalidPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
       // and It points to a pointer edge that is outgoing from PtrNode.
       // That edge is invalid, because according to PtrNode->Size PtrNode cannot
       // be a pointer, so we remove the wrong edge.
-      LayoutTypeSystemNode *Pointee = It->first;
-      auto PredIt = Pointee->Predecessors.find({ PtrNode, It->second });
-      revng_assert(PredIt != Pointee->Predecessors.end());
-      Pointee->Predecessors.erase(PredIt);
-      PtrNode->Successors.erase(It);
+      TS.eraseEdge(PtrNode, It);
       Changed = true;
     }
   }

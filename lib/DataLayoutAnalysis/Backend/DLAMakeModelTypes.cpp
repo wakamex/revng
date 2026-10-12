@@ -154,7 +154,7 @@ static bool representsTypeDefinition(const LayoutTypeSystemNode *Node) {
 /// Follow a pointer edge from the pointer to the pointee.
 static const LTSN *getPointeeNode(const LTSN *PointerNode) {
   revng_assert(isPointerNode(PointerNode));
-  return PointerNode->Successors.begin()->first;
+  return PointerNode->successors().begin()->first;
 }
 
 static UpcastableType makeStructOrUnion(TupleTree<model::Binary> &Model,
@@ -427,7 +427,7 @@ static void populateStructFields(const LayoutTypeSystemNode *StructNode,
                                  NodeToUpcastableTypeMap &NodesToTypes,
                                  TupleTree<model::Binary> &Model) {
   LoggerIndent Indent{ Log };
-  for (const auto &[FieldNode, Edge] : StructNode->Successors) {
+  for (const auto &[FieldNode, Edge] : StructNode->successors()) {
     revng_log(Log, "Field ID: " << FieldNode->ID);
     LoggerIndent FieldIndent{ Log };
 
@@ -450,7 +450,7 @@ populateUnionFields(const LayoutTypeSystemNode *Node,
                     NodeToUpcastableTypeMap &NodesToTypes,
                     TupleTree<model::Binary> &Model) {
   LoggerIndent Indent{ Log };
-  for (const auto &[FieldNode, Edge] : Node->Successors) {
+  for (const auto &[FieldNode, Edge] : Node->successors()) {
 
     revng_log(Log, "Field ID: " << FieldNode->ID);
     LoggerIndent FieldIndent{ Log };

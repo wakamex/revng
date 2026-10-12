@@ -416,13 +416,11 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
       using Edge = LTSN::NeighborsSet::value_type;
       revng_log(Log,
                 "# Removing backedge: " << Pred->ID << " -> " << Child->ID);
-      revng_assert(SCC::BackedgeNodeView::filter()({ Pred, T }));
-      Edge ChildToPred = std::make_pair(Pred, T);
-      bool Erased = Child->Predecessors.erase(ChildToPred);
-      revng_assert(Erased);
+      revng_assert(SCC::BackedgeNodeView::filter()({Pred, T}));
       Edge PredToChild = std::make_pair(Child, T);
-      Erased = Pred->Successors.erase(PredToChild);
-      revng_assert(Erased);
+      auto EdgeIt = Pred->successors().find(PredToChild);
+      revng_assert(EdgeIt != Pred->successors().end());
+      TS.eraseEdge(Pred, EdgeIt);
       Changed = true;
     }
 

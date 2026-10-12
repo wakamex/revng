@@ -37,12 +37,12 @@ static bool hasOutgoingPointerEdge(const LayoutTypeSystemNode *N) {
 };
 
 static bool isWellFormedPointer(const LTSN *Pointer) {
-  return Pointer->Successors.size() == 1 and hasOutgoingPointerEdge(Pointer);
+  return Pointer->successors().size() == 1 and hasOutgoingPointerEdge(Pointer);
 }
 
 static LTSN *getPointee(LTSN *Pointer) {
   revng_assert(isWellFormedPointer(Pointer));
-  return Pointer->Successors.begin()->first;
+  return Pointer->successors().begin()->first;
 }
 
 bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
@@ -80,8 +80,8 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
 
     llvm::EquivalenceClasses<LTSN *> PointersToMerge;
 
-    auto ChildEnd = Node->Successors.end();
-    for (auto AChildIt = Node->Successors.begin(); AChildIt != ChildEnd;
+    auto ChildEnd = Node->successors().end();
+    for (auto AChildIt = Node->successors().begin(); AChildIt != ChildEnd;
          ++AChildIt) {
 
       const auto &AEdge = *AChildIt;
@@ -114,9 +114,9 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
         revng_log(Log, "A: " << APointer->ID << ", B:" << BPointer->ID);
         revng_log(Log, "ATag: " << *ATag << ", BTag: " << *BTag);
 
-        revng_assert(APointer->Successors.size() == 1,
+        revng_assert(APointer->successors().size() == 1,
                      std::to_string(APointer->ID).c_str());
-        revng_assert(BPointer->Successors.size() == 1,
+        revng_assert(BPointer->successors().size() == 1,
                      std::to_string(BPointer->ID).c_str());
         PointersToMerge.unionSets(APointer, BPointer);
       }
@@ -205,8 +205,8 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
           if (Pointee->NonScalar) {
             PointersToFromModel.insert(Pointer);
             UniquedFromModel.insert(Pointee);
-          } else if (Pointee->Successors.empty()
-                     or hasOutgoingPointerEdge(Pointee)) {
+          } else if (Pointee->successors().empty() or
+                     hasOutgoingPointerEdge(Pointee)) {
             revng_assert(not hasOutgoingPointerEdge(Pointee)
                          or isWellFormedPointer(Pointee));
             PointersToScalars.insert(Pointer);
@@ -237,7 +237,7 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
           Visited.insert(Aggregate);
           while (not Worklist.empty() and not HasContainedPointee) {
             LTSN *Current = Worklist.pop_back_val();
-            for (const auto &Edge : Current->Successors) {
+            for (const auto &Edge : Current->successors()) {
               if (not isInstanceEdge(Edge))
                 continue;
               LTSN *Child = Edge.first;
@@ -298,8 +298,8 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
           // enqueue it for further analysis
           llvm::SmallVector<LTSN::NeighborIterator> PointerEdges;
           {
-            LTSN::NeighborIterator ChildIt = MergedScalar->Successors.begin();
-            LTSN::NeighborIterator ChildEnd = MergedScalar->Successors.end();
+            LTSN::NeighborIterator ChildIt = MergedScalar->successors().begin();
+            LTSN::NeighborIterator ChildEnd = MergedScalar->successors().end();
             for (; ChildIt != ChildEnd; ++ChildIt)
               if (isPointerEdge(*ChildIt))
                 PointerEdges.push_back(ChildIt);
@@ -359,8 +359,9 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
                 return isPointerEdge(Pair)
                        and PointersToFromModel.contains(Pair.first);
               };
-            auto InverseEdgeIt = llvm::find_if(AggregateFromModel->Predecessors,
-                                               PredecessorPointsToAggregate);
+            auto InverseEdgeIt =
+                llvm::find_if(AggregateFromModel->predecessors(),
+                              PredecessorPointsToAggregate);
             TS.moveEdgeTarget(AggregateFromModel,
                               MergedAggregate,
                               InverseEdgeIt,
@@ -409,10 +410,10 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
               continue;
             }
 
-            const auto &[Pointee, PointerTag] = *Pointer->Successors.begin();
+            const auto &[Pointee, PointerTag] = *Pointer->successors().begin();
             revng_log(Log, "Pointee: " << Pointee->ID);
-            auto InverseEdgeIt = Pointee->Predecessors.find({ Pointer,
-                                                              PointerTag });
+            auto InverseEdgeIt =
+                Pointee->predecessors().find({Pointer, PointerTag});
             TS.moveEdgeTarget(Pointee, MergedAggregate, InverseEdgeIt, 0);
           }
           revng_log(Log, "Fixed up PointersToScalars");

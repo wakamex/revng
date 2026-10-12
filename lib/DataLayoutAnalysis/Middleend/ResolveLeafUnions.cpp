@@ -49,8 +49,8 @@ getOverlappingLeafChildren(LayoutTypeSystemNode *N) {
 
   SmallMap<ChildrenKey, NeighborSet, 8> Result;
 
-  auto ChildIt = N->Successors.begin();
-  auto ChildEnd = N->Successors.end();
+  auto ChildIt = N->successors().begin();
+  auto ChildEnd = N->successors().end();
   for (; ChildIt != ChildEnd; ++ChildIt) {
     if (not isInstanceEdge(*ChildIt))
       continue;
@@ -115,8 +115,8 @@ struct LeafType {
 
 static LeafType getType(const LayoutTypeSystemNode *N) {
   if (isPointerNode(N)) {
-    revng_assert(N->Successors.size() == 1);
-    const LayoutTypeSystemNode *Pointee = N->Successors.begin()->first;
+    revng_assert(N->successors().size() == 1);
+    const LayoutTypeSystemNode *Pointee = N->successors().begin()->first;
     return LeafType{ LeafType::Pointer, Pointee };
   }
   return LeafType{ LeafType::Generic, nullptr };
