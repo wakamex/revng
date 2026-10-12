@@ -2,7 +2,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include <compare>
+#include <optional>
 #include <set>
 
 #include "llvm/ADT/DepthFirstIterator.h"
@@ -72,112 +72,26 @@ static bool isInstanceAtOffset0(const GT::EdgeRef &E) {
   return not E.second->getOffsetExpr().Offset;
 }
 
-// Returns greater if the type represented by A transitively contains an
-// instance at offset 0 of the type represented by B.
-// Returns less if the type represented by B transitively contains an
-// instance at offset 0 of the type represented by A.
-// Returns equivalent if A == B.
-// Returns unordered in all the other cases.
-static std::partial_ordering comparePointee(const LayoutTypeSystemNode *A,
-                                            const LayoutTypeSystemNode *B) {
-  using CInstance0 = EdgeFilteredGraph<const dla::LayoutTypeSystemNode *,
-                                       isInstanceAtOffset0>;
-  using NodeSet = llvm::df_iterator_default_set<const LayoutTypeSystemNode *,
-                                                8>;
+using CInstance0 =
+    EdgeFilteredGraph<const dla::LayoutTypeSystemNode *, isInstanceAtOffset0>;
+using ConstNodeSet =
+    llvm::df_iterator_default_set<const LayoutTypeSystemNode *, 8>;
 
-  if (A == B)
-    return std::partial_ordering::equivalent;
-
-  NodeSet Visited;
-  for (const LayoutTypeSystemNode *N :
-       llvm::depth_first_ext(CInstance0(A), Visited))
-    if (N == B)
-      return std::partial_ordering::greater;
-
-  for (const LayoutTypeSystemNode *N :
-       llvm::depth_first_ext(CInstance0(B), Visited))
-    if (N == A)
-      return std::partial_ordering::less;
-
-  return std::partial_ordering::unordered;
+// The nodes the type represented by N transitively contains at offset 0, N
+// included
+static ConstNodeSet getInstancesAtOffset0(const LayoutTypeSystemNode *N) {
+  ConstNodeSet Result;
+  for ([[maybe_unused]] const LayoutTypeSystemNode *_ :
+       llvm::depth_first_ext(CInstance0(N), Result))
+    ;
+  return Result;
 }
 
-// TODO: One day, when we teach DLA about VMA and model types, we should support
-// all model::PrimitiveTypes here.
-struct LeafType {
-  enum Kind {
-    Generic,
-    Pointer
-  } Kind;
-  // The following should be nullptr if Kind is not Pointer
-  const LayoutTypeSystemNode *Pointee = nullptr;
-};
-
-static LeafType getType(const LayoutTypeSystemNode *N) {
-  if (isPointerNode(N)) {
-    revng_assert(N->successors().size() == 1);
-    const LayoutTypeSystemNode *Pointee = N->successors().begin()->first;
-    return LeafType{ LeafType::Pointer, Pointee };
-  }
-  return LeafType{ LeafType::Generic, nullptr };
-}
-
-// Returns:
-// - equivalent if the types represented by A and B are the same
-// - greater if the type represented by A can model more traversals on the DLA
-//   type graph than that represented by B
-// - less if the type represented by B can model mode traversals on the DLA type
-//   graph than that represented by A
-// - unordered otherwise
-static std::partial_ordering compareLeafTypes(const LayoutTypeSystemNode *A,
-                                              const LayoutTypeSystemNode *B) {
-  LeafType AType = getType(A);
-  LeafType BType = getType(B);
-
-  // Pointer use does not disprove a scalar interpretation of the same bytes.
-  switch (AType.Kind) {
-
-  case LeafType::Generic: {
-
-    switch (BType.Kind) {
-
-    case LeafType::Generic: {
-      return std::partial_ordering::equivalent;
-    }
-
-    case LeafType::Pointer: {
-      return std::partial_ordering::unordered;
-    }
-
-    default:
-      revng_abort();
-    }
-
-  } break;
-
-  case LeafType::Pointer: {
-
-    switch (BType.Kind) {
-
-    case LeafType::Generic: {
-      return std::partial_ordering::unordered;
-    }
-
-    case LeafType::Pointer: {
-      return comparePointee(AType.Pointee, BType.Pointee);
-    }
-
-    default:
-      revng_abort();
-    }
-
-  } break;
-
-  default:
-    revng_abort();
-  }
-
-  return std::partial_ordering::unordered;
+static const LayoutTypeSystemNode *getPointee(const LayoutTypeSystemNode *N) {
+  if (not isPointerNode(N))
+    return nullptr;
+  revng_assert(N->successors().size() == 1);
+  return N->successors().begin()->first;
 }
 
 // Whenever in ChildrenSet there are multiple pointer children that point to
@@ -188,43 +102,44 @@ static bool resolveUnion(LayoutTypeSystem &TS,
                          NeighborSet &ChildrenSet) {
   bool Changed = false;
 
-  auto End = ChildrenSet.end();
-  auto AIt = ChildrenSet.begin();
-  auto ANext = AIt;
+  // Two children are comparable only if both are pointers: pointer use does
+  // not disprove a scalar interpretation of the same bytes. A pointer child
+  // is removed when a child before it in ChildrenSet points to a type that
+  // transitively contains its pointee at offset 0. A child is never removed
+  // for a child after it.
+  for (auto AIt = ChildrenSet.begin(); AIt != ChildrenSet.end(); ++AIt) {
+    const LayoutTypeSystemNode *APointee = getPointee((*AIt)->first);
+    if (APointee == nullptr)
+      continue;
 
-  for (; AIt != End; AIt = ANext) {
-    ANext = std::next(AIt);
+    // What APointee contains at offset 0 is the same for every other child,
+    // unless removing a child of Parent changes it, so it is computed once
+    // and again only after such a removal.
+    std::optional<ConstNodeSet> Contained;
 
-    auto AChildIt = *AIt;
-    LayoutTypeSystemNode *AChild = AChildIt->first;
-
-    auto BIt = ANext;
-    auto BNext = BIt;
-    for (; BIt != End; BIt = BNext) {
-      BNext = std::next(BIt);
-
+    for (auto BIt = std::next(AIt); BIt != ChildrenSet.end();) {
       auto BChildIt = *BIt;
-      LayoutTypeSystemNode *BChild = BChildIt->first;
+      const LayoutTypeSystemNode *BPointee = getPointee(BChildIt->first);
+      if (BPointee == nullptr or BPointee == APointee) {
+        ++BIt;
+        continue;
+      }
 
-      auto Cmp = compareLeafTypes(AChild, BChild);
+      if (not Contained.has_value())
+        Contained = getInstancesAtOffset0(APointee);
+
+      if (not Contained->contains(BPointee)) {
+        ++BIt;
+        continue;
+      }
+
       // A can reach more types on the DLA graph than B.
       // Remove B.
-      if (Cmp > 0) {
-        BNext = ChildrenSet.erase(BIt);
-        if (ANext == BIt)
-          ANext = std::next(AIt);
-        TS.eraseEdge(Parent, BChildIt);
-        Changed = true;
-      }
-
-      // B can reach more types on the DLA graph than A.
-      // Remove A.
-      if (Cmp < 0) {
-        ANext = ChildrenSet.erase(AIt);
-        TS.eraseEdge(Parent, AChildIt);
-        Changed = true;
-        break;
-      }
+      BIt = ChildrenSet.erase(BIt);
+      TS.eraseEdge(Parent, BChildIt);
+      Changed = true;
+      if (Contained->contains(Parent))
+        Contained.reset();
     }
   }
   // TODO: should we remove some nodes altogether? Or should we merge the

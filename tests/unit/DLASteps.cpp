@@ -2922,6 +2922,50 @@ BOOST_AUTO_TEST_CASE(ResolveLeafUnionsStillSimplifiesContainedPointees) {
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 0);
 }
 
+BOOST_AUTO_TEST_CASE(ResolveLeafUnionsKeepsAnEarlierContainedPointee) {
+  // A child is removed only for a child before it: here the pointer to the
+  // contained type comes first, and both stay.
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 8);
+  auto *Specific = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *General = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Pointee = createRoot(TS, 16);
+  auto *Contained = addInstanceAtOffset(TS, Pointee, 0, 8);
+  TS.addPointerLink(General, Pointee);
+  TS.addPointerLink(Specific, Contained);
+
+  runStep<ResolveLeafUnions>(TS);
+
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, General), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 1);
+}
+
+BOOST_AUTO_TEST_CASE(ResolveLeafUnionsRemovesEveryLaterContainedPointee) {
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 8);
+  auto *General = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Scalar = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *First = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Second = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Unrelated = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Pointee = createRoot(TS, 16);
+  auto *Contained = addInstanceAtOffset(TS, Pointee, 0, 8);
+  auto *Nested = addInstanceAtOffset(TS, Contained, 0, 4);
+  auto *Other = createRoot(TS, 16);
+  TS.addPointerLink(General, Pointee);
+  TS.addPointerLink(First, Contained);
+  TS.addPointerLink(Second, Nested);
+  TS.addPointerLink(Unrelated, Other);
+
+  runStep<ResolveLeafUnions>(TS);
+
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, General), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Scalar), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, First), 0);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Second), 0);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Unrelated), 1);
+}
+
 BOOST_AUTO_TEST_CASE(PushDownPointersRedirectsOnlyPointersBelowTheParent) {
   LayoutTypeSystem TS;
   auto *Root = createRoot(TS, 16);
