@@ -76,7 +76,16 @@ bool PushDownPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
     DFVisitSet GrandParentsAtOffset0 = getGrandParentsAtOffset0(Parent);
     llvm::SmallVector<LayoutTypeSystemNode *, 8> PointersToGrandParents;
 
-    {
+    // The pointers to redirect point to one of the grandparents other than
+    // Parent, so they are among the pointer predecessors of those. Visiting
+    // what Parent reaches, which can be most of the graph, is needed only if
+    // there are any, and only until all of them have been met.
+    size_t Wanted = 0;
+    for (const LayoutTypeSystemNode *GrandParent : GrandParentsAtOffset0)
+      if (GrandParent != Parent)
+        Wanted += llvm::count_if(GrandParent->Predecessors, isPointerEdge);
+
+    if (Wanted != 0) {
       llvm::SmallPtrSet<LayoutTypeSystemNode *, 8> Visited;
       for (LayoutTypeSystemNode *Child :
            llvm::make_first_range(Parent->Successors)) {
@@ -88,7 +97,11 @@ bool PushDownPointers::runOnTypeSystem(LayoutTypeSystem &TS) {
           LayoutTypeSystemNode *Pointee = Pointer->Successors.begin()->first;
           if (Pointee != Parent and GrandParentsAtOffset0.count(Pointee))
             PointersToGrandParents.push_back(Pointer);
+          if (PointersToGrandParents.size() == Wanted)
+            break;
         }
+        if (PointersToGrandParents.size() == Wanted)
+          break;
       }
     }
 

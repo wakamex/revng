@@ -2924,6 +2924,25 @@ BOOST_AUTO_TEST_CASE(ResolveLeafUnionsStillSimplifiesContainedPointees) {
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 0);
 }
 
+BOOST_AUTO_TEST_CASE(PushDownPointersRedirectsOnlyPointersBelowTheParent) {
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 16);
+  auto *Parent = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Inside = addInstanceAtOffset(TS, Parent, 0, 8);
+  TS.addPointerLink(Inside, Root);
+  auto *Other = createRoot(TS, 16);
+  auto *Outside = addInstanceAtOffset(TS, Other, 0, 8);
+  TS.addPointerLink(Outside, Root);
+
+  BOOST_CHECK(PushDownPointers().runOnTypeSystem(TS));
+
+  BOOST_REQUIRE_EQUAL(Inside->Successors.size(), 1);
+  BOOST_CHECK(Inside->Successors.begin()->first == Parent);
+  BOOST_REQUIRE_EQUAL(Outside->Successors.size(), 1);
+  BOOST_CHECK(Outside->Successors.begin()->first == Root);
+  BOOST_CHECK(not PushDownPointers().runOnTypeSystem(TS));
+}
+
 BOOST_AUTO_TEST_CASE(PruningRetainsPointerAlternativeWithoutChangingLayout) {
   for (bool FromModel : { false, true }) {
     LayoutTypeSystem TS;
