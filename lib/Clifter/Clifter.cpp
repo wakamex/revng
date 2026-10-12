@@ -827,6 +827,10 @@ private:
                                   mlir::Type TargetType) {
     mlir::Type SourceType = Value.getType();
 
+    // A cast yields a value, which has no qualifiers: a parameter the model
+    // declares as a const pointer takes a plain pointer.
+    TargetType = removeConst(TargetType);
+
     if (SourceType == TargetType)
       return Value;
 
