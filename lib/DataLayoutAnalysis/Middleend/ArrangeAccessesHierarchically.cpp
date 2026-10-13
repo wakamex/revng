@@ -927,7 +927,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // The pushed edges, each once, in the order they first arrived
         llvm::SmallVector<NeighborIterator> expand() const {
           llvm::SmallVector<NeighborIterator> Result;
-          llvm::DenseSet<const LayoutTypeSystemNode::Link *> Seen;
+          llvm::DenseSet<LayoutTypeSystemNode::Link> Seen;
           llvm::DenseSet<const PushedThrough *> Expanded{ this };
           llvm::SmallVector<std::pair<const PushedThrough *, size_t>> Stack{
             { this, 0 }
@@ -944,7 +944,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
               // A list expanded before adds no edge that is not there yet
               if (Expanded.insert(Next.Included).second)
                 Stack.push_back({ Next.Included, 0 });
-            } else if (Seen.insert(&*Next.Edge).second) {
+            } else if (Seen.insert(*Next.Edge).second) {
               Result.push_back(Next.Edge);
             }
           }
@@ -991,7 +991,8 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // or loses its own children before every root has been compared, so a
       // leaf is compared only with the roots that are not leaves.
       std::vector<NeighborIterator> Roots;
-      llvm::DenseMap<const LayoutTypeSystemNode::Link *, unsigned> RootNumber;
+      // The links of one node differ in their neighbor or in their tag
+      llvm::DenseMap<LayoutTypeSystemNode::Link, unsigned> RootNumber;
       std::vector<bool> IsRoot;
       std::vector<bool> IsLeafRoot;
       OverlapIndex Overlaps;
@@ -1000,7 +1001,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       for (const auto &[Edge, Unused] : ChildrenHierarchy) {
         unsigned Number = Roots.size();
         Roots.push_back(Edge);
-        RootNumber[&*Edge] = Number;
+        RootNumber[*Edge] = Number;
         IsRoot.push_back(true);
         IsLeafRoot.push_back(isLeaf(Edge->first));
         if (Edge->first->Size == 0) {
@@ -1064,7 +1065,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // be pushed through all of them.
         llvm::SmallVector<NeighborIterator> ContainsA;
 
-        for (unsigned BNumber : Candidates(RootNumber.lookup(&*AEdgeIt))) {
+        for (unsigned BNumber : Candidates(RootNumber.lookup(*AEdgeIt))) {
           LoggerIndent OtherChildIndent{ Log };
 
           NeighborIterator BEdgeIt = Roots[BNumber];
@@ -1098,7 +1099,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         // ChildrenHierarchy, since they're not roots anymore.
         for (NeighborIterator PushedInA : ContainedInA) {
           ChildrenHierarchy.erase(PushedInA);
-          IsRoot[RootNumber.lookup(&*PushedInA)] = false;
+          IsRoot[RootNumber.lookup(*PushedInA)] = false;
           PushedInsideA->Events.push_back({ PushedInA });
         }
 
@@ -1119,7 +1120,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           }
           // Now AEdgeIt is not a root anymore, so we have to erase it and
           // update ARootNext.
-          IsRoot[RootNumber.lookup(&*AEdgeIt)] = false;
+          IsRoot[RootNumber.lookup(*AEdgeIt)] = false;
           ARootNext = ChildrenHierarchy.erase(ARootIt);
         }
       }

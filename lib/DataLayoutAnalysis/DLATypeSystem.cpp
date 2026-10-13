@@ -236,41 +236,42 @@ void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
 
   // All the predecessors of all the successors of From are updated so that they
   // point to Into
-  for (auto &[Successor, Tag] : From->Successors) {
-    auto It = Successor->Predecessors.lower_bound(IDBasedKey{ FromID,
-                                                              nullptr });
-    auto End = Successor->Predecessors.upper_bound(IDBasedKey{ FromID + 1,
-                                                               nullptr });
+  for (auto &[Successor, Tag] : From->Successors.Links) {
+    auto It =
+        Successor->Predecessors.Links.lower_bound(IDBasedKey{FromID, nullptr});
+    auto End = Successor->Predecessors.Links.upper_bound(
+        IDBasedKey{FromID + 1, nullptr});
     while (It != End) {
       auto Next = std::next(It);
-      auto Extracted = Successor->Predecessors.extract(It);
+      auto Extracted = Successor->Predecessors.Links.extract(It);
       revng_assert(Extracted);
-      Successor->Predecessors.insert({ Into, Extracted.value().second });
+      Successor->Predecessors.Links.insert({Into, Extracted.value().second});
       It = Next;
     }
   }
 
   // All the successors of all the predecessors of From are updated so that they
   // point to Into
-  for (auto &[Predecessor, Tag] : From->Predecessors) {
-    auto It = Predecessor->Successors.lower_bound(IDBasedKey{ FromID,
-                                                              nullptr });
-    auto End = Predecessor->Successors.upper_bound(IDBasedKey{ FromID + 1,
-                                                               nullptr });
+  for (auto &[Predecessor, Tag] : From->Predecessors.Links) {
+    auto It =
+        Predecessor->Successors.Links.lower_bound(IDBasedKey{FromID, nullptr});
+    auto End = Predecessor->Successors.Links.upper_bound(
+        IDBasedKey{FromID + 1, nullptr});
     while (It != End) {
       auto Next = std::next(It);
-      auto Extracted = Predecessor->Successors.extract(It);
+      auto Extracted = Predecessor->Successors.Links.extract(It);
       revng_assert(Extracted);
-      Predecessor->Successors.insert({ Into, Extracted.value().second });
+      Predecessor->Successors.Links.insert({Into, Extracted.value().second});
       It = Next;
     }
   }
 
   // Merge all the predecessors and successors.
   {
-    Into->Predecessors.insert(From->Predecessors.begin(),
-                              From->Predecessors.end());
-    Into->Successors.insert(From->Successors.begin(), From->Successors.end());
+    Into->Predecessors.Links.insert(From->Predecessors.Links.begin(),
+                                    From->Predecessors.Links.end());
+    Into->Successors.Links.insert(From->Successors.Links.begin(),
+                                  From->Successors.Links.end());
   }
 
   // Remove self-references from predecessors and successors.
@@ -286,8 +287,8 @@ void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
                                                           nullptr });
       NeighborsSet.erase(IntoIt, IntoEnd);
     };
-    RemoveSelfEdges(Into->Predecessors);
-    RemoveSelfEdges(Into->Successors);
+    RemoveSelfEdges(Into->Predecessors.Links);
+    RemoveSelfEdges(Into->Successors.Links);
   }
 }
 
@@ -343,15 +344,15 @@ void LayoutTypeSystem::removeNode(LayoutTypeSystemNode *ToRemove) {
 
   using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
 
-  for (auto &[Neighbor, Tag] : ToRemove->Successors) {
-    auto &PredOfSucc = Neighbor->Predecessors;
+  for (auto &[Neighbor, Tag] : ToRemove->Successors.Links) {
+    auto &PredOfSucc = Neighbor->Predecessors.Links;
     auto It = PredOfSucc.lower_bound(IDBasedKey{ TheID, nullptr });
     auto End = PredOfSucc.upper_bound(IDBasedKey{ TheID + 1, nullptr });
     PredOfSucc.erase(It, End);
   }
 
-  for (auto &[Neighbor, Tag] : ToRemove->Predecessors) {
-    auto &SuccOfPred = Neighbor->Successors;
+  for (auto &[Neighbor, Tag] : ToRemove->Predecessors.Links) {
+    auto &SuccOfPred = Neighbor->Successors.Links;
     auto It = SuccOfPred.lower_bound(IDBasedKey{ TheID, nullptr });
     auto End = SuccOfPred.upper_bound(IDBasedKey{ TheID + 1, nullptr });
     SuccOfPred.erase(It, End);
@@ -371,15 +372,16 @@ void LayoutTypeSystem::moveEdgeTargetWithoutSumming(
 
   // First, move the successor from OldTgt to NewTgt
   LayoutTypeSystemNode *Src = InverseEdgeIt->first;
-  auto SuccHandle = Src->Successors.extract({ OldTgt, InverseEdgeIt->second });
+  auto SuccHandle =
+      Src->Successors.Links.extract({OldTgt, InverseEdgeIt->second});
   revng_assert(not SuccHandle.empty());
   SuccHandle.value().first = NewTgt;
-  Src->Successors.insert(std::move(SuccHandle));
+  Src->Successors.Links.insert(std::move(SuccHandle));
 
   // Then, move the predecessor edge from OldTgt to NewTgt
-  auto PredHandle = OldTgt->Predecessors.extract(InverseEdgeIt);
+  auto PredHandle = OldTgt->Predecessors.Links.extract(InverseEdgeIt.It);
   revng_assert(not PredHandle.empty());
-  NewTgt->Predecessors.insert(std::move(PredHandle));
+  NewTgt->Predecessors.Links.insert(std::move(PredHandle));
 }
 
 void LayoutTypeSystem::moveEdgeSourceWithoutSumming(
@@ -387,15 +389,15 @@ void LayoutTypeSystem::moveEdgeSourceWithoutSumming(
     NeighborIterator EdgeIt) {
   // First, move the predecessor edge from OldSrc to NewSrc.
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
-  auto PredHandle = Tgt->Predecessors.extract({ OldSrc, EdgeIt->second });
+  auto PredHandle = Tgt->Predecessors.Links.extract({OldSrc, EdgeIt->second});
   revng_assert(not PredHandle.empty());
   PredHandle.value().first = NewSrc;
-  Tgt->Predecessors.insert(std::move(PredHandle));
+  Tgt->Predecessors.Links.insert(std::move(PredHandle));
 
   // Then, move the successor edge from OldSrc to NewSrc
-  auto SuccHandle = OldSrc->Successors.extract(EdgeIt);
+  auto SuccHandle = OldSrc->Successors.Links.extract(EdgeIt.It);
   revng_assert(not SuccHandle.empty());
-  NewSrc->Successors.insert(std::move(SuccHandle));
+  NewSrc->Successors.Links.insert(std::move(SuccHandle));
 }
 
 void LayoutTypeSystem::moveEdgeTarget(LayoutTypeSystemNode *OldTgt,
@@ -412,11 +414,11 @@ void LayoutTypeSystem::moveEdgeTarget(LayoutTypeSystemNode *OldTgt,
   LayoutTypeSystemNode *Src = InverseEdgeIt->first;
 
   // Erase info in Src that represent the fact that OldTgt was a successor.
-  bool Erased = Src->Successors.erase({ OldTgt, InverseEdgeIt->second });
+  bool Erased = Src->Successors.Links.erase({OldTgt, InverseEdgeIt->second});
   revng_assert(Erased);
 
   // Extract the predecessor edge to be moved from OldTgt to NewTgt
-  auto OldPredHandle = OldTgt->Predecessors.extract(InverseEdgeIt);
+  auto OldPredHandle = OldTgt->Predecessors.Links.extract(InverseEdgeIt.It);
   revng_assert(not OldPredHandle.empty());
 
   // Add new instance links with adjusted offsets from Src to NewTgt.
@@ -450,11 +452,11 @@ void LayoutTypeSystem::moveEdgeSource(LayoutTypeSystemNode *OldSrc,
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
 
   // Erase info in Tgt that represent the fact that OldSrc was a predecessor.
-  bool Erased = Tgt->Predecessors.erase({ OldSrc, EdgeIt->second });
+  bool Erased = Tgt->Predecessors.Links.erase({OldSrc, EdgeIt->second});
   revng_assert(Erased);
 
   // Extract the successor edge to be moved from OldSrc to NewSrc
-  auto OldSuccHandle = OldSrc->Successors.extract(EdgeIt);
+  auto OldSuccHandle = OldSrc->Successors.Links.extract(EdgeIt.It);
   revng_assert(not OldSuccHandle.empty());
 
   // Add new instance links with adjusted offsets from NewSrc to Tgt.
@@ -479,11 +481,11 @@ NeighborIterator LayoutTypeSystem::eraseEdge(LayoutTypeSystemNode *Src,
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
 
   // Erase the inverse edge from Tgt to Src
-  bool Erased = Tgt->Predecessors.erase({ Src, EdgeIt->second });
+  bool Erased = Tgt->Predecessors.Links.erase({Src, EdgeIt->second});
   revng_assert(Erased);
 
   // Erase the actual forward edge from Src to Tgt
-  return Src->Successors.erase(EdgeIt);
+  return NeighborIterator(Src->Successors.Links.erase(EdgeIt.It));
 }
 
 void LayoutTypeSystem::dropOutgoingEdges(LayoutTypeSystemNode *N) {

@@ -250,8 +250,8 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
 
       ++Top.NextToVisitIt;
 
-      LTSN *NextChild = NextEdgeToVisit->first;
-      const TypeLinkTag *NextTag = NextEdgeToVisit->second;
+      LTSN *NextChild = (*NextEdgeToVisit).first;
+      const TypeLinkTag *NextTag = (*NextEdgeToVisit).second;
       revng_log(Log,
                 "--| next children is " << NextChild->ID
                                         << " tag: " << *NextTag);
@@ -332,9 +332,9 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
       revng_assert(Parent.NextToVisitIt != Begin);
 
       EdgeInfo PoppedEdge = {
-        .Src = Parent.Node,
-        .Tgt = Back.Node,
-        .Tag = std::prev(Parent.NextToVisitIt)->second,
+          .Src = Parent.Node,
+          .Tgt = Back.Node,
+          .Tag = (*std::prev(Parent.NextToVisitIt)).second,
       };
 
       // If we've popped a backedge it must be equal to PoppedEdge. If it's not
@@ -391,13 +391,13 @@ static bool removeBackedgesFromSCC(LayoutTypeSystem &TS) {
         }
         ToRemove.insert(BackedgesOnStack.begin(), BackedgesOnStack.end());
 
-        if (SCC::BackedgeNodeView::filter()({ nullptr, Edge->second })) {
+        if (SCC::BackedgeNodeView::filter()({nullptr, (*Edge).second})) {
           // This means that the edge E we tried to push on the stack is an
           // BackedgeNodeView edge closing a loop.
           EdgeInfo BackedgeNotPushed{
-            .Src = VisitStack.back().Node,
-            .Tgt = Edge->first,
-            .Tag = Edge->second,
+              .Src = VisitStack.back().Node,
+              .Tgt = (*Edge).first,
+              .Tag = (*Edge).second,
           };
           revng_log(Log,
                     "remove backedge closing loop, that isn't on stack: "

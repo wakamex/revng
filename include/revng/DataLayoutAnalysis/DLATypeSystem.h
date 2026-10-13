@@ -200,8 +200,88 @@ struct LayoutTypeSystemNode {
     }
   };
 
-  using NeighborsSet = std::set<Link, NeighborLinkComparison>;
-  using NeighborIterator = NeighborsSet::iterator;
+  /// The links of a node in one direction, ordered by the neighbor's ID and
+  /// then by tag.
+  ///
+  /// An iterator yields a link as a value: how the links are stored belongs
+  /// to LayoutTypeSystem, which alone changes them. An iterator stays valid
+  /// until the link it designates is erased or moved.
+  class LinkSet {
+  private:
+    using Storage = std::set<Link, NeighborLinkComparison>;
+    Storage Links;
+    friend class LayoutTypeSystem;
+
+  public:
+    using value_type = Link;
+
+    class iterator {
+    private:
+      Storage::const_iterator It;
+      friend class LinkSet;
+      friend class LayoutTypeSystem;
+      explicit iterator(Storage::const_iterator It) : It(It) {}
+
+      struct Arrow {
+        Link TheLink;
+        const Link *operator->() const { return &TheLink; }
+      };
+
+    public:
+      using iterator_category = std::bidirectional_iterator_tag;
+      using value_type = Link;
+      using difference_type = std::ptrdiff_t;
+      using pointer = Arrow;
+      using reference = const Link;
+
+      iterator() = default;
+      const Link operator*() const { return *It; }
+      Arrow operator->() const { return Arrow{*It}; }
+      iterator &operator++() {
+        ++It;
+        return *this;
+      }
+      iterator operator++(int) {
+        iterator Old = *this;
+        ++It;
+        return Old;
+      }
+      iterator &operator--() {
+        --It;
+        return *this;
+      }
+      iterator operator--(int) {
+        iterator Old = *this;
+        --It;
+        return Old;
+      }
+      bool operator==(const iterator &) const = default;
+    };
+    using const_iterator = iterator;
+
+    iterator begin() const { return iterator(Links.begin()); }
+    iterator end() const { return iterator(Links.end()); }
+    size_t size() const { return Links.size(); }
+    bool empty() const { return Links.empty(); }
+
+    template <typename KeyT> iterator find(const KeyT &Key) const {
+      return iterator(Links.find(Key));
+    }
+    template <typename KeyT> bool contains(const KeyT &Key) const {
+      return Links.contains(Key);
+    }
+    bool contains(const Link &Key) const { return Links.contains(Key); }
+    iterator find(const Link &Key) const { return iterator(Links.find(Key)); }
+    template <typename KeyT> iterator lower_bound(const KeyT &Key) const {
+      return iterator(Links.lower_bound(Key));
+    }
+    template <typename KeyT> iterator upper_bound(const KeyT &Key) const {
+      return iterator(Links.upper_bound(Key));
+    }
+  };
+
+  using NeighborsSet = LinkSet;
+  using NeighborIterator = LinkSet::iterator;
   const NeighborsSet &successors() const { return Successors; }
   const NeighborsSet &predecessors() const { return Predecessors; }
 
@@ -338,8 +418,8 @@ protected:
     auto It = LinkTags.insert(std::forward<TagT>(Tag)).first;
     revng_assert(It != LinkTags.end());
     const TypeLinkTag *T = &*It;
-    bool New = Src->Successors.insert(std::make_pair(Tgt, T)).second;
-    New |= Tgt->Predecessors.insert(std::make_pair(Src, T)).second;
+    bool New = Src->Successors.Links.insert(std::make_pair(Tgt, T)).second;
+    New |= Tgt->Predecessors.Links.insert(std::make_pair(Src, T)).second;
     return std::make_pair(T, New);
   }
 
