@@ -97,9 +97,44 @@ static const LayoutTypeSystemNode *getPointee(const LayoutTypeSystemNode *N) {
 // Whenever in ChildrenSet there are multiple pointer children that point to
 // types that are one at offset 0 of the other, it removes from Parent the
 // pointer children that point to the less-general types.
-static bool resolveUnion(LayoutTypeSystem &TS,
-                         LayoutTypeSystemNode *Parent,
-                         NeighborSet &ChildrenSet) {
+// The types that contain each pointee at offset 0, kept for the whole step: a
+// pointee that many pointers lead to is asked about under many parents, and
+// finding its containers reads every link that enters them. Removing a child
+// of a parent takes the parent out of the containers of that child alone,
+// since a leaf contains nothing, so only that entry is dropped.
+class ContainerCache {
+private:
+  llvm::DenseMap<const LayoutTypeSystemNode *, ConstNodeSet> Containers;
+  size_t Held = 0;
+  // About 4 GB of node pointers
+  static constexpr size_t MaxHeld = size_t(1) << 29;
+
+public:
+  const ConstNodeSet &of(const LayoutTypeSystemNode *Pointee) {
+    auto It = Containers.find(Pointee);
+    if (It != Containers.end())
+      return It->second;
+
+    ConstNodeSet Found = getContainersAtOffset0(Pointee);
+    if (Held + Found.size() > MaxHeld) {
+      Containers.clear();
+      Held = 0;
+    }
+    Held += Found.size();
+    return Containers.try_emplace(Pointee, std::move(Found)).first->second;
+  }
+
+  void drop(const LayoutTypeSystemNode *Removed) {
+    auto It = Containers.find(Removed);
+    if (It == Containers.end())
+      return;
+    Held -= It->second.size();
+    Containers.erase(It);
+  }
+};
+
+static bool resolveUnion(LayoutTypeSystem &TS, LayoutTypeSystemNode *Parent,
+                         NeighborSet &ChildrenSet, ContainerCache &Containers) {
   bool Changed = false;
 
   // Two children are comparable only if both are pointers: pointer use does
@@ -110,11 +145,7 @@ static bool resolveUnion(LayoutTypeSystem &TS,
   //
   // The question is asked from the pointee that would be contained: the types
   // that contain a type at offset 0 are few, while the types a type contains
-  // can be most of the graph. The containers of a pointee are the same for
-  // every child that is compared with it. Removing a child of Parent takes
-  // Parent out of the containers of that child alone, since a leaf contains
-  // nothing.
-  llvm::DenseMap<const LayoutTypeSystemNode *, ConstNodeSet> Containers;
+  // can be most of the graph.
   for (auto AIt = ChildrenSet.begin(); AIt != ChildrenSet.end(); ++AIt) {
     const LayoutTypeSystemNode *APointee = getPointee((*AIt)->first);
     if (APointee == nullptr)
@@ -129,13 +160,7 @@ static bool resolveUnion(LayoutTypeSystem &TS,
         continue;
       }
 
-      auto It = Containers.find(BPointee);
-      if (It == Containers.end()) {
-        ConstNodeSet Found = getContainersAtOffset0(BPointee);
-        It = Containers.try_emplace(BPointee, std::move(Found)).first;
-      }
-
-      if (not It->second.contains(APointee)) {
+      if (not Containers.of(BPointee).contains(APointee)) {
         ++BIt;
         continue;
       }
@@ -145,7 +170,7 @@ static bool resolveUnion(LayoutTypeSystem &TS,
       BIt = ChildrenSet.erase(BIt);
       TS.eraseEdge(Parent, BChildIt);
       Changed = true;
-      Containers.erase(BChild);
+      Containers.drop(BChild);
     }
   }
   // TODO: should we remove some nodes altogether? Or should we merge the
@@ -156,10 +181,11 @@ static bool resolveUnion(LayoutTypeSystem &TS,
 bool ResolveLeafUnions::runOnTypeSystem(LayoutTypeSystem &TS) {
   bool Changed = false;
 
+  ContainerCache Containers;
   for (LayoutTypeSystemNode *Node : llvm::nodes(&TS)) {
     auto LeafChildrenSets = getOverlappingLeafChildren(Node);
     for (auto &LeafChildrenSet : llvm::make_second_range(LeafChildrenSets))
-      Changed |= resolveUnion(TS, Node, LeafChildrenSet);
+      Changed |= resolveUnion(TS, Node, LeafChildrenSet, Containers);
   }
 
   return Changed;
