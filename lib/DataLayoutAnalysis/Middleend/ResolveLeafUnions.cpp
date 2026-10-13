@@ -2,9 +2,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include <optional>
 #include <set>
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
@@ -77,12 +77,12 @@ using CInstance0 =
 using ConstNodeSet =
     llvm::df_iterator_default_set<const LayoutTypeSystemNode *, 8>;
 
-// The nodes the type represented by N transitively contains at offset 0, N
-// included
-static ConstNodeSet getInstancesAtOffset0(const LayoutTypeSystemNode *N) {
+// The nodes whose types transitively contain the type represented by N at
+// offset 0, N included
+static ConstNodeSet getContainersAtOffset0(const LayoutTypeSystemNode *N) {
   ConstNodeSet Result;
   for ([[maybe_unused]] const LayoutTypeSystemNode *_ :
-       llvm::depth_first_ext(CInstance0(N), Result))
+       llvm::depth_first_ext(llvm::Inverse<CInstance0>(N), Result))
     ;
   return Result;
 }
@@ -107,28 +107,35 @@ static bool resolveUnion(LayoutTypeSystem &TS,
   // is removed when a child before it in ChildrenSet points to a type that
   // transitively contains its pointee at offset 0. A child is never removed
   // for a child after it.
+  //
+  // The question is asked from the pointee that would be contained: the types
+  // that contain a type at offset 0 are few, while the types a type contains
+  // can be most of the graph. The containers of a pointee are the same for
+  // every child that is compared with it. Removing a child of Parent takes
+  // Parent out of the containers of that child alone, since a leaf contains
+  // nothing.
+  llvm::DenseMap<const LayoutTypeSystemNode *, ConstNodeSet> Containers;
   for (auto AIt = ChildrenSet.begin(); AIt != ChildrenSet.end(); ++AIt) {
     const LayoutTypeSystemNode *APointee = getPointee((*AIt)->first);
     if (APointee == nullptr)
       continue;
 
-    // What APointee contains at offset 0 is the same for every other child,
-    // unless removing a child of Parent changes it, so it is computed once
-    // and again only after such a removal.
-    std::optional<ConstNodeSet> Contained;
-
     for (auto BIt = std::next(AIt); BIt != ChildrenSet.end();) {
       auto BChildIt = *BIt;
-      const LayoutTypeSystemNode *BPointee = getPointee(BChildIt->first);
+      const LayoutTypeSystemNode *BChild = BChildIt->first;
+      const LayoutTypeSystemNode *BPointee = getPointee(BChild);
       if (BPointee == nullptr or BPointee == APointee) {
         ++BIt;
         continue;
       }
 
-      if (not Contained.has_value())
-        Contained = getInstancesAtOffset0(APointee);
+      auto It = Containers.find(BPointee);
+      if (It == Containers.end()) {
+        ConstNodeSet Found = getContainersAtOffset0(BPointee);
+        It = Containers.try_emplace(BPointee, std::move(Found)).first;
+      }
 
-      if (not Contained->contains(BPointee)) {
+      if (not It->second.contains(APointee)) {
         ++BIt;
         continue;
       }
@@ -138,8 +145,7 @@ static bool resolveUnion(LayoutTypeSystem &TS,
       BIt = ChildrenSet.erase(BIt);
       TS.eraseEdge(Parent, BChildIt);
       Changed = true;
-      if (Contained->contains(Parent))
-        Contained.reset();
+      Containers.erase(BChild);
     }
   }
   // TODO: should we remove some nodes altogether? Or should we merge the

@@ -2966,6 +2966,27 @@ BOOST_AUTO_TEST_CASE(ResolveLeafUnionsRemovesEveryLaterContainedPointee) {
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, Unrelated), 1);
 }
 
+BOOST_AUTO_TEST_CASE(ResolveLeafUnionsSeesTheChildrenItRemoved) {
+  // Outer contains Root, so it contains Root's children too. Removing Second
+  // from Root takes it out of what Outer contains, and the pointer to Second
+  // then stays.
+  LayoutTypeSystem TS;
+  auto *Outer = createRoot(TS, 16);
+  auto *Root = addInstanceAtOffset(TS, Outer, 0, 8);
+  auto *First = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Second = addInstanceAtOffset(TS, Root, 0, 8);
+  auto *Third = addInstanceAtOffset(TS, Root, 0, 8);
+  TS.addPointerLink(First, Outer);
+  TS.addPointerLink(Second, Root);
+  TS.addPointerLink(Third, Second);
+
+  runStep<ResolveLeafUnions>(TS);
+
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, First), 1);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Second), 0);
+  BOOST_CHECK_EQUAL(countInstanceEdges(Root, Third), 1);
+}
+
 BOOST_AUTO_TEST_CASE(PushDownPointersRedirectsOnlyPointersBelowTheParent) {
   LayoutTypeSystem TS;
   auto *Root = createRoot(TS, 16);
