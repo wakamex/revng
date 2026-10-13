@@ -226,69 +226,92 @@ LayoutTypeSystem::createArtificialLayoutTypes(unsigned N) {
   return Result;
 }
 
+// After this many owner changes, the links to a slot are all repositioned, so
+// that looking one up tries a bounded number of IDs.
+static constexpr size_t MaxPastIDs = 32;
+
 void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
                                    LayoutTypeSystemNode *Into) {
+  using LinkSlot = LayoutTypeSystemNode::LinkSlot;
+  using LinkSet = LayoutTypeSystemNode::LinkSet;
 
   revng_assert(From != Into);
 
-  uint64_t FromID = From->ID;
-  using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
+  // The node with more links keeps its slot and its link sets, whichever of
+  // the two it is: the links to it stay as they are, and the links to the
+  // other node, which are fewer, are rewritten.
+  auto Degree = [](const LayoutTypeSystemNode *N) {
+    return N->Successors.size() + N->Predecessors.size();
+  };
+  bool KeepFrom = Degree(From) > Degree(Into);
+  LinkSlot *Keep = (KeepFrom ? From : Into)->Slot.get();
+  LinkSlot *Drop = (KeepFrom ? Into : From)->Slot.get();
 
-  // All the predecessors of all the successors of From are updated so that they
-  // point to Into
-  for (auto &[Successor, Tag] : From->Successors.Links) {
-    auto It =
-        Successor->Predecessors.Links.lower_bound(IDBasedKey{FromID, nullptr});
-    auto End = Successor->Predecessors.Links.upper_bound(
-        IDBasedKey{FromID + 1, nullptr});
-    while (It != End) {
-      auto Next = std::next(It);
-      auto Extracted = Successor->Predecessors.Links.extract(It);
-      revng_assert(Extracted);
-      Successor->Predecessors.Links.insert({Into, Extracted.value().second});
-      It = Next;
+  // The IDs under which a link to Drop can be positioned
+  llvm::SmallVector<uint64_t, 4> DropIDs{Drop->Owner->ID};
+  DropIDs.append(Drop->PastIDs.begin(), Drop->PastIDs.end());
+
+  if (KeepFrom) {
+    std::swap(Into->Successors, From->Successors);
+    std::swap(Into->Predecessors, From->Predecessors);
+    std::swap(Into->Slot, From->Slot);
+    Keep->PastIDs.push_back(From->ID);
+    Keep->Owner = Into;
+    ++LinkSet::OwnerChanges;
+  }
+
+  // From now on Into has Keep and its link sets, and From has Drop's.
+  auto FindDropEntry = [&](LinkSet &Links, const TypeLinkTag *Tag) {
+    auto It = Links.Links.end();
+    for (uint64_t ID : DropIDs) {
+      It = Links.findAt(Drop, ID, Tag);
+      if (It != Links.Links.end())
+        break;
     }
+    revng_assert(It != Links.Links.end());
+    return It;
+  };
+
+  // Each neighbor of Drop gets a link to Keep in place of its link to Drop
+  for (const auto &Entry : From->Successors.Links) {
+    if (Entry.Slot == Keep or Entry.Slot == Drop)
+      continue;
+    LinkSet &Back = Entry.Slot->Owner->Predecessors;
+    Back.Links.erase(FindDropEntry(Back, Entry.Tag));
+    Back.insertEntry(Keep, Entry.Tag);
+  }
+  for (const auto &Entry : From->Predecessors.Links) {
+    if (Entry.Slot == Keep or Entry.Slot == Drop)
+      continue;
+    LinkSet &Back = Entry.Slot->Owner->Successors;
+    Back.Links.erase(FindDropEntry(Back, Entry.Tag));
+    Back.insertEntry(Keep, Entry.Tag);
   }
 
-  // All the successors of all the predecessors of From are updated so that they
-  // point to Into
-  for (auto &[Predecessor, Tag] : From->Predecessors.Links) {
-    auto It =
-        Predecessor->Successors.Links.lower_bound(IDBasedKey{FromID, nullptr});
-    auto End = Predecessor->Successors.Links.upper_bound(
-        IDBasedKey{FromID + 1, nullptr});
-    while (It != End) {
-      auto Next = std::next(It);
-      auto Extracted = Predecessor->Successors.Links.extract(It);
-      revng_assert(Extracted);
-      Predecessor->Successors.Links.insert({Into, Extracted.value().second});
-      It = Next;
-    }
+  // Into gets Drop's links, except those that would lead to itself
+  for (const auto &Entry : From->Successors.Links)
+    if (Entry.Slot != Keep and Entry.Slot != Drop)
+      Into->Successors.insertEntry(Entry.Slot, Entry.Tag);
+  for (const auto &Entry : From->Predecessors.Links)
+    if (Entry.Slot != Keep and Entry.Slot != Drop)
+      Into->Predecessors.insertEntry(Entry.Slot, Entry.Tag);
+
+  // Remove the links between the two nodes, and from each to itself
+  for (LinkSet *Links : {&Into->Successors, &Into->Predecessors}) {
+    Links->eraseEntriesOf(Keep);
+    for (uint64_t ID : DropIDs)
+      Links->eraseEntriesAt(Drop, ID);
   }
 
-  // Merge all the predecessors and successors.
-  {
-    Into->Predecessors.Links.insert(From->Predecessors.Links.begin(),
-                                    From->Predecessors.Links.end());
-    Into->Successors.Links.insert(From->Successors.Links.begin(),
-                                  From->Successors.Links.end());
-  }
+  From->Successors.Links.clear();
+  From->Predecessors.Links.clear();
 
-  // Remove self-references from predecessors and successors.
-  {
-    const auto RemoveSelfEdges = [FromID,
-                                  IntoID = Into->ID](auto &NeighborsSet) {
-      auto FromIt = NeighborsSet.lower_bound(IDBasedKey{ FromID, nullptr });
-      auto FromEnd = NeighborsSet.upper_bound(IDBasedKey{ FromID + 1,
-                                                          nullptr });
-      NeighborsSet.erase(FromIt, FromEnd);
-      auto IntoIt = NeighborsSet.lower_bound(IDBasedKey{ IntoID, nullptr });
-      auto IntoEnd = NeighborsSet.upper_bound(IDBasedKey{ IntoID + 1,
-                                                          nullptr });
-      NeighborsSet.erase(IntoIt, IntoEnd);
-    };
-    RemoveSelfEdges(Into->Predecessors.Links);
-    RemoveSelfEdges(Into->Successors.Links);
+  if (Keep->PastIDs.size() >= MaxPastIDs) {
+    for (const auto &Entry : Into->Successors.Links)
+      Entry.Slot->Owner->Predecessors.reposition(Keep, Entry.Tag);
+    for (const auto &Entry : Into->Predecessors.Links)
+      Entry.Slot->Owner->Successors.reposition(Keep, Entry.Tag);
+    Keep->PastIDs.clear();
   }
 }
 
@@ -342,21 +365,14 @@ void LayoutTypeSystem::removeNode(LayoutTypeSystemNode *ToRemove) {
   EqClasses.remove(TheID);
   revng_log(MergeLog, "Removing " << ToRemove->ID << "\n");
 
-  using IDBasedKey = std::pair<uint64_t, const TypeLinkTag *>;
+  LayoutTypeSystemNode::LinkSlot *Slot = ToRemove->Slot.get();
+  for (const auto &Entry : ToRemove->Successors.Links)
+    if (Entry.Slot != Slot)
+      Entry.Slot->Owner->Predecessors.eraseEntriesOf(Slot);
 
-  for (auto &[Neighbor, Tag] : ToRemove->Successors.Links) {
-    auto &PredOfSucc = Neighbor->Predecessors.Links;
-    auto It = PredOfSucc.lower_bound(IDBasedKey{ TheID, nullptr });
-    auto End = PredOfSucc.upper_bound(IDBasedKey{ TheID + 1, nullptr });
-    PredOfSucc.erase(It, End);
-  }
-
-  for (auto &[Neighbor, Tag] : ToRemove->Predecessors.Links) {
-    auto &SuccOfPred = Neighbor->Successors.Links;
-    auto It = SuccOfPred.lower_bound(IDBasedKey{ TheID, nullptr });
-    auto End = SuccOfPred.upper_bound(IDBasedKey{ TheID + 1, nullptr });
-    SuccOfPred.erase(It, End);
-  }
+  for (const auto &Entry : ToRemove->Predecessors.Links)
+    if (Entry.Slot != Slot)
+      Entry.Slot->Owner->Successors.eraseEntriesOf(Slot);
 
   bool Erased = Layouts.erase(ToRemove);
   revng_assert(Erased);
@@ -372,16 +388,14 @@ void LayoutTypeSystem::moveEdgeTargetWithoutSumming(
 
   // First, move the successor from OldTgt to NewTgt
   LayoutTypeSystemNode *Src = InverseEdgeIt->first;
-  auto SuccHandle =
-      Src->Successors.Links.extract({OldTgt, InverseEdgeIt->second});
-  revng_assert(not SuccHandle.empty());
-  SuccHandle.value().first = NewTgt;
-  Src->Successors.Links.insert(std::move(SuccHandle));
+  const TypeLinkTag *Tag = InverseEdgeIt->second;
+  bool Erased = Src->Successors.eraseEntry(OldTgt->Slot.get(), Tag);
+  revng_assert(Erased);
+  Src->Successors.insertEntry(NewTgt->Slot.get(), Tag);
 
   // Then, move the predecessor edge from OldTgt to NewTgt
-  auto PredHandle = OldTgt->Predecessors.Links.extract(InverseEdgeIt.It);
-  revng_assert(not PredHandle.empty());
-  NewTgt->Predecessors.Links.insert(std::move(PredHandle));
+  OldTgt->Predecessors.Links.erase(InverseEdgeIt.It);
+  NewTgt->Predecessors.insertEntry(Src->Slot.get(), Tag);
 }
 
 void LayoutTypeSystem::moveEdgeSourceWithoutSumming(
@@ -389,15 +403,14 @@ void LayoutTypeSystem::moveEdgeSourceWithoutSumming(
     NeighborIterator EdgeIt) {
   // First, move the predecessor edge from OldSrc to NewSrc.
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
-  auto PredHandle = Tgt->Predecessors.Links.extract({OldSrc, EdgeIt->second});
-  revng_assert(not PredHandle.empty());
-  PredHandle.value().first = NewSrc;
-  Tgt->Predecessors.Links.insert(std::move(PredHandle));
+  const TypeLinkTag *Tag = EdgeIt->second;
+  bool Erased = Tgt->Predecessors.eraseEntry(OldSrc->Slot.get(), Tag);
+  revng_assert(Erased);
+  Tgt->Predecessors.insertEntry(NewSrc->Slot.get(), Tag);
 
   // Then, move the successor edge from OldSrc to NewSrc
-  auto SuccHandle = OldSrc->Successors.Links.extract(EdgeIt.It);
-  revng_assert(not SuccHandle.empty());
-  NewSrc->Successors.Links.insert(std::move(SuccHandle));
+  OldSrc->Successors.Links.erase(EdgeIt.It);
+  NewSrc->Successors.insertEntry(Tgt->Slot.get(), Tag);
 }
 
 void LayoutTypeSystem::moveEdgeTarget(LayoutTypeSystemNode *OldTgt,
@@ -414,15 +427,14 @@ void LayoutTypeSystem::moveEdgeTarget(LayoutTypeSystemNode *OldTgt,
   LayoutTypeSystemNode *Src = InverseEdgeIt->first;
 
   // Erase info in Src that represent the fact that OldTgt was a successor.
-  bool Erased = Src->Successors.Links.erase({OldTgt, InverseEdgeIt->second});
+  const TypeLinkTag *EdgeTag = InverseEdgeIt->second;
+  bool Erased = Src->Successors.eraseEntry(OldTgt->Slot.get(), EdgeTag);
   revng_assert(Erased);
 
-  // Extract the predecessor edge to be moved from OldTgt to NewTgt
-  auto OldPredHandle = OldTgt->Predecessors.Links.extract(InverseEdgeIt.It);
-  revng_assert(not OldPredHandle.empty());
+  // Remove the predecessor edge to be moved from OldTgt to NewTgt
+  OldTgt->Predecessors.Links.erase(InverseEdgeIt.It);
 
   // Add new instance links with adjusted offsets from Src to NewTgt.
-  const TypeLinkTag *EdgeTag = OldPredHandle.value().second;
   switch (EdgeTag->getKind()) {
 
   case TypeLinkTag::LK_Instance: {
@@ -452,15 +464,14 @@ void LayoutTypeSystem::moveEdgeSource(LayoutTypeSystemNode *OldSrc,
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
 
   // Erase info in Tgt that represent the fact that OldSrc was a predecessor.
-  bool Erased = Tgt->Predecessors.Links.erase({OldSrc, EdgeIt->second});
+  const TypeLinkTag *EdgeTag = EdgeIt->second;
+  bool Erased = Tgt->Predecessors.eraseEntry(OldSrc->Slot.get(), EdgeTag);
   revng_assert(Erased);
 
-  // Extract the successor edge to be moved from OldSrc to NewSrc
-  auto OldSuccHandle = OldSrc->Successors.Links.extract(EdgeIt.It);
-  revng_assert(not OldSuccHandle.empty());
+  // Remove the successor edge to be moved from OldSrc to NewSrc
+  OldSrc->Successors.Links.erase(EdgeIt.It);
 
   // Add new instance links with adjusted offsets from NewSrc to Tgt.
-  const TypeLinkTag *EdgeTag = OldSuccHandle.value().second;
   switch (EdgeTag->getKind()) {
 
   case TypeLinkTag::LK_Instance: {
@@ -481,7 +492,7 @@ NeighborIterator LayoutTypeSystem::eraseEdge(LayoutTypeSystemNode *Src,
   LayoutTypeSystemNode *Tgt = EdgeIt->first;
 
   // Erase the inverse edge from Tgt to Src
-  bool Erased = Tgt->Predecessors.Links.erase({Src, EdgeIt->second});
+  bool Erased = Tgt->Predecessors.eraseEntry(Src->Slot.get(), EdgeIt->second);
   revng_assert(Erased);
 
   // Erase the actual forward edge from Src to Tgt
@@ -493,6 +504,44 @@ void LayoutTypeSystem::dropOutgoingEdges(LayoutTypeSystemNode *N) {
   auto End = N->successors().end();
   while (It != End)
     It = eraseEdge(N, It);
+}
+
+void LayoutTypeSystem::checkLinks() const {
+  using LinkSet = LayoutTypeSystemNode::LinkSet;
+  using LinkSlot = LayoutTypeSystemNode::LinkSlot;
+
+  for (LayoutTypeSystemNode *Node : Layouts) {
+    revng_check(Node->Slot->Owner == Node);
+    const std::pair<const LinkSet *, bool> Directions[] = {
+        {&Node->Successors, true}, {&Node->Predecessors, false}};
+    for (const auto &[Links, Forward] : Directions) {
+      std::vector<std::pair<const LinkSlot *, const TypeLinkTag *>> Seen;
+      for (const auto &Entry : Links->Links) {
+        LayoutTypeSystemNode *Neighbor = Entry.Slot->Owner;
+        revng_check(Neighbor != Node);
+        revng_check(Layouts.contains(Neighbor));
+        revng_check(Neighbor->Slot.get() == Entry.Slot);
+        revng_check(Entry.Position == Neighbor->ID or
+                    llvm::is_contained(Entry.Slot->PastIDs, Entry.Position));
+        const LinkSet &Back =
+            Forward ? Neighbor->Predecessors : Neighbor->Successors;
+        revng_check(Back.findEntry(Node->Slot.get(), Entry.Tag) !=
+                    Back.Links.end());
+        Seen.push_back({Entry.Slot, Entry.Tag});
+      }
+      llvm::sort(Seen);
+      revng_check(std::adjacent_find(Seen.begin(), Seen.end()) == Seen.end());
+
+      Links->ensureOrdered();
+      const LinkSet::Entry *Previous = nullptr;
+      for (const auto &Entry : Links->Links) {
+        revng_check(Entry.Position == Entry.Slot->Owner->ID);
+        revng_check(Previous == nullptr or
+                    LinkSet::EntryComparison()(*Previous, Entry));
+        Previous = &Entry;
+      }
+    }
+  }
 }
 
 static Logger VerifyDLALog("dla-verify-strict");

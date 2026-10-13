@@ -200,17 +200,152 @@ struct LayoutTypeSystemNode {
     }
   };
 
+  /// What the links to a node name. A node's slot survives the node when a
+  /// merge keeps the links of the node that goes away: the slot then changes
+  /// owner, and the links to it need no rewriting.
+  struct LinkSlot {
+    LayoutTypeSystemNode *Owner = nullptr;
+    /// The IDs of the earlier owners under which a link to this slot may still
+    /// be positioned in a neighbor's link set
+    llvm::SmallVector<uint64_t, 0> PastIDs;
+  };
+
   /// The links of a node in one direction, ordered by the neighbor's ID and
   /// then by tag.
   ///
   /// An iterator yields a link as a value: how the links are stored belongs
   /// to LayoutTypeSystem, which alone changes them. An iterator stays valid
   /// until the link it designates is erased or moved.
+  ///
+  /// An entry names the neighbor's slot and keeps the ID it was positioned
+  /// under, so the set is always ordered by keys that do not change in place.
+  /// When a slot changes owner, the entries that name it are out of position
+  /// until the set is next read: every read that depends on the order first
+  /// repositions them, unless no slot has changed owner since the last time.
   class LinkSet {
   private:
-    using Storage = std::set<Link, NeighborLinkComparison>;
-    Storage Links;
+    struct Entry {
+      LinkSlot *Slot;
+      const TypeLinkTag *Tag;
+      uint64_t Position;
+    };
+
+    struct EntryComparison {
+      using is_transparent = std::true_type;
+      using Helper = NeighborLinkComparison::Helper;
+
+      static Helper key(const Entry &E) {
+        return Helper(
+            std::pair<uint64_t, const TypeLinkTag *>(E.Position, E.Tag));
+      }
+      static Helper key(const Link &L) { return Helper(L); }
+      static Helper key(const std::pair<uint64_t, const TypeLinkTag *> &P) {
+        return Helper(P);
+      }
+
+      template <typename LHST, typename RHST>
+      bool operator()(const LHST &LHS, const RHST &RHS) const {
+        return key(LHS) < key(RHS);
+      }
+    };
+
+    using Storage = std::set<Entry, EntryComparison>;
+    using IDKey = std::pair<uint64_t, const TypeLinkTag *>;
+
+    mutable Storage Links;
+    /// The value of OwnerChanges when every entry was last in position
+    mutable uint64_t CheckedAt = 0;
+    /// How many times a slot has changed owner
+    static inline uint64_t OwnerChanges = 0;
+
     friend class LayoutTypeSystem;
+
+    static uint64_t currentID(const LinkSlot *Slot);
+
+    /// Put every entry in the position of its slot's current owner
+    void ensureOrdered() const {
+      if (CheckedAt == OwnerChanges)
+        return;
+      llvm::SmallVector<Storage::iterator, 8> Stale;
+      for (auto It = Links.begin(), End = Links.end(); It != End; ++It)
+        if (It->Position != currentID(It->Slot))
+          Stale.push_back(It);
+      for (Storage::iterator It : Stale) {
+        auto Handle = Links.extract(It);
+        Handle.value().Position = currentID(Handle.value().Slot);
+        bool Inserted = Links.insert(std::move(Handle)).inserted;
+        revng_assert(Inserted);
+      }
+      CheckedAt = OwnerChanges;
+    }
+
+    /// The entry for \p Slot with \p Tag positioned under \p ID, if any
+    Storage::iterator findAt(const LinkSlot *Slot, uint64_t ID,
+                             const TypeLinkTag *Tag) const {
+      auto It = Links.find(IDKey{ID, Tag});
+      if (It != Links.end() and It->Slot == Slot)
+        return It;
+      return Links.end();
+    }
+
+    /// The entry for \p Slot with \p Tag, wherever it is positioned
+    Storage::iterator findEntry(const LinkSlot *Slot,
+                                const TypeLinkTag *Tag) const {
+      auto It = findAt(Slot, currentID(Slot), Tag);
+      for (auto ID = Slot->PastIDs.rbegin(), End = Slot->PastIDs.rend();
+           It == Links.end() and ID != End; ++ID)
+        It = findAt(Slot, *ID, Tag);
+      return It;
+    }
+
+    /// Add a link to \p Slot with \p Tag, unless there is one
+    bool insertEntry(LinkSlot *Slot, const TypeLinkTag *Tag) {
+      if (findEntry(Slot, Tag) != Links.end())
+        return false;
+      bool Inserted = Links.insert(Entry{Slot, Tag, currentID(Slot)}).second;
+      revng_assert(Inserted);
+      return true;
+    }
+
+    bool eraseEntry(const LinkSlot *Slot, const TypeLinkTag *Tag) {
+      auto It = findEntry(Slot, Tag);
+      if (It == Links.end())
+        return false;
+      Links.erase(It);
+      return true;
+    }
+
+    /// Erase the entries for \p Slot positioned under \p ID, with any tag
+    void eraseEntriesAt(const LinkSlot *Slot, uint64_t ID) {
+      auto It = Links.lower_bound(IDKey{ID, nullptr});
+      auto End = Links.lower_bound(IDKey{ID + 1, nullptr});
+      while (It != End) {
+        if (It->Slot == Slot)
+          It = Links.erase(It);
+        else
+          ++It;
+      }
+    }
+
+    /// Erase the entries for \p Slot, with any tag
+    void eraseEntriesOf(const LinkSlot *Slot) {
+      eraseEntriesAt(Slot, currentID(Slot));
+      for (uint64_t ID : Slot->PastIDs)
+        eraseEntriesAt(Slot, ID);
+    }
+
+    /// Put the entry for \p Slot with \p Tag in the position of the slot's
+    /// current owner
+    void reposition(const LinkSlot *Slot, const TypeLinkTag *Tag) {
+      auto It = findEntry(Slot, Tag);
+      revng_assert(It != Links.end());
+      if (It->Position == currentID(Slot))
+        return;
+      auto Handle = Links.extract(It);
+      Handle.value().Position = currentID(Slot);
+      bool Inserted = Links.insert(std::move(Handle)).inserted;
+      revng_assert(Inserted);
+    }
 
   public:
     using value_type = Link;
@@ -235,8 +370,8 @@ struct LayoutTypeSystemNode {
       using reference = const Link;
 
       iterator() = default;
-      const Link operator*() const { return *It; }
-      Arrow operator->() const { return Arrow{*It}; }
+      const Link operator*() const { return Link(It->Slot->Owner, It->Tag); }
+      Arrow operator->() const { return Arrow{**this}; }
       iterator &operator++() {
         ++It;
         return *this;
@@ -259,23 +394,39 @@ struct LayoutTypeSystemNode {
     };
     using const_iterator = iterator;
 
-    iterator begin() const { return iterator(Links.begin()); }
-    iterator end() const { return iterator(Links.end()); }
+    iterator begin() const {
+      ensureOrdered();
+      return iterator(Links.begin());
+    }
+    iterator end() const {
+      ensureOrdered();
+      return iterator(Links.end());
+    }
     size_t size() const { return Links.size(); }
     bool empty() const { return Links.empty(); }
 
     template <typename KeyT> iterator find(const KeyT &Key) const {
+      ensureOrdered();
       return iterator(Links.find(Key));
     }
     template <typename KeyT> bool contains(const KeyT &Key) const {
+      ensureOrdered();
       return Links.contains(Key);
     }
-    bool contains(const Link &Key) const { return Links.contains(Key); }
-    iterator find(const Link &Key) const { return iterator(Links.find(Key)); }
+    bool contains(const Link &Key) const {
+      ensureOrdered();
+      return Links.contains(Key);
+    }
+    iterator find(const Link &Key) const {
+      ensureOrdered();
+      return iterator(Links.find(Key));
+    }
     template <typename KeyT> iterator lower_bound(const KeyT &Key) const {
+      ensureOrdered();
       return iterator(Links.lower_bound(Key));
     }
     template <typename KeyT> iterator upper_bound(const KeyT &Key) const {
+      ensureOrdered();
       return iterator(Links.upper_bound(Key));
     }
   };
@@ -291,6 +442,7 @@ private:
   friend class LayoutTypeSystem;
   NeighborsSet Successors{};
   NeighborsSet Predecessors{};
+  std::unique_ptr<LinkSlot> Slot{new LinkSlot{this, {}}};
 
 public:
   uint64_t Size{};
@@ -318,6 +470,10 @@ public:
     print(OS);
   }
 };
+
+inline uint64_t LayoutTypeSystemNode::LinkSet::currentID(const LinkSlot *Slot) {
+  return Slot->Owner->ID;
+}
 
 /// This class handles equivalence classes between indexes of vectors
 class VectEqClasses : public llvm::IntEqClasses {
@@ -418,8 +574,8 @@ protected:
     auto It = LinkTags.insert(std::forward<TagT>(Tag)).first;
     revng_assert(It != LinkTags.end());
     const TypeLinkTag *T = &*It;
-    bool New = Src->Successors.Links.insert(std::make_pair(Tgt, T)).second;
-    New |= Tgt->Predecessors.Links.insert(std::make_pair(Src, T)).second;
+    bool New = Src->Successors.insertEntry(Tgt->Slot.get(), T);
+    New |= Tgt->Predecessors.insertEntry(Src->Slot.get(), T);
     return std::make_pair(T, New);
   }
 
@@ -517,6 +673,11 @@ private:
 public:
   // Checks that is valid, and returns true if it is, false otherwise
   bool verifyConsistency() const;
+
+  /// Abort unless every link set is as LinkSet describes: each entry names a
+  /// live node, is positioned under an ID its slot has had, appears once, and
+  /// has its counterpart in the neighbor; and once read, the set is in order.
+  void checkLinks() const;
   // Checks that is valid and a DAG, and returns true if it is, false otherwise
   bool verifyDAG() const;
   // Checks that is valid and a DAG on instance. Returns true on success.

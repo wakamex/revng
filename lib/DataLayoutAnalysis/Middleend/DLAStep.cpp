@@ -187,6 +187,9 @@ static void logDigest(const LayoutTypeSystem &TS, llvm::StringRef When) {
                                      << " edges=" << Edges);
 }
 
+// Checks every link set after each step; the check also puts them in order
+static Logger CheckLinksLog("dla-check-links");
+
 void StepManager::run(LayoutTypeSystem &TS) {
   if (not hasValidSchedule())
     revng_abort("Cannot run a on LayoutTypeSystem: invalid schedule");
@@ -200,6 +203,8 @@ void StepManager::run(LayoutTypeSystem &TS) {
     T.advance(getStepNameFromID(S->getStepID()));
     S->runOnTypeSystem(TS);
     ++x;
+    if (CheckLinksLog.isEnabled())
+      TS.checkLinks();
     logDigest(TS,
               std::to_string(x) + " "
                 + getStepNameFromID(S->getStepID()));

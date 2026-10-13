@@ -2922,6 +2922,154 @@ BOOST_AUTO_TEST_CASE(ResolveLeafUnionsStillSimplifiesContainedPointees) {
   BOOST_CHECK_EQUAL(countInstanceEdges(Root, Specific), 0);
 }
 
+// A model of the links as triples of IDs and an offset, with the merge as the
+// kernel defines it: the links of the node that goes away become links of the
+// node that stays, and a link from a node to itself disappears.
+namespace {
+
+struct LinkModel {
+  using Triple = std::tuple<uint64_t, uint64_t, uint64_t>;
+  std::set<Triple> Links;
+
+  void add(uint64_t Src, uint64_t Tgt, uint64_t Offset) {
+    if (Src != Tgt)
+      Links.insert({Src, Tgt, Offset});
+  }
+
+  void merge(uint64_t Into, uint64_t From) {
+    std::set<Triple> Result;
+    for (auto [Src, Tgt, Offset] : Links) {
+      Src = Src == From ? Into : Src;
+      Tgt = Tgt == From ? Into : Tgt;
+      if (Src != Tgt)
+        Result.insert({Src, Tgt, Offset});
+    }
+    Links = std::move(Result);
+  }
+
+  // The links of each node in each direction, in the order the kernel must
+  // yield them: by neighbor ID and then by offset
+  using Listing =
+      std::map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>>;
+  std::pair<Listing, Listing> listings() const {
+    Listing Successors;
+    Listing Predecessors;
+    for (const auto &[Src, Tgt, Offset] : Links) {
+      Successors[Src].push_back({Tgt, Offset});
+      Predecessors[Tgt].push_back({Src, Offset});
+    }
+    for (auto &[Node, List] : Predecessors)
+      llvm::sort(List);
+    return {Successors, Predecessors};
+  }
+};
+
+} // namespace
+
+static void checkAgainstModel(const LayoutTypeSystem &TS,
+                              const LinkModel &Model) {
+  TS.checkLinks();
+  BOOST_REQUIRE(TS.verifyConsistency());
+
+  LinkModel::Listing Successors;
+  LinkModel::Listing Predecessors;
+  for (const LTSN *Node : llvm::nodes(&TS)) {
+    BOOST_REQUIRE_EQUAL(Node->successors().size(),
+                        size_t(std::distance(Node->successors().begin(),
+                                             Node->successors().end())));
+    for (const auto &[Neighbor, Tag] : Node->successors())
+      Successors[Node->ID].push_back(
+          {Neighbor->ID, Tag->getOffsetExpr().Offset});
+    for (const auto &[Neighbor, Tag] : Node->predecessors())
+      Predecessors[Node->ID].push_back(
+          {Neighbor->ID, Tag->getOffsetExpr().Offset});
+  }
+  auto [ExpectedSuccessors, ExpectedPredecessors] = Model.listings();
+  BOOST_REQUIRE(Successors == ExpectedSuccessors);
+  BOOST_REQUIRE(Predecessors == ExpectedPredecessors);
+}
+
+BOOST_AUTO_TEST_CASE(MergesKeepLinksInOrderWhicheverNodeHasMore) {
+  LayoutTypeSystem TS;
+  LinkModel Model;
+  std::vector<LTSN *> Nodes;
+  for (unsigned I = 0; I < 240; ++I)
+    Nodes.push_back(createRoot(TS, 8));
+
+  uint64_t State = 12345;
+  auto Random = [&State](uint64_t Bound) {
+    State = State * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (State >> 33) % Bound;
+  };
+  auto Link = [&](LTSN *Src, LTSN *Tgt, uint64_t Offset) {
+    if (Src == Tgt)
+      return;
+    OffsetExpression OE{};
+    OE.Offset = Offset;
+    TS.addInstanceLink(Src, Tgt, std::move(OE));
+    Model.add(Src->ID, Tgt->ID, Offset);
+  };
+
+  // A few hubs with many links in both directions, and sparse links elsewhere
+  for (unsigned I = 0; I < 900; ++I) {
+    LTSN *Hub = Nodes[Random(6)];
+    LTSN *Other = Nodes[Random(Nodes.size())];
+    if (Random(2))
+      Link(Hub, Other, Random(3) * 8);
+    else
+      Link(Other, Hub, Random(3) * 8);
+  }
+  for (unsigned I = 0; I < 400; ++I)
+    Link(Nodes[Random(Nodes.size())], Nodes[Random(Nodes.size())],
+         Random(3) * 8);
+  checkAgainstModel(TS, Model);
+
+  auto Merge = [&](LTSN *Into, LTSN *From) {
+    Model.merge(Into->ID, From->ID);
+    TS.mergeNodes({Into, From});
+    Nodes.erase(llvm::find(Nodes, From));
+  };
+
+  // A hub is absorbed by one sparse node after another, more times than a
+  // slot remembers owners, with a read of the link sets only on every third
+  // merge
+  LTSN *Hub = Nodes[0];
+  for (unsigned I = 0; I < 80; ++I) {
+    LTSN *Into = Nodes.back() == Hub ? Nodes[Nodes.size() - 2] : Nodes.back();
+    Merge(Into, Hub);
+    Hub = Into;
+    if (I % 3 == 0)
+      checkAgainstModel(TS, Model);
+    Link(Nodes[Random(Nodes.size())], Hub, Random(3) * 8);
+    Link(Hub, Nodes[Random(Nodes.size())], Random(3) * 8);
+  }
+  checkAgainstModel(TS, Model);
+
+  // Merges between arbitrary nodes, in both directions of size
+  for (unsigned I = 0; I < 100 and Nodes.size() > 2; ++I) {
+    LTSN *Into = Nodes[Random(Nodes.size())];
+    LTSN *From = Nodes[Random(Nodes.size())];
+    if (Into == From)
+      continue;
+    Merge(Into, From);
+    if (I % 4 == 0)
+      checkAgainstModel(TS, Model);
+  }
+  checkAgainstModel(TS, Model);
+
+  // Erasing links and removing a node after all those owner changes
+  for (unsigned I = 0; I < 30; ++I) {
+    LTSN *Node = Nodes[Random(Nodes.size())];
+    if (Node->successors().empty())
+      continue;
+    auto It = Node->successors().begin();
+    Model.Links.erase(
+        {Node->ID, It->first->ID, It->second->getOffsetExpr().Offset});
+    TS.eraseEdge(Node, It);
+  }
+  checkAgainstModel(TS, Model);
+}
+
 BOOST_AUTO_TEST_CASE(ResolveLeafUnionsKeepsAnEarlierContainedPointee) {
   // A child is removed only for a child before it: here the pointer to the
   // contained type comes first, and both stay.
