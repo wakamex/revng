@@ -987,33 +987,42 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       // same order, without comparing all pairs of the children of a node
       // with thousands of them. A child of size 0 has no field size, and its
       // edges are compared with every root, as before.
+      // canPushThrough also finds nothing for two leaves, and no child gains
+      // or loses its own children before every root has been compared, so a
+      // leaf is compared only with the roots that are not leaves.
       std::vector<NeighborIterator> Roots;
       llvm::DenseMap<const LayoutTypeSystemNode::Link *, unsigned> RootNumber;
       std::vector<bool> IsRoot;
+      std::vector<bool> IsLeafRoot;
       OverlapIndex Overlaps;
+      OverlapIndex NonLeafOverlaps;
       llvm::SmallVector<unsigned> Unsized;
       for (const auto &[Edge, Unused] : ChildrenHierarchy) {
         unsigned Number = Roots.size();
         Roots.push_back(Edge);
         RootNumber[&*Edge] = Number;
         IsRoot.push_back(true);
+        IsLeafRoot.push_back(isLeaf(Edge->first));
         if (Edge->first->Size == 0) {
           Unsized.push_back(Number);
         } else {
           uint64_t Start = Edge->second->getOffsetExpr().Offset;
-          Overlaps.add(Start,
-                       Start + getFieldSize(Edge->first, Edge->second),
-                       Number);
+          uint64_t End = Start + getFieldSize(Edge->first, Edge->second);
+          Overlaps.add(Start, End, Number);
+          if (not IsLeafRoot.back())
+            NonLeafOverlaps.add(Start, End, Number);
         }
       }
       Overlaps.build();
+      NonLeafOverlaps.build();
 
       // The roots after Number in ChildrenHierarchy that canPushThrough may
       // find something with, in that order
       auto Candidates = [&](unsigned Number) {
         llvm::SmallVector<unsigned> Result;
         auto Add = [&](unsigned Other) {
-          if (Other > Number and IsRoot[Other])
+          if (Other > Number and IsRoot[Other] and
+              not(IsLeafRoot[Number] and IsLeafRoot[Other]))
             Result.push_back(Other);
         };
         NeighborIterator Edge = Roots[Number];
@@ -1024,7 +1033,9 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
         }
         uint64_t Start = Edge->second->getOffsetExpr().Offset;
         uint64_t End = Start + getFieldSize(Edge->first, Edge->second);
-        Overlaps.forEachOverlapping(Start, End, Add);
+        const OverlapIndex &Others =
+            IsLeafRoot[Number] ? NonLeafOverlaps : Overlaps;
+        Others.forEachOverlapping(Start, End, Add);
         for (unsigned Other : Unsized)
           Add(Other);
         llvm::sort(Result);
