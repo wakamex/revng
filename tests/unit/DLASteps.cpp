@@ -2985,6 +2985,26 @@ BOOST_AUTO_TEST_CASE(PushDownPointersRedirectsOnlyPointersBelowTheParent) {
   BOOST_CHECK(not PushDownPointers().runOnTypeSystem(TS));
 }
 
+BOOST_AUTO_TEST_CASE(PushDownPointersFollowsPointersItRedirected) {
+  // Mid redirects both pointers to itself; Low, below it, must then still
+  // find them, through the links the first redirection left.
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 32);
+  auto *Mid = addInstanceAtOffset(TS, Root, 0, 24);
+  auto *Low = addInstanceAtOffset(TS, Mid, 0, 8);
+  auto *Beside = addInstanceAtOffset(TS, Mid, 8, 8);
+  auto *Below = addInstanceAtOffset(TS, Low, 0, 8);
+  TS.addPointerLink(Beside, Root);
+  TS.addPointerLink(Below, Root);
+
+  BOOST_CHECK(PushDownPointers().runOnTypeSystem(TS));
+
+  BOOST_REQUIRE_EQUAL(Beside->successors().size(), 1);
+  BOOST_CHECK(Beside->successors().begin()->first == Low);
+  BOOST_REQUIRE_EQUAL(Below->successors().size(), 1);
+  BOOST_CHECK(Below->successors().begin()->first == Low);
+}
+
 BOOST_AUTO_TEST_CASE(PruningRetainsPointerAlternativeWithoutChangingLayout) {
   for (bool FromModel : { false, true }) {
     LayoutTypeSystem TS;
