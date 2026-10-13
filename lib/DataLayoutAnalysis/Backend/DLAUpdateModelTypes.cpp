@@ -54,6 +54,14 @@ static bool canBeUpgraded(const model::Type &T) {
   return T.isPointerOrNumberPrimitive() or T.isGenericPrimitive();
 }
 
+// DLA upgrades a value to a pointer to the layout it recovered, so the value
+// must be as wide as a pointer: a 128-bit value in a vector register is not
+// one, whatever was accessed through it.
+static bool canBecomePointer(const model::Type &T, const model::Binary &Model) {
+  using model::Architecture::getPointerSize;
+  return canBeUpgraded(T) and T.size() == getPointerSize(Model.Architecture());
+}
+
 static const llvm::Value *toLLVMValue(const llvm::Argument &A) {
   return static_cast<const llvm::Value *>(&A);
 }
@@ -151,7 +159,7 @@ static bool updateArgumentTypes(model::Binary &Model,
     // no accesses in the TypeSystem graph. These nodes are pruned away in the
     // middle-end, therefore there is no Type associated to them at this
     // stage.
-    if (canBeUpgraded(*ModelArg.Type())) {
+    if (canBecomePointer(*ModelArg.Type(), Model)) {
       LayoutTypePtr Key{ LLVMVal, LayoutTypePtr::FieldNumNone };
       if (auto NewTypeIt = DLATypes.find(Key); NewTypeIt != DLATypes.end()) {
         auto OldSize = *ModelArg.Type()->size();
@@ -208,7 +216,7 @@ static bool updateReturnType(model::Binary &Model,
     // middle-end, therefore there is no Type associated to them at this
     // stage.
     model::UpcastableType &ModelReturnType = ModelRet.value().Type();
-    if (canBeUpgraded(*ModelReturnType)) {
+    if (canBecomePointer(*ModelReturnType, Model)) {
       LayoutTypePtr Key{ LLVMRetVal, Index };
       if (auto NewTypeIt = TypeMap.find(Key); NewTypeIt != TypeMap.end()) {
         auto OldSize = ModelReturnType->size();
@@ -257,7 +265,7 @@ static bool updateArgumentTypes(model::Binary &Model,
     // no accesses in the TypeSystem graph. These nodes are pruned away in the
     // middle-end, therefore there is no Type associated to them at this
     // stage.
-    if (canBeUpgraded(*ModelArg.Type())) {
+    if (canBecomePointer(*ModelArg.Type(), Model)) {
       LayoutTypePtr Key{ LLVMVal, LayoutTypePtr::FieldNumNone };
       if (auto NewTypeIt = DLATypes.find(Key); NewTypeIt != DLATypes.end()) {
         auto OldSize = *ModelArg.Type()->size();
@@ -317,7 +325,7 @@ static bool updateReturnType(model::Binary &Model,
     // no accesses in the TypeSystem graph. These nodes are pruned away in the
     // middle-end, therefore there is no Type associated to them at this
     // stage.
-    if (canBeUpgraded(*ModelReturnType)) {
+    if (canBecomePointer(*ModelReturnType, Model)) {
       LayoutTypePtr Key{ LLVMRetVal, LayoutTypePtr::FieldNumNone };
       if (auto NewTypeIt = TypeMap.find(Key); NewTypeIt != TypeMap.end()) {
         auto OldSize = *ModelReturnType->size();
