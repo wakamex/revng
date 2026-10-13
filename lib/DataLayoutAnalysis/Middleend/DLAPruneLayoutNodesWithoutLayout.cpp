@@ -30,7 +30,9 @@ bool PruneLayoutNodesWithoutLayout::runOnTypeSystem(LayoutTypeSystem &TS) {
     revng_assert(TS.verifyDAG());
 
   std::set<const LTSN *> Visited;
-  std::set<LTSN *> ToRemove;
+  // Ordered by ID, so that nodes are removed in an order that does not depend
+  // on where they were allocated
+  LayoutTypeSystem::NodeSet ToRemove;
 
   for (LTSN *Root : llvm::nodes(&TS)) {
     revng_assert(Root != nullptr);

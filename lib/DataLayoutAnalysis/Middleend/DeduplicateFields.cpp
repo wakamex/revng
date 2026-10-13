@@ -293,9 +293,13 @@ static std::tuple<bool, NodeVec, NodeVec> areEquivSubtrees(const Link &Child1,
 ///\param ToKeep the root of the first subtree
 ///\param ToMerge the root of the second subtree, will be collapsed if
 ///           equivalent to the subtree of \a ToKeep
-static std::tuple<bool, std::set<LTSN *>, std::set<LTSN *>>
-mergeIfTopologicallyEq(LayoutTypeSystem &TS,
-                       const Link &ToKeep,
+// Nodes in the order they were added. A set ordered by address would make the
+// order in which the caller processes them depend on the allocator, and a set
+// ordered by ID could not hold nodes that a merge has erased.
+using NodeList = llvm::SmallSetVector<LTSN *, 8>;
+
+static std::tuple<bool, NodeList, NodeList>
+mergeIfTopologicallyEq(LayoutTypeSystem &TS, const Link &ToKeep,
                        const Link &ToMerge) {
 
   auto &&[AreEquiv, Subtree1, Subtree2] = areEquivSubtrees(ToKeep, ToMerge);
@@ -306,37 +310,55 @@ mergeIfTopologicallyEq(LayoutTypeSystem &TS,
 
   revng_log(CmpLog, "Equivalent!");
 
-  // Compute equivalence classes of nodes that have to be merged together.
-  llvm::EquivalenceClasses<LTSN *> MergeClasses;
+  // Compute equivalence classes of nodes that have to be merged together,
+  // ordered by ID.
+  using NodeByID = LayoutTypeSystem::NodeComparison;
+  llvm::EquivalenceClasses<LTSN *, NodeByID> MergeClasses;
   for (const auto &[N1, N2] : llvm::zip(Subtree1, Subtree2))
     MergeClasses.unionSets(N1, N2);
 
+  // Decide what to merge before merging anything: afterwards the classes hold
+  // erased nodes, which cannot be compared.
+  struct ClassToMerge {
+    LTSN *Keep;
+    llvm::SmallVector<LTSN *, 4> Others;
+  };
+  llvm::SmallVector<ClassToMerge, 8> Classes;
   LTSN *ChildToKeep = ToKeep.first;
-  std::set<LTSN *> ErasedNodes;
-  std::set<LTSN *> PreservedNodes;
-  for (EquivalenceClasses<LTSN *>::iterator I = MergeClasses.begin(),
-                                            E = MergeClasses.end();
-       I != E;
-       ++I) {
+  for (auto I = MergeClasses.begin(), E = MergeClasses.end(); I != E; ++I) {
 
     if (!I->isLeader())
       continue; // Ignore non-leader sets.
 
     // Decide which node to keep for each equivalence class.
-    // This typically depends only on the order of insertions of stuff in the
-    // class, so it's deterministic. However, we want the NodeToKeep to always
-    // be preserved, so we have to enforce it manually.
+    // This depends only on the order of insertions of stuff in the class, so
+    // it's deterministic. However, we want the NodeToKeep to always be
+    // preserved, so we have to enforce it manually.
     LTSN *Keep = *MergeClasses.member_begin(I);
     if (MergeClasses.isEquivalent(ChildToKeep, Keep))
       Keep = ChildToKeep;
 
+    ClassToMerge &Class = Classes.emplace_back();
+    Class.Keep = Keep;
     for (LTSN *Merge : llvm::make_range(MergeClasses.member_begin(I),
-                                        MergeClasses.member_end())) {
-      if (Keep == Merge) {
-        PreservedNodes.insert(Keep);
-        continue;
-      }
-      TS.mergeNodes({ Keep, Merge });
+                                        MergeClasses.member_end()))
+      if (Merge != Keep)
+        Class.Others.push_back(Merge);
+  }
+
+  NodeList PreservedNodes;
+  {
+    llvm::SmallVector<LTSN *, 8> Kept;
+    for (const ClassToMerge &Class : Classes)
+      Kept.push_back(Class.Keep);
+    llvm::sort(Kept, NodeByID());
+    PreservedNodes.insert(Kept.begin(), Kept.end());
+  }
+
+  NodeList ErasedNodes;
+  for (const ClassToMerge &Class : Classes) {
+    for (LTSN *Merge : Class.Others) {
+      TS.mergeNodes({Class.Keep, Merge});
       ErasedNodes.insert(Merge);
     }
   }
