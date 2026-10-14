@@ -257,7 +257,21 @@ void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
     std::swap(Into->Slot, From->Slot);
     Keep->PastIDs.push_back(From->ID);
     Keep->Owner = Into;
+
+    // The change of owner puts out of position the links to Keep, which are
+    // in its neighbors' sets. Keep's own sets do not hold any, apart from
+    // links to itself, which go away below: if they were in order, they still
+    // are, and a chain of merges into one node after another does not make
+    // every read of them check them again.
+    bool SuccessorsChecked =
+        Into->Successors.CheckedAt == LinkSet::OwnerChanges;
+    bool PredecessorsChecked =
+        Into->Predecessors.CheckedAt == LinkSet::OwnerChanges;
     ++LinkSet::OwnerChanges;
+    if (SuccessorsChecked)
+      Into->Successors.CheckedAt = LinkSet::OwnerChanges;
+    if (PredecessorsChecked)
+      Into->Predecessors.CheckedAt = LinkSet::OwnerChanges;
   }
 
   // From now on Into has Keep and its link sets, and From has Drop's.
@@ -288,13 +302,29 @@ void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
     Back.insertEntry(Keep, Entry.Tag);
   }
 
-  // Into gets Drop's links, except those that would lead to itself
-  for (const auto &Entry : From->Successors.Links)
-    if (Entry.Slot != Keep and Entry.Slot != Drop)
-      Into->Successors.insertEntry(Entry.Slot, Entry.Tag);
-  for (const auto &Entry : From->Predecessors.Links)
-    if (Entry.Slot != Keep and Entry.Slot != Drop)
-      Into->Predecessors.insertEntry(Entry.Slot, Entry.Tag);
+  // Into gets Drop's links, except those that would lead to itself. When
+  // they were Into's own, their entries move as they are, and replace an equal
+  // link of From's: an iterator to a link of Into stays valid across a merge,
+  // as it does when Into keeps its own sets.
+  auto Absorb = [&](LinkSet &Target, LinkSet &Source) {
+    while (not Source.Links.empty()) {
+      auto Handle = Source.Links.extract(Source.Links.begin());
+      LinkSet::Entry &Entry = Handle.value();
+      if (Entry.Slot == Keep or Entry.Slot == Drop)
+        continue;
+      auto Existing = Target.findEntry(Entry.Slot, Entry.Tag);
+      if (Existing != Target.Links.end()) {
+        if (not KeepFrom)
+          continue;
+        Target.Links.erase(Existing);
+      }
+      Entry.Position = LinkSet::currentID(Entry.Slot);
+      bool Inserted = Target.Links.insert(std::move(Handle)).inserted;
+      revng_assert(Inserted);
+    }
+  };
+  Absorb(Into->Successors, From->Successors);
+  Absorb(Into->Predecessors, From->Predecessors);
 
   // Remove the links between the two nodes, and from each to itself
   for (LinkSet *Links : {&Into->Successors, &Into->Predecessors}) {
@@ -302,9 +332,6 @@ void LayoutTypeSystem::fixPredSucc(LayoutTypeSystemNode *From,
     for (uint64_t ID : DropIDs)
       Links->eraseEntriesAt(Drop, ID);
   }
-
-  From->Successors.Links.clear();
-  From->Predecessors.Links.clear();
 
   if (Keep->PastIDs.size() >= MaxPastIDs) {
     for (const auto &Entry : Into->Successors.Links)

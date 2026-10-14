@@ -266,6 +266,10 @@ struct LayoutTypeSystemNode {
     void ensureOrdered() const {
       if (CheckedAt == OwnerChanges)
         return;
+      ensureOrderedSlow();
+    }
+
+    void ensureOrderedSlow() const {
       llvm::SmallVector<Storage::iterator, 8> Stale;
       for (auto It = Links.begin(), End = Links.end(); It != End; ++It)
         if (It->Position != currentID(It->Slot))
@@ -394,12 +398,15 @@ struct LayoutTypeSystemNode {
     };
     using const_iterator = iterator;
 
+    // A set of one link is in order wherever its entry is positioned
     iterator begin() const {
-      ensureOrdered();
+      if (Links.size() > 1)
+        ensureOrdered();
       return iterator(Links.begin());
     }
     iterator end() const {
-      ensureOrdered();
+      if (Links.size() > 1)
+        ensureOrdered();
       return iterator(Links.end());
     }
     size_t size() const { return Links.size(); }
