@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <string>
 #include <variant>
 
 #include "llvm/ADT/PostOrderIterator.h"
@@ -113,8 +115,18 @@ public:
     if (not Node->HasUnknownPointee or isPointerNode(Node)
         or Node->Size < model::Architecture::getPointerSize(Model->Architecture()))
       return Base;
-    unsigned Index = *NodeIDEquivalenceClasses.getEqClassID(Node->ID);
-    UpcastableType &Result = Alternatives[Index];
+    // The alternative of a primitive, such as a generic 64-bit value, is the
+    // same union wherever it appears, so it is defined once. Any other base
+    // involves a definition of this equivalence class of nodes, and so does
+    // its alternative.
+    UpcastableType *Slot = nullptr;
+    if (Base->isPrimitive()) {
+      Slot = &SharedAlternatives[toString(Base)];
+    } else {
+      unsigned Index = *NodeIDEquivalenceClasses.getEqClassID(Node->ID);
+      Slot = &Alternatives[Index];
+    }
+    UpcastableType &Result = *Slot;
     if (Result.isEmpty()) {
       auto &&[Union, Type] = Model->makeUnionDefinition();
       Union.addField(Base.copy());
@@ -131,6 +143,7 @@ private:
   const dla::VectEqClasses &NodeIDEquivalenceClasses;
   std::vector<UpcastableType> UpcastableTypes;
   std::vector<UpcastableType> Alternatives;
+  std::map<std::string, UpcastableType> SharedAlternatives;
 };
 
 static bool representsTypeDefinition(const LayoutTypeSystemNode *Node) {

@@ -3174,6 +3174,43 @@ BOOST_AUTO_TEST_CASE(PushDownPointersFollowsPointersItRedirected) {
   BOOST_CHECK(Below->successors().begin()->first == Low);
 }
 
+BOOST_AUTO_TEST_CASE(PointerAlternativesOfPrimitivesShareOneUnion) {
+  // Two fields of 8 bytes, each used as a pointer to a layout that was
+  // pruned: each keeps a scalar and a pointer reading, and the union that
+  // holds them is one definition.
+  LayoutTypeSystem TS;
+  auto *Root = createRoot(TS, 16);
+  for (unsigned Offset : {0U, 8U}) {
+    auto *Access = addInstanceAtOffset(TS, Root, Offset, 8);
+    TS.addPointerLink(Access, createRoot(TS));
+  }
+  PruneLayoutNodesWithoutLayout().runOnTypeSystem(TS);
+  ComputeUpperMemberAccesses().runOnTypeSystem(TS);
+  ComputeNonInterferingComponents().runOnTypeSystem(TS);
+  TS.getEqClasses().compress();
+
+  llvm::LLVMContext Context;
+  llvm::Argument Argument(llvm::Type::getInt64Ty(Context));
+  LayoutTypePtrVect Values{LayoutTypePtr(&Argument)};
+  TupleTree<model::Binary> Model;
+  Model->Architecture() = model::Architecture::x86_64;
+  auto Types = makeModelTypes(TS, Values, Model);
+
+  auto *Struct = llvm::dyn_cast_or_null<model::StructDefinition>(
+      Types.at(Values[0])->tryGetAsDefinition());
+  BOOST_REQUIRE(Struct);
+  std::set<const model::TypeDefinition *> Unions;
+  for (const auto &Field : Struct->Fields())
+    Unions.insert(Field.Type()->tryGetAsDefinition());
+  BOOST_REQUIRE_EQUAL(Struct->Fields().size(), 2U);
+  BOOST_REQUIRE_EQUAL(Unions.size(), 1U);
+  BOOST_CHECK(llvm::isa_and_nonnull<model::UnionDefinition>(*Unions.begin()));
+  unsigned UnionCount = 0;
+  for (const auto &Definition : Model->TypeDefinitions())
+    UnionCount += llvm::isa<model::UnionDefinition>(Definition.get());
+  BOOST_CHECK_EQUAL(UnionCount, 1U);
+}
+
 BOOST_AUTO_TEST_CASE(PruningRetainsPointerAlternativeWithoutChangingLayout) {
   for (bool FromModel : { false, true }) {
     LayoutTypeSystem TS;
