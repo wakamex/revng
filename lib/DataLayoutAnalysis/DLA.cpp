@@ -2,6 +2,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
 #include <ranges>
 #include <set>
 #include <string>
@@ -9,13 +10,57 @@
 
 #include "revng/DataLayoutAnalysis/DLA.h"
 #include "revng/DataLayoutAnalysis/DLALayouts.h"
+#include "revng/Model/Binary.h"
 #include "revng/Pipebox/Helpers.h"
+#include "revng/Support/YAMLTraits.h"
 
 #include "Backend/DLAMakeModelTypes.h"
 #include "Frontend/DLATypeSystemBuilder.h"
 #include "Middleend/DLAStep.h"
 
 static Logger BuilderLog("dla-builder-log");
+
+/// Make every reference to a raw function prototype that is identical to an
+/// earlier one, apart from its ID, refer to the earlier one, and drop the
+/// copies.
+///
+/// detect-abi gives each function and each indirect call site a prototype of
+/// its own, and most of them are equal, also after DLA has given their
+/// arguments types: on participant-feed.bin 40,949 prototypes have 8,784
+/// shapes. The analyses that follow work on each prototype definition, not on
+/// each user of it, and DLA keys a function by its name as well as its
+/// prototype, so sharing changes nothing but the size of the model.
+static void shareIdenticalPrototypes(TupleTree<model::Binary> &Model) {
+  using Reference = model::TypeDefinitionReference;
+  std::map<std::string, model::TypeDefinition::Key> FirstWithShape;
+  std::map<model::TypeDefinition::Key, Reference> Replacements;
+  for (const auto &Definition : Model->TypeDefinitions()) {
+    const auto *Raw =
+        llvm::dyn_cast<model::RawFunctionDefinition>(Definition.get());
+    if (Raw == nullptr)
+      continue;
+
+    model::RawFunctionDefinition Shape = *Raw;
+    Shape.ID() = 0;
+    auto [It, New] = FirstWithShape.try_emplace(toString(Shape), Raw->key());
+    if (not New)
+      Replacements.emplace(Raw->key(),
+                           Model->getTypeDefinitionReference(It->second));
+  }
+
+  if (Replacements.empty())
+    return;
+
+  Model.remapReferences<Reference>(
+      [&](const Reference &R) -> const Reference * {
+        if (R.empty())
+          return nullptr;
+        auto It = Replacements.find(R.getConst()->key());
+        return It == Replacements.end() ? nullptr : &It->second;
+      });
+  for (const auto &[Key, _] : Replacements)
+    Model->TypeDefinitions().erase(Key);
+}
 
 namespace revng::pypeline::analyses {
 
@@ -135,6 +180,8 @@ llvm::Error AnalyzeDataLayout::run(Model &Model,
                                UpdatedSegments);
     }
   }
+
+  shareIdenticalPrototypes(Model.get());
 
   Backend.advance("Verify the model");
   revng_assert(Model.get()->verify(true));
