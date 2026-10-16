@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import sqlite3
+import zlib
 from collections import defaultdict
 from collections.abc import Buffer
 from contextlib import asynccontextmanager
@@ -121,6 +122,23 @@ WHERE savepoint_id = ? AND container_id = ? AND configuration_hash = ?
   AND object_id = ?
 ORDER BY chunk_index
 """
+
+# The project keeps a copy of the model as of its last save, to tell an edit
+# of the model file from the pipeline's own writes. sqlite limits a value to a
+# billion bytes, which a large binary's model exceeds, so the copy is stored
+# compressed; the prefix tells it from a copy stored before compression.
+_COMPRESSED_MODEL_PREFIX = b"revng-zlib:"
+
+
+def _encode_model_copy(model_bytes: bytes) -> bytes:
+    return _COMPRESSED_MODEL_PREFIX + zlib.compress(model_bytes, 1)
+
+
+def _decode_model_copy(stored: bytes) -> bytes:
+    if stored.startswith(_COMPRESSED_MODEL_PREFIX):
+        return zlib.decompress(stored[len(_COMPRESSED_MODEL_PREFIX) :])
+    return stored
+
 
 # Remove chunks whose owning object no longer exists (after any delete from
 # `objects`).
@@ -751,7 +769,11 @@ class LocalStorageProvider(StorageProvider):
                 cursor.execute(
                     "UPDATE project SET model_hash = ?, model_mtime = ?, last_seen_model = ?"
                     " WHERE id is 0",
-                    (compute_hash(model_bytes), self._model_path.stat().st_mtime, model_bytes),
+                    (
+                        compute_hash(model_bytes),
+                        self._model_path.stat().st_mtime,
+                        _encode_model_copy(model_bytes),
+                    ),
                 )
             return model_diff_type(), None
 
@@ -771,7 +793,7 @@ class LocalStorageProvider(StorageProvider):
 
         # The content changed: diff the baseline against the current model and
         # return the raw bytes alongside it.
-        last_seen, _ = self._model_type.deserialize(bytes(last_seen_blob))
+        last_seen, _ = self._model_type.deserialize(_decode_model_copy(bytes(last_seen_blob)))
         current_model, _ = self._model_type.deserialize(current_bytes)
         return last_seen.diff(current_model), current_bytes
 
@@ -808,7 +830,11 @@ class LocalStorageProvider(StorageProvider):
             cursor.execute(
                 "UPDATE project SET model_hash = ?, model_mtime = ?, last_seen_model = ?"
                 " WHERE id is 0",
-                (compute_hash(model_bytes), self._model_path.stat().st_mtime, model_bytes),
+                (
+                        compute_hash(model_bytes),
+                        self._model_path.stat().st_mtime,
+                        _encode_model_copy(model_bytes),
+                    ),
             )
             self.epoch += 1
             self._write_metadata(cursor, _MetadataUpdate.MODEL_SAVE)

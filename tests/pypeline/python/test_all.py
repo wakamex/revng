@@ -769,6 +769,35 @@ def test_disk_model_change_targeted_invalidation():
         assert not provider.unprocessed_model_changes()[0]
 
 
+def test_model_copy_is_stored_compressed_and_old_copies_are_read():
+    with NamedTemporaryFile() as f, TemporaryDirectory() as d:
+        model_path = Path(f.name)
+        baseline = DictModel()
+        baseline["/one"] = 1
+        model_path.write_bytes(baseline.serialize())
+        provider = LocalStorageProvider(":memory:", model_path, Path(d), "")
+        provider.set_model(baseline, set(), [])
+
+        with provider._cursor() as cursor:
+            cursor.execute("SELECT last_seen_model FROM project WHERE id is 0")
+            (stored,) = cursor.fetchone()
+        assert bytes(stored).startswith(b"revng-zlib:")
+
+        # A project saved before compression holds the copy as it is
+        with provider._cursor() as cursor:
+            cursor.execute(
+                "UPDATE project SET last_seen_model = ? WHERE id is 0", (baseline.serialize(),)
+            )
+
+        changed = DictModel()
+        changed["/one"] = 2
+        model_path.write_bytes(changed.serialize())
+        stat = model_path.stat()
+        os.utime(model_path, (stat.st_atime, stat.st_mtime + 100))
+        diff, _ = provider.unprocessed_model_changes()
+        assert diff.paths() == {"/one"}
+
+
 def test_external_model_change_preserves_on_disk_bytes():
     container_id = "a"
     configuration_id = ""
