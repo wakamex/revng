@@ -453,6 +453,7 @@ set(FILECHECK_TESTS
     lift/jump-table-extent.S
     lift/no-build-paths.S
     lift/trace-type-shrinking.S
+    lift/unbounded-relative-jump-table.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll

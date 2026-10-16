@@ -20,6 +20,7 @@
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ELFObjectFile.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/TargetSelect.h"
 
 #include "revng/Support/Debug.h"
@@ -369,6 +370,126 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
   }
 
   return Groups[Index] = std::move(Result);
+}
+
+std::optional<std::pair<SmallVector<MetaAddress>, SmallVector<uint64_t>>>
+UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
+  if (Ranges.empty() or Jump.type() != CodeType or
+      Architecture != model::Architecture::x86_64)
+    return std::nullopt;
+
+  auto Index = find(Jump.address());
+  if (not Index or not isInstructionStart(*Index, Jump.address()))
+    return std::nullopt;
+
+  // Decode up to the last few instructions up to and including the jump
+  const Range &R = Ranges[*Index];
+  const Sweep &S = sweep(*Index);
+  if (Jump.address() >= S.DecodedEnd)
+    return std::nullopt;
+
+  constexpr unsigned Window = 8;
+  SmallVector<uint64_t, Window> Starts;
+  for (uint64_t Offset = Jump.address() - R.Start + 1;
+       Offset > 0 and Starts.size() < Window;) {
+    --Offset;
+    if (S.InstructionStarts.test(Offset))
+      Starts.push_back(R.Start + Offset);
+  }
+  std::reverse(Starts.begin(), Starts.end());
+
+  struct Decoded {
+    uint64_t Address;
+    uint64_t Size;
+    MCInst Instruction;
+    StringRef Name;
+  };
+  SmallVector<Decoded, Window> Instructions;
+  for (uint64_t Address : Starts) {
+    auto Bytes =
+        BinaryView.getByAddress(MetaAddress::fromPC(Architecture, Address),
+                                std::min<uint64_t>(15, R.End - Address));
+    if (not Bytes)
+      return std::nullopt;
+    Decoded D{Address, 0, MCInst(), StringRef()};
+    auto Status = Disassembler->getInstruction(D.Instruction, D.Size, *Bytes,
+                                               Address, nulls());
+    if (Status != MCDisassembler::Success)
+      return std::nullopt;
+    D.Name = InstrInfo->getName(D.Instruction.getOpcode());
+    Instructions.push_back(std::move(D));
+  }
+
+  if (Instructions.empty() or Instructions.back().Name != "JMP64r")
+    return std::nullopt;
+  unsigned Target = Instructions.back().Instruction.getOperand(0).getReg();
+
+  // Walking back from the jump: X += B, then X = sext(load32(B + I * 4)), then
+  // B = address of the table. Nothing else in between may write X or B.
+  auto Writes = [this](const MCInst &I, unsigned Register) {
+    const MCInstrDesc &Description = InstrInfo->get(I.getOpcode());
+    for (unsigned Def = 0; Def < Description.getNumDefs(); ++Def)
+      if (I.getOperand(Def).isReg() and
+          RegisterInfo->isSubRegisterEq(I.getOperand(Def).getReg(), Register))
+        return true;
+    return false;
+  };
+
+  unsigned Base = 0;
+  std::optional<uint64_t> Table;
+  enum { WantAdd, WantLoad, WantTable } State = WantAdd;
+  for (auto It = std::next(Instructions.rbegin()); It != Instructions.rend();
+       ++It) {
+    const MCInst &I = It->Instruction;
+    if (State == WantAdd and It->Name == "ADD64rr" and
+        I.getOperand(0).getReg() == Target and
+        I.getOperand(1).getReg() == Target) {
+      Base = I.getOperand(2).getReg();
+      State = WantLoad;
+    } else if (State == WantLoad and It->Name == "MOVSX64rm32" and
+               I.getOperand(0).getReg() == Target and
+               I.getOperand(1).getReg() == Base and
+               I.getOperand(2).getImm() == 4 and
+               I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
+               I.getOperand(4).getImm() == 0 and
+               I.getOperand(5).getReg() == 0) {
+      State = WantTable;
+    } else if (State == WantTable and It->Name == "LEA64r" and
+               I.getOperand(0).getReg() == Base and
+               RegisterInfo->getName(I.getOperand(1).getReg()) ==
+                   StringRef("RIP") and
+               I.getOperand(3).getReg() == 0 and I.getOperand(4).isImm()) {
+      Table = It->Address + It->Size + I.getOperand(4).getImm();
+      break;
+    } else if (Writes(I, Target) or (Base != 0 and Writes(I, Base))) {
+      return std::nullopt;
+    }
+  }
+  if (not Table)
+    return std::nullopt;
+
+  // Read the entries the function's unwind range bounds
+  constexpr unsigned MaxEntries = 4096;
+  SmallVector<MetaAddress> Targets;
+  SmallVector<uint64_t> Entries;
+  for (unsigned I = 0; I < MaxEntries; ++I) {
+    uint64_t EntryAddress = *Table + 4 * I;
+    auto Bytes = BinaryView.getByAddress(
+        MetaAddress::fromGeneric(Architecture, EntryAddress), 4);
+    if (not Bytes)
+      break;
+    int32_t Offset =
+        static_cast<int32_t>(llvm::support::endian::read32le(Bytes->data()));
+    Targets.push_back(MetaAddress::fromPC(Architecture, *Table + Offset));
+    Entries.push_back(EntryAddress);
+  }
+
+  auto Extent = tableExtent(Jump, Targets, Entries);
+  if (not Extent or *Extent == 0)
+    return std::nullopt;
+  Targets.resize(*Extent);
+  Entries.resize(*Extent);
+  return std::make_pair(std::move(Targets), std::move(Entries));
 }
 
 std::optional<size_t>

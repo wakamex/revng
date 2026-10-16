@@ -985,6 +985,8 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
     }
   };
   std::map<uint32_t, SmallVector<Entry>> MaterializedValuesById;
+  // The instructions value materialization produced nothing for
+  std::set<uint32_t> Unmaterialized;
 
   // Collect materialized values
   // Note: there could be multiple calls to the marker with the same ID
@@ -998,8 +1000,10 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
 
     // Did ValueMaterializer produce any info?
     auto *T = dyn_cast_or_null<MDTuple>(Call->getMetadata("revng.avi"));
-    if (T == nullptr)
+    if (T == nullptr) {
+      Unmaterialized.insert(ValueMaterializerID);
       continue;
+    }
 
     auto &Operands = MaterializedValuesById[ValueMaterializerID];
     for (const MDOperand &Operand : cast<MDTuple>(T)->operands()) {
@@ -1062,6 +1066,35 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
       return *Operand.TableEntry >= FirstDropped;
     });
   };
+
+  // A jump through a table whose index the analysis cannot bound gets no
+  // values. When its instructions are the usual switch dispatch, read the table
+  // and keep the entries that lead into the jump's function.
+  for (auto &[ID, Operands] : MaterializedValuesById)
+    if (Operands.empty())
+      Unmaterialized.insert(ID);
+  for (uint32_t ValueMaterializerID : Unmaterialized) {
+    auto TV = AR.rootInstructionById(ValueMaterializerID);
+    if (TV.Type != TrackedInstructionType::WrittenInPC)
+      continue;
+    auto Table = JTM.unwindRanges().relativeJumpTable(TV.Address);
+    if (not Table)
+      continue;
+
+    revng_log(JumpTableExtentLog,
+              "Jump at " << TV.Address.toString() << ": " << Table->first.size()
+                         << " destinations read from its table");
+    revng_assert(MaterializedValuesById[ValueMaterializerID].empty());
+    auto &Operands = MaterializedValuesById[ValueMaterializerID];
+    for (auto [Target, TableEntry] : llvm::zip(Table->first, Table->second)) {
+      APInt Composed(128, Target.address());
+      Composed |= APInt(128, Target.epoch()) << 64;
+      Composed |= APInt(128, Target.addressSpace()) << (64 + 32);
+      Composed |= APInt(128, Target.type()) << (64 + 32 + 16);
+      Operands.push_back(
+          {StringRef(), ConstantInt::get(Context, Composed), TableEntry});
+    }
+  }
 
   for (auto &[ValueMaterializerID, Operands] : MaterializedValuesById) {
     revng_log(Log, "Parsing ID " << ValueMaterializerID);

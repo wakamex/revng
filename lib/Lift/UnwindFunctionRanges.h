@@ -119,6 +119,24 @@ public:
                                     llvm::ArrayRef<MetaAddress> Targets,
                                     llvm::ArrayRef<uint64_t> Entries);
 
+  /// The destinations of an indirect jump at \p Jump that dispatches through
+  /// a table of 32-bit offsets from the table's start, as compilers emit for a
+  /// switch:
+  ///
+  ///     lea    TABLE(%rip), %B
+  ///     movslq (%B,%I,4), %X
+  ///     add    %B, %X
+  ///     jmp    *%X
+  ///
+  /// The table is read entry by entry from its start and bounded as by
+  /// tableExtent. This serves a jump whose index the analysis cannot bound,
+  /// such as an enum discriminant the compiler knows to be in range. Returns
+  /// std::nullopt when the instructions before \p Jump are not this pattern or
+  /// no entry leads into the jump's function.
+  std::optional<
+      std::pair<llvm::SmallVector<MetaAddress>, llvm::SmallVector<uint64_t>>>
+  relativeJumpTable(MetaAddress Jump);
+
 private:
   std::optional<unsigned> find(uint64_t Address) const;
   const Sweep &sweep(unsigned Index);
