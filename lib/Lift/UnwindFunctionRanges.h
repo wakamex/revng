@@ -101,6 +101,11 @@ public:
   /// not a restriction on explicit entries or recovered branches.
   bool isInstructionInterior(MetaAddress Address);
 
+  /// Whether Address is the start of an unwind range that begins a function:
+  /// one whose unwind entry describes the state at a call, not a split-off part
+  /// of another function entered by a jump.
+  bool isFunctionEntry(MetaAddress Address) const;
+
   /// Return how many of \p Targets, the destinations an indirect jump at
   /// \p Jump reads from the table entries at \p Entries (in ascending address
   /// order, one per destination), belong to the table: the leading run of

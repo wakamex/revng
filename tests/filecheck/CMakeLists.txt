@@ -439,6 +439,7 @@ set(FILECHECK_TESTS
     detect-abi/overlapping-indirect-branch.S
     detect-abi/trace-progress.S
     detect-abi/trap-fallthrough.S
+    detect-abi/unwind-entry-pointer.S
     detect-abi/trap-kinds.S
     lift/added-function-relift.S
     lift/cpu-state-initializers-layout.S

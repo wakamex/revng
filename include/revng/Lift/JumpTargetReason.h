@@ -48,7 +48,10 @@ enum Values {
   /// This jump target has been discovered *after* we added all the entry
   /// addresses of model::Functions
   DependsOnModelFunction = SimpleLiteral << 1,
-  LastReason = DependsOnModelFunction
+  /// The start of a function in the binary's unwind information, other than a
+  /// split-off part of another function
+  UnwindEntry = DependsOnModelFunction << 1,
+  LastReason = UnwindEntry
 };
 
 inline const char *getName(Values Reason) {
@@ -79,6 +82,8 @@ inline const char *getName(Values Reason) {
     return "SimpleLiteral";
   case DependsOnModelFunction:
     return "DependsOnModelFunction";
+  case UnwindEntry:
+    return "UnwindEntry";
   }
 
   revng_abort();
@@ -111,6 +116,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return SimpleLiteral;
   else if (ReasonName == "DependsOnModelFunction")
     return DependsOnModelFunction;
+  else if (ReasonName == "UnwindEntry")
+    return UnwindEntry;
   else
     revng_abort();
 }

@@ -72,19 +72,21 @@ private:
       bool IsReturnAddress = hasReason(Reasons,
                                        JumpTargetReason::ReturnAddress);
       bool IsLoadAddress = hasReason(Reasons, JumpTargetReason::LoadAddress);
+      bool IsUnwindEntry = hasReason(Reasons, JumpTargetReason::UnwindEntry);
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
-      revng_log(Log,
-                Entry.toString()
-                  << "\n"
-                  << "  IsSimpleLiteral: " << IsSimpleLiteral << "\n"
-                  << "  IsUnusedGlobalData: " << IsUnusedGlobalData << "\n"
-                  << "  IsDirectJump: " << IsDirectJump << "\n"
-                  << "  IsMemoryStore: " << IsMemoryStore << "\n"
-                  << "  IsPCStore: " << IsPCStore << "\n"
-                  << "  IsReturnAddress: " << IsReturnAddress << "\n"
-                  << "  IsLoadAddress: " << IsLoadAddress << "\n"
-                  << "  IsPartOfOtherCFG: " << IsPartOfOtherCFG << "\n");
+      revng_log(Log, Entry.toString()
+                         << "\n"
+                         << "  IsSimpleLiteral: " << IsSimpleLiteral << "\n"
+                         << "  IsUnusedGlobalData: " << IsUnusedGlobalData
+                         << "\n"
+                         << "  IsDirectJump: " << IsDirectJump << "\n"
+                         << "  IsMemoryStore: " << IsMemoryStore << "\n"
+                         << "  IsPCStore: " << IsPCStore << "\n"
+                         << "  IsReturnAddress: " << IsReturnAddress << "\n"
+                         << "  IsLoadAddress: " << IsLoadAddress << "\n"
+                         << "  IsPartOfOtherCFG: " << IsPartOfOtherCFG << "\n"
+                         << "  IsUnwindEntry: " << IsUnwindEntry << "\n");
 
       // Look for simple literals, unused global data or address stored in
       // memory that are never written directly to the PC. Also, ignore code for
@@ -92,10 +94,15 @@ private:
       // function. Also, ignore addresses that are return addresses.
       bool Interesting = (IsSimpleLiteral or IsUnusedGlobalData
                           or (IsMemoryStore and not IsPCStore));
-      bool Ignore = IsPartOfOtherCFG or IsDirectJump or IsReturnAddress;
+      // A pointer to the start of a function in the unwind information is a
+      // function entry even when another function's CFG reaches it by falling
+      // through, as one does past a call it does not know to be no-return, or
+      // when a tail call jumps to it.
+      bool Ignore = IsReturnAddress or
+                    (not IsUnwindEntry and (IsPartOfOtherCFG or IsDirectJump));
       if (Interesting and not Ignore) {
 
-        if (IsLoadAddress) {
+        if (IsLoadAddress and not IsUnwindEntry) {
           revng_log(Log,
                     "Ignoring " << Entry.toString()
                                 << " since it's target of a memory operation");

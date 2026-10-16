@@ -715,6 +715,12 @@ void JumpTargetManager::findCodePointers(MetaAddress StartVirtualAddress,
 
     BasicBlock *Result = registerJT(Value, JumpTargetReason::GlobalData);
 
+    // A pointer to the start of a function in the unwind information is a
+    // function entry, even where it lies after another function's code that
+    // the analysis can reach by falling through
+    if (Result != nullptr and unwindRanges().isFunctionEntry(Value))
+      registerJT(Value, JumpTargetReason::UnwindEntry);
+
     if (Result != nullptr)
       UnusedCodePointers.insert(StartVirtualAddress + (Cursor - Start));
   }

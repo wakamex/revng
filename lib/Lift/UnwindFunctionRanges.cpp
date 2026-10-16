@@ -268,6 +268,14 @@ bool UnwindFunctionRanges::isInstructionInterior(MetaAddress Address) {
   return false;
 }
 
+bool UnwindFunctionRanges::isFunctionEntry(MetaAddress Address) const {
+  if (Address.type() != CodeType)
+    return false;
+  auto Index = find(Address.address());
+  return Index and Ranges[*Index].Start == Address.address() and
+         not Ranges[*Index].StartsMidFrame;
+}
+
 bool UnwindFunctionRanges::isInstructionStart(unsigned Index,
                                               uint64_t Address) {
   const Range &R = Ranges[Index];
