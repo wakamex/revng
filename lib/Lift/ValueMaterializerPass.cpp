@@ -26,6 +26,7 @@ using namespace llvm;
 
 cl::list<uint64_t> DumpValueMaterializerAt("dump-vm-at", cl::ZeroOrMore);
 cl::opt<bool> DumpValueMaterializer("dump-all-vm");
+extern Logger ValueMaterializerStagesLogger;
 
 using SDMO = StaticDataMemoryOracle;
 
@@ -134,6 +135,12 @@ PreservedAnalyses ValueMaterializerPass::run(Function &F,
     auto Address = MetaAddress::fromString(AddressAsString);
     revng_assert(Address.isValid());
     uint64_t CurrentAddress = Address.address();
+
+    revng_log(ValueMaterializerStagesLogger,
+              "Request " << Request << " of " << Requests << " at "
+                         << Address.toString() << ", oracle "
+                         << static_cast<int>(Oracle) << ", limits "
+                         << MaxPhiLike << " phi-like " << MaxLoad << " loads");
 
     MaterializedValues Values;
     DataFlowGraph::Limits Limits(MaxPhiLike, MaxLoad);

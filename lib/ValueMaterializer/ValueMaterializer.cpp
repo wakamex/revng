@@ -8,13 +8,20 @@
 #include "revng/Support/Debug.h"
 #include "revng/ValueMaterializer/ValueMaterializer.h"
 
+// One line per stage of every request, with the data-flow graph's size, so
+// that a request which does not finish shows the stage it stopped in
+Logger ValueMaterializerStagesLogger("value-materializer-stages");
+
 void ValueMaterializer::run() {
   revng_log(ValueMaterializerLogger,
             "Evaluating " << getName(V) << " using " << getName(Context)
                           << " as context");
   LoggerIndent Indent(ValueMaterializerLogger);
 
+  auto &Stages = ValueMaterializerStagesLogger;
+  revng_log(Stages, "  build data-flow graph");
   DataFlowGraph = DataFlowGraph::fromValue(V, TheLimits);
+  revng_log(Stages, "  built: " << DataFlowGraph.size() << " nodes");
 
   revng_log(ValueMaterializerLogger,
             "The data-flow graph has " << DataFlowGraph.size() << " nodes");
@@ -28,20 +35,29 @@ void ValueMaterializer::run() {
   // Note that dropping part of the data flow graph does not affect
   // correctness.
   DataFlowGraph.removeCycles();
+  revng_log(Stages, "  without cycles: " << DataFlowGraph.size() << " nodes");
 
   DataFlowGraph.enforceLimits(TheLimits);
 
   DataFlowGraph.purgeUnreachable();
+  revng_log(Stages, "  within limits: " << DataFlowGraph.size() << " nodes");
 
   computeOracleConstraints();
+  revng_log(Stages, "  oracle constraints computed");
 
   applyOracleResultsToDataFlowGraph();
 
   computeSizeLowerBound();
+  revng_log(Stages, "  size lower bounds computed");
 
   electMaterializationStartingPoints();
+  revng_log(Stages, "  materialize");
 
   Values = DataFlowGraph.materialize(DataFlowGraph.getEntryNode(), MO);
+  revng_log(Stages,
+            "  materialized: "
+                << (Values ? std::to_string(Values->size()) : std::string("no"))
+                << " values");
 }
 
 void ValueMaterializer::computeOracleConstraints() {
