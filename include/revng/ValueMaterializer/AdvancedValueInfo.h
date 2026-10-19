@@ -41,9 +41,22 @@ public:
   const Set &get(llvm::Instruction *I);
 };
 
+/// The ranges known for the tracked instructions at one point of the
+/// control-flow region. A tracked instruction without an entry can take any
+/// value, so an element holds only the constraints it has. Elements not yet
+/// reached by the analysis are Bottom, below every reached element.
+class AVIConstraints {
+public:
+  bool Reached = false;
+  std::map<llvm::Instruction *, ConstantRangeSet> Ranges;
+
+public:
+  bool operator==(const AVIConstraints &) const = default;
+};
+
 class AdvancedValueInfoMFI {
 public:
-  using LatticeElement = std::map<llvm::Instruction *, ConstantRangeSet>;
+  using LatticeElement = AVIConstraints;
   using GraphType = const ControlFlowEdgesGraph *;
   using Label = const ControlFlowEdgesGraph::Node *;
   using ResultsMap = std::map<Label, mfp::MFPResult<LatticeElement>>;
@@ -86,17 +99,11 @@ static_assert(mfp::MonotoneFrameworkInstance<AdvancedValueInfoMFI>);
 
 /// \p DFG the data flow graph containing the instructions we're interested in.
 /// \p Context the position in the function for the current query.
-std::tuple<
-  std::map<llvm::Instruction *, ConstantRangeSet>,
-  ControlFlowEdgesGraph,
-  std::map<const ForwardNode<ControlFlowEdgesNode> *,
-           mfp::MFPResult<std::map<llvm::Instruction *, ConstantRangeSet>>>>
-runAVI(const DataFlowGraph &DFG,
-       llvm::Instruction *Context,
-       const llvm::DominatorTree &DT,
-       llvm::LazyValueInfo &LVI,
-       DataFlowRangeAnalysis &DFRA,
-       bool ZeroExtendConstraints,
+std::tuple<std::map<llvm::Instruction *, ConstantRangeSet>,
+           ControlFlowEdgesGraph, AdvancedValueInfoMFI::ResultsMap>
+runAVI(const DataFlowGraph &DFG, llvm::Instruction *Context,
+       const llvm::DominatorTree &DT, llvm::LazyValueInfo &LVI,
+       DataFlowRangeAnalysis &DFRA, bool ZeroExtendConstraints,
        ControlFlowGraphIndex *CFGIndex = nullptr,
        ExtensionCandidates *Extensions = nullptr);
 

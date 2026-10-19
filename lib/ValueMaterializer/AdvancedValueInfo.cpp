@@ -41,6 +41,10 @@ using std::map;
 
 static Logger AVILogger("avi");
 
+template <>
+void mfp::dump(llvm::raw_ostream &Stream, unsigned Indent,
+               const AVIConstraints &Element);
+
 inline RunningStatistics AVICFEGSizeStatitistics("avi-cfeg-size");
 inline RunningStatistics AVISkippedRegionStatistics("avi-skipped-region-size");
 
@@ -99,11 +103,21 @@ AdvancedValueInfoMFI::AdvancedValueInfoMFI(LazyValueInfo &LVI,
 AdvancedValueInfoMFI::LatticeElement
 AdvancedValueInfoMFI::combineValues(const LatticeElement &LHS,
                                     const LatticeElement &RHS) const {
-  LatticeElement Result = LHS;
+  if (not LHS.Reached)
+    return RHS;
+  if (not RHS.Reached)
+    return LHS;
 
-  for (auto &[Key, Value] : RHS) {
-    auto &ResultEntry = Result[Key];
-    ResultEntry = ResultEntry.unionWith(Value);
+  // An instruction constrained on one side only can take any value on the
+  // other, and so in the union
+  LatticeElement Result{.Reached = true};
+  for (const auto &[LeftEntry, RightEntry] :
+       zipmap_range(LHS.Ranges, RHS.Ranges)) {
+    if (LeftEntry == nullptr or RightEntry == nullptr)
+      continue;
+    auto Union = LeftEntry->second.unionWith(RightEntry->second);
+    if (not Union.isFullSet())
+      Result.Ranges.emplace(LeftEntry->first, std::move(Union));
   }
 
   return Result;
@@ -111,19 +125,20 @@ AdvancedValueInfoMFI::combineValues(const LatticeElement &LHS,
 
 bool AdvancedValueInfoMFI::isLessOrEqual(const LatticeElement &LHS,
                                          const LatticeElement &RHS) const {
-  for (const auto &[LeftEntry, RightEntry] : zipmap_range(LHS, RHS)) {
-    if (LeftEntry != nullptr and RightEntry != nullptr) {
-      if (not RightEntry->second.contains(LeftEntry->second)) {
-        return false;
-      } else {
-        // All good
-      }
-    } else if (LeftEntry == nullptr) {
-      // All good
-    } else if (RightEntry == nullptr) {
-      // An element is present only in the LHS
+  if (not LHS.Reached)
+    return true;
+  if (not RHS.Reached)
+    return false;
+
+  // Every constraint on the right must cover the left, where a missing left
+  // entry is the full range
+  for (const auto &[LeftEntry, RightEntry] :
+       zipmap_range(LHS.Ranges, RHS.Ranges)) {
+    if (RightEntry == nullptr)
+      continue;
+    if (LeftEntry == nullptr or
+        not RightEntry->second.contains(LeftEntry->second))
       return false;
-    }
   }
 
   return true;
@@ -138,6 +153,7 @@ AdvancedValueInfoMFI::applyTransferFunction(Label L,
   LoggerIndent Indent(AVILogger);
 
   LatticeElement Result = E;
+  Result.Reached = true;
 
   for (Instruction *I : Instructions) {
     uint32_t BitWidth = I->getType()->getIntegerBitWidth();
@@ -215,11 +231,11 @@ AdvancedValueInfoMFI::applyTransferFunction(Label L,
       AVILogger << DoLog;
     }
 
-    auto It = Result.find(I);
-    if (It != Result.end())
+    auto It = Result.Ranges.find(I);
+    if (It != Result.Ranges.end())
       It->second = It->second.intersectWith(Range);
-    else
-      Result[I] = Range;
+    else if (not Range.isFullSet())
+      Result.Ranges.emplace(I, std::move(Range));
   }
 
   return Result;
@@ -233,17 +249,11 @@ void AdvancedValueInfoMFI::dump(GraphType CFEG, const ResultsMap &AllResults) {
 /// \p DFG the data flow graph containing the instructions we're interested
 /// in. \p Context the position in the function for the current query.
 std::tuple<std::map<llvm::Instruction *, ConstantRangeSet>,
-           ControlFlowEdgesGraph,
-           map<const ForwardNode<ControlFlowEdgesNode> *,
-               mfp::MFPResult<map<llvm::Instruction *, ConstantRangeSet>>>>
-runAVI(const DataFlowGraph &DFG,
-       llvm::Instruction *Context,
-       const llvm::DominatorTree &DT,
-       llvm::LazyValueInfo &LVI,
-       DataFlowRangeAnalysis &DFRA,
-       bool ZeroExtendConstraints,
-       ControlFlowGraphIndex *CFGIndex,
-       ExtensionCandidates *Extensions) {
+           ControlFlowEdgesGraph, AdvancedValueInfoMFI::ResultsMap>
+runAVI(const DataFlowGraph &DFG, llvm::Instruction *Context,
+       const llvm::DominatorTree &DT, llvm::LazyValueInfo &LVI,
+       DataFlowRangeAnalysis &DFRA, bool ZeroExtendConstraints,
+       ControlFlowGraphIndex *CFGIndex, ExtensionCandidates *Extensions) {
   using namespace llvm;
 
   //
@@ -275,12 +285,7 @@ runAVI(const DataFlowGraph &DFG,
   }
 
   if (Targets.size() == 0) {
-    return {
-      std::map<llvm::Instruction *, ConstantRangeSet>{},
-      ControlFlowEdgesGraph(),
-      map<const ForwardNode<ControlFlowEdgesNode> *,
-          mfp::MFPResult<map<llvm::Instruction *, ConstantRangeSet>>>{}
-    };
+    return {};
   }
 
   //
@@ -378,10 +383,8 @@ runAVI(const DataFlowGraph &DFG,
                               ZeroExtendConstraints,
                               Extensions);
 
-  AdvancedValueInfoMFI::LatticeElement ExtremalValue;
-  for (Instruction *I : Targets)
-    ExtremalValue[I] = ConstantRangeSet(I->getType()->getIntegerBitWidth(),
-                                        true);
+  // Every tracked instruction can take any value on entry
+  AdvancedValueInfoMFI::LatticeElement ExtremalValue{.Reached = true};
 
   mfp::MFPConfiguration<AdvancedValueInfoMFI> Configuration{
     .Instance = &AVIMFI,
@@ -410,16 +413,33 @@ runAVI(const DataFlowGraph &DFG,
     AVILogger << DoLog;
   }
 
-  auto &ResultsOnTarget = AllResults.at(CFEG.at(ContextBB)).OutValue;
+  // Report every tracked instruction once the context is reached, the
+  // unconstrained ones with the full range
+  const auto &OnTarget = AllResults.at(CFEG.at(ContextBB)).OutValue;
+  std::map<llvm::Instruction *, ConstantRangeSet> ResultsOnTarget;
+  if (OnTarget.Reached) {
+    for (Instruction *I : Targets) {
+      auto It = OnTarget.Ranges.find(I);
+      if (It != OnTarget.Ranges.end())
+        ResultsOnTarget.emplace(I, It->second);
+      else
+        ResultsOnTarget.emplace(
+            I, ConstantRangeSet(I->getType()->getIntegerBitWidth(), true));
+    }
+  }
 
-  return { ResultsOnTarget, std::move(CFEG), std::move(AllResults) };
+  return {std::move(ResultsOnTarget), std::move(CFEG), std::move(AllResults)};
 }
 
-template<>
-void mfp::dump(llvm::raw_ostream &Stream,
-               unsigned Indent,
-               const std::map<llvm::Instruction *, ConstantRangeSet> &Element) {
-  for (const auto &[I, Range] : Element) {
+template <>
+void mfp::dump(llvm::raw_ostream &Stream, unsigned Indent,
+               const AVIConstraints &Element) {
+  if (not Element.Reached) {
+    for (unsigned I = 0; I < Indent; ++I)
+      Stream << "  ";
+    Stream << "unreached\n";
+  }
+  for (const auto &[I, Range] : Element.Ranges) {
     for (unsigned I = 0; I < Indent; ++I)
       Stream << "  ";
     Stream << getName(I) << ": ";
