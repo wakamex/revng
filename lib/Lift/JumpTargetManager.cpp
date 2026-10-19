@@ -673,6 +673,20 @@ void JumpTargetManager::harvestGlobalData() {
     }
   }
 
+  // In a position-independent binary a stored pointer is a base-relative
+  // relocation: the file holds zero and the address is the relocation's
+  // addend from the start of its segment, as for loads in readFromPointer
+  auto PointerSize = model::Architecture::getPointerSize(Model->Architecture());
+  for (const model::Segment &Segment : Model->Segments()) {
+    for (const model::Relocation &Relocation : Segment.Relocations()) {
+      if (model::RelocationType::getSize(Relocation.Type()) != PointerSize)
+        continue;
+      registerCodePointer(
+          fromPC((Segment.StartAddress() + Relocation.Addend()).address()),
+          Relocation.Address());
+    }
+  }
+
   revng_log(JTCountLog,
             "JumpTargets found in global data: " << std::dec
                                                  << Unexplored.size());
@@ -697,33 +711,37 @@ void JumpTargetManager::findCodePointers(MetaAddress StartVirtualAddress,
 
   for (; Cursor < End - Step; Cursor += Step) {
     auto Read = read<value_type, static_cast<endianness>(endian), 1>;
-    uint64_t RawValue = Read(Cursor);
-    MetaAddress Value = fromPC(RawValue);
-    if (Value.isInvalid() or not isPC(Value))
-      continue;
-
-    // Raw words are only candidate pointers. An unwind entry supplies a
-    // decoding origin independent of their order in the scan. Keep explicit
-    // model entries and recovered branches outside this heuristic filter.
-    if (unwindRanges().isInstructionInterior(Value)) {
-      revng_log(RawCodePointerLog,
-                "Ignoring raw code pointer at "
-                  << (StartVirtualAddress + (Cursor - Start)).toString()
-                  << " to instruction interior " << Value.toString());
-      continue;
-    }
-
-    BasicBlock *Result = registerJT(Value, JumpTargetReason::GlobalData);
-
-    // A pointer to the start of a function in the unwind information is a
-    // function entry, even where it lies after another function's code that
-    // the analysis can reach by falling through
-    if (Result != nullptr and unwindRanges().isFunctionEntry(Value))
-      registerJT(Value, JumpTargetReason::UnwindEntry);
-
-    if (Result != nullptr)
-      UnusedCodePointers.insert(StartVirtualAddress + (Cursor - Start));
+    registerCodePointer(fromPC(Read(Cursor)),
+                        StartVirtualAddress + (Cursor - Start));
   }
+}
+
+void JumpTargetManager::registerCodePointer(MetaAddress Value,
+                                            MetaAddress Location) {
+  if (Value.isInvalid() or not isPC(Value))
+    return;
+
+  // Stored words are only candidate pointers. An unwind entry supplies a
+  // decoding origin independent of their order in the scan. Keep explicit
+  // model entries and recovered branches outside this heuristic filter.
+  if (unwindRanges().isInstructionInterior(Value)) {
+    revng_log(RawCodePointerLog, "Ignoring raw code pointer at "
+                                     << Location.toString()
+                                     << " to instruction interior "
+                                     << Value.toString());
+    return;
+  }
+
+  BasicBlock *Result = registerJT(Value, JumpTargetReason::GlobalData);
+
+  // A pointer to the start of a function in the unwind information is a
+  // function entry, even where it lies after another function's code that
+  // the analysis can reach by falling through
+  if (Result != nullptr and unwindRanges().isFunctionEntry(Value))
+    registerJT(Value, JumpTargetReason::UnwindEntry);
+
+  if (Result != nullptr)
+    UnusedCodePointers.emplace(Location, Value);
 }
 
 /// Handle a new program counter. We might already have a basic block for that
