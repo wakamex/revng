@@ -505,6 +505,8 @@ static std::vector<std::string> toStrings(const ReadFields &Fields) {
     Result.push_back("read " + *pathAsString<model::Binary>(Path));
   for (const TupleTreePath &Path : Fields.ExactVectors)
     Result.push_back("exact " + *pathAsString<model::Binary>(Path));
+  for (const TupleTreePath &Path : Fields.Coarse)
+    Result.push_back("coarse " + *pathAsString<model::Binary>(Path));
   return Result;
 }
 
@@ -601,6 +603,59 @@ BOOST_AUTO_TEST_CASE(TrackingSessionCollectsWhatTheTreeWalkCollects) {
 
   // Tracking again gives the same result
   revng_check(trackReads(*WithSession, true) == Expected);
+}
+
+/// Read the size of \p Count struct definitions and the architecture, and
+/// return what collect returns
+static std::vector<std::string> readManyTypes(size_t Count, bool UseSession) {
+  using revng::Tracking;
+  TupleTree<model::Binary> Model;
+  for (size_t I = 0; I < Count; ++I)
+    (void) Model->makeStructDefinition(8);
+
+  const model::Binary &Binary = *Model;
+  Tracking::clearAndResume(Binary);
+  if (UseSession)
+    Tracking::openSession(Binary);
+  Binary.Architecture();
+  for (const auto &Definition : Binary.TypeDefinitions())
+    Definition->size();
+  std::vector<std::string> Result = toStrings(Tracking::collect(Binary));
+  Tracking::stop(Binary);
+  return Result;
+}
+
+BOOST_AUTO_TEST_CASE(TrackingRecordsAFieldReadTooOftenAsAWhole) {
+  const size_t Many = ReadFields::CoarseThreshold + 1;
+  for (bool UseSession : { false, true }) {
+    std::vector<std::string> Collected = readManyTypes(Many, UseSession);
+    revng_check(llvm::is_contained(Collected, "coarse /TypeDefinitions"));
+    revng_check(llvm::is_contained(Collected, "read /Architecture"));
+    for (const std::string &Path : Collected)
+      revng_check(not llvm::StringRef(Path).starts_with("read /TypeDefinitions/"));
+  }
+  revng_check(readManyTypes(Many, true) == readManyTypes(Many, false));
+}
+
+BOOST_AUTO_TEST_CASE(TrackingRecordsFewReadsOneByOne) {
+  for (bool UseSession : { false, true }) {
+    std::vector<std::string> Collected = readManyTypes(100, UseSession);
+    for (const std::string &Path : Collected)
+      revng_check(not llvm::StringRef(Path).starts_with("coarse "));
+    revng_check(Collected.size() > 100);
+  }
+}
+
+BOOST_AUTO_TEST_CASE(DiffPathsShouldMarkTheChangedTopLevelField) {
+  TupleTree<model::Binary> Before;
+  auto &Struct = Before->makeStructDefinition(8).first;
+  auto Key = Struct.key();
+  TupleTree<model::Binary> After = Before;
+  llvm::cast<model::StructDefinition>(*After->TypeDefinitions().at(Key)).Size() = 16;
+
+  std::set<std::string> Paths = diff(*Before, *After).paths();
+  BOOST_TEST(Paths.contains("/TypeDefinitions/*"));
+  BOOST_TEST(not Paths.contains("/Functions/*"));
 }
 
 BOOST_AUTO_TEST_CASE(DiffPathsShouldMentionTheAddedElement) {

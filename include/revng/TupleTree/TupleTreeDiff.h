@@ -474,6 +474,17 @@ inline std::set<std::string> TupleTreeDiff<T>::paths() const {
       Result.insert(pathAsString<T>(*Element).value());
   }
 
+  // A reader whose reads under a top-level field were recorded as the field
+  // (ReadFields::Coarse) depends on "/Field/*": add it for every change under
+  // the field, including a change of the field itself
+  std::set<std::string> Markers;
+  for (const std::string &Path : Result) {
+    llvm::StringRef Top = llvm::StringRef(Path).drop_front(1).split('/').first;
+    if (not Top.empty())
+      Markers.insert("/" + Top.str() + "/*");
+  }
+  Result.merge(Markers);
+
   return Result;
 }
 

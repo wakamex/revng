@@ -19,6 +19,46 @@
 struct ReadFields {
   llvm::SmallVector<TupleTreePath> Read;
   llvm::SmallVector<TupleTreePath> ExactVectors;
+  /// Top-level fields of the root, each a path of one element, whose reads
+  /// were too many to record one by one. Reading under such a field records
+  /// the field itself, and any change under it invalidates the reader.
+  llvm::SmallVector<TupleTreePath> Coarse;
+
+  /// A top-level field with more reads than this is recorded as a whole. A
+  /// function whose types reach most of a large model reads millions of
+  /// fields, and recording each costs far more than the work itself.
+  static constexpr size_t CoarseThreshold = 10000;
+
+  /// Replace the reads under each top-level field read more than
+  /// CoarseThreshold times by that field
+  void coarsen() {
+    auto Prefix = [](const TupleTreePath &Path) {
+      TupleTreePath Result = Path;
+      Result.resize(1);
+      return Result;
+    };
+    std::map<TupleTreePath, size_t> Counts;
+    for (const TupleTreePath &Path : Read)
+      if (Path.size() > 1)
+        ++Counts[Prefix(Path)];
+    for (const TupleTreePath &Path : ExactVectors)
+      if (Path.size() > 1)
+        ++Counts[Prefix(Path)];
+
+    for (const auto &[Top, Count] : Counts)
+      if (Count > CoarseThreshold)
+        Coarse.push_back(Top);
+    if (Coarse.empty())
+      return;
+
+    auto IsCoarse = [this](const TupleTreePath &Path) {
+      return llvm::any_of(Coarse, [&Path](const TupleTreePath &Top) {
+        return Top.isPrefixOf(Path);
+      });
+    };
+    llvm::erase_if(Read, IsCoarse);
+    llvm::erase_if(ExactVectors, IsCoarse);
+  }
 
   void deduplicate() {
     llvm::sort(Read);
@@ -26,6 +66,8 @@ struct ReadFields {
     llvm::sort(ExactVectors);
     ExactVectors.erase(std::unique(ExactVectors.begin(), ExactVectors.end()),
                        ExactVectors.end());
+    llvm::sort(Coarse);
+    Coarse.erase(std::unique(Coarse.begin(), Coarse.end()), Coarse.end());
   }
 };
 

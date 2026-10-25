@@ -93,6 +93,9 @@ private:
   std::vector<Object> Objects;
   /// Object indices sorted by address, enclosing objects first
   std::vector<uint32_t> ByAddress;
+  /// For each object, the top-level field of the root it lies in (the object
+  /// whose parent is the root), None for the root
+  std::vector<uint32_t> TopLevel;
   std::vector<ListedTracker> Trackers;
   /// Containers whose levels are materialized
   std::vector<uint32_t> Containers;
@@ -141,9 +144,14 @@ public:
   void pop();
   /// Collect the paths of the read fields and of the inspected keys, the
   /// paths of the containers read as a whole, then clear the innermost level
-  /// of the trackers and every level of the containers
+  /// of the trackers and every level of the containers. The reads under a
+  /// top-level field of the root with more than \p CoarseThreshold read
+  /// trackers and inspected containers are not built: the field's path goes
+  /// to \p Coarse instead.
   void collect(llvm::SmallVectorImpl<TupleTreePath> &Read,
-               llvm::SmallVectorImpl<TupleTreePath> &ExactVectors);
+               llvm::SmallVectorImpl<TupleTreePath> &ExactVectors,
+               llvm::SmallVectorImpl<TupleTreePath> &Coarse,
+               size_t CoarseThreshold);
   /// Clear the innermost level of the trackers and every level of the
   /// containers
   void clear();

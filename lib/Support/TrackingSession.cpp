@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <memory>
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include "revng/Support/TrackingSession.h"
@@ -77,6 +79,16 @@ void TrackingSession::finishIndex() {
       return L.Begin < R.Begin;
     return L.Size > R.Size;
   });
+
+  // Objects are indexed with each parent before its children
+  TopLevel.assign(Objects.size(), None);
+  for (uint32_t I = 0; I < Objects.size(); ++I) {
+    uint32_t Parent = Objects[I].Parent;
+    if (Parent == None)
+      continue;
+    revng_assert(Parent < I);
+    TopLevel[I] = Objects[Parent].Parent == None ? I : TopLevel[Parent];
+  }
 }
 
 uint32_t TrackingSession::objectAt(const void *Address) const {
@@ -177,9 +189,33 @@ void TrackingSession::appendPath(uint32_t Index, TupleTreePath &Path) const {
 }
 
 void TrackingSession::collect(llvm::SmallVectorImpl<TupleTreePath> &Read,
-                              llvm::SmallVectorImpl<TupleTreePath> &Exact) {
+                              llvm::SmallVectorImpl<TupleTreePath> &Exact,
+                              llvm::SmallVectorImpl<TupleTreePath> &Coarse,
+                              size_t CoarseThreshold) {
+  // Count the reads under each top-level field before building any path
+  llvm::DenseMap<uint32_t, size_t> Counts;
+  for (const ListedTracker &Listed : Trackers)
+    if (Listed.Tracker->isSet() and TopLevel[Listed.Object] != None)
+      ++Counts[TopLevel[Listed.Object]];
+  for (uint32_t Index : Containers)
+    if (TopLevel[Index] != None)
+      ++Counts[TopLevel[Index]];
+
+  llvm::SmallDenseSet<uint32_t, 4> CoarseTops;
+  for (const auto &[Top, Count] : Counts) {
+    if (Count > CoarseThreshold) {
+      CoarseTops.insert(Top);
+      TupleTreePath Path;
+      appendPath(Top, Path);
+      Coarse.push_back(std::move(Path));
+    }
+  }
+  auto IsCoarse = [&](uint32_t Index) {
+    return TopLevel[Index] != None and CoarseTops.contains(TopLevel[Index]);
+  };
+
   for (const ListedTracker &Listed : Trackers) {
-    if (not Listed.Tracker->isSet())
+    if (not Listed.Tracker->isSet() or IsCoarse(Listed.Object))
       continue;
 
     TupleTreePath Path;
@@ -193,6 +229,8 @@ void TrackingSession::collect(llvm::SmallVectorImpl<TupleTreePath> &Read,
   }
 
   for (uint32_t Index : Containers) {
+    if (IsCoarse(Index))
+      continue;
     TupleTreePath Path;
     appendPath(Index, Path);
     Objects[Index].Kind->collectKeys(Objects[Index], Path, Read);

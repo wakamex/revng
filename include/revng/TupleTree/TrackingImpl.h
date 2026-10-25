@@ -466,7 +466,10 @@ template<typename M>
 ReadFields Tracking::collect(const M &LHS) {
   ReadFields Info;
   if (TrackingSession *Session = TrackingSession::find(&LHS)) {
-    Session->collect(Info.Read, Info.ExactVectors);
+    Session->collect(Info.Read,
+                     Info.ExactVectors,
+                     Info.Coarse,
+                     ReadFields::CoarseThreshold);
     Info.deduplicate();
     return Info;
   }
@@ -475,6 +478,7 @@ ReadFields Tracking::collect(const M &LHS) {
   TupleTreePath Stack;
   TrackingImpl::collectImpl<M>(LHS, Stack, Info);
   TrackingImpl::visitTuple<M, TrackingImpl::ClearVisitor>(LHS);
+  Info.coarsen();
   Info.deduplicate();
   return Info;
 }

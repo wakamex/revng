@@ -130,6 +130,10 @@ private:
       Result.push_back(*pathAsString<model::Binary>(Path));
     for (const TupleTreePath &Path : ReadFieldsStruct.ExactVectors)
       Result.push_back(*pathAsString<model::Binary>(Path));
+    // A coarse field depends on every change under it, which the model diff
+    // reports as this marker
+    for (const TupleTreePath &Path : ReadFieldsStruct.Coarse)
+      Result.push_back(*pathAsString<model::Binary>(Path) + "/*");
     return Result;
   }
 };
