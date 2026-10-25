@@ -331,6 +331,84 @@ def test_pipeline_up_down(model, storage_provider):
     ) == {MyObjectID.root()}
 
 
+def test_savepoint_after_whole_program_pipe_saves_every_object(model, storage_provider):
+    root: ContainerDeclaration = ContainerDeclaration("root", RootDictContainer)
+    split: ContainerDeclaration = ContainerDeclaration("split", ChildDictContainer)
+    copy: ContainerDeclaration = ContainerDeclaration("copy", ChildDictContainer)
+    declarations = [root, split, copy]
+    configuration: PipelineConfiguration = {}
+
+    begin_node = PipelineNode(SavePoint("begin", [root]))
+    split_node = begin_node.add_successor(PipelineNode(ToHigherKindPipe(), bindings=[root, split]))
+    saved_node = split_node.add_successor(PipelineNode(SavePoint("split", [split])))
+    copy_node = saved_node.add_successor(PipelineNode(SameKindPipe(), bindings=[split, copy]))
+    pipeline: Pipeline = Pipeline(set(declarations), begin_node)
+
+    container = RootDictContainer()
+    container.add_object(MyObjectID.root())
+    root_requests = Requests({root: ObjectSet(MyKind.ROOT, {MyObjectID.root()})})
+    SavepointScheduledTask(
+        begin_node, ReadOnlyModel(model), storage_provider, configuration,
+        (root_requests, root_requests),
+    ).run({root: container}, RunnerContext())
+
+    one = ObjectSet(MyKind.CHILD, {MyObjectID(MyKind.CHILD, "one")})
+    containers = pipeline.schedule(
+        model=ReadOnlyModel(model),
+        target_node=copy_node,
+        requests=Requests({copy: one}),
+        configuration=configuration,
+        storage_provider=storage_provider,
+    ).run()
+
+    # Only the requested object travels past the savepoint, which saved them all
+    assert containers[copy].objects() == one
+    every_child = model.children(MyObjectID.root(), MyKind.CHILD)
+    location = ContainerLocation(
+        savepoint_id=mandatory(saved_node.savepoint_range).start,
+        container_id=split.name,
+        configuration_id=saved_node.configuration_id(configuration),
+    )
+    assert set(storage_provider.has(location, ObjectSet(MyKind.CHILD, every_child))) == every_child
+
+
+def test_savepoint_after_per_object_pipe_saves_only_the_request(model, storage_provider):
+    source: ContainerDeclaration = ContainerDeclaration("source", ChildDictContainer)
+    copy: ContainerDeclaration = ContainerDeclaration("copy", ChildDictContainer)
+    declarations = [source, copy]
+    configuration: PipelineConfiguration = {}
+
+    begin_node = PipelineNode(SavePoint("begin", [source]))
+    copy_node = begin_node.add_successor(PipelineNode(SameKindPipe(), bindings=[source, copy]))
+    end_node = copy_node.add_successor(PipelineNode(SavePoint("end", [copy])))
+    pipeline: Pipeline = Pipeline(set(declarations), begin_node)
+
+    every_child = model.children(MyObjectID.root(), MyKind.CHILD)
+    container = ChildDictContainer()
+    for obj in every_child:
+        container.add_object(obj)
+    children = Requests({source: ObjectSet(MyKind.CHILD, every_child)})
+    SavepointScheduledTask(
+        begin_node, ReadOnlyModel(model), storage_provider, configuration, (children, children)
+    ).run({source: container}, RunnerContext())
+
+    one = ObjectSet(MyKind.CHILD, {MyObjectID(MyKind.CHILD, "one")})
+    pipeline.schedule(
+        model=ReadOnlyModel(model),
+        target_node=end_node,
+        requests=Requests({copy: one}),
+        configuration=configuration,
+        storage_provider=storage_provider,
+    ).run()
+
+    location = ContainerLocation(
+        savepoint_id=mandatory(end_node.savepoint_range).start,
+        container_id=copy.name,
+        configuration_id=end_node.configuration_id(configuration),
+    )
+    assert set(storage_provider.has(location, ObjectSet(MyKind.CHILD, every_child))) == set(one)
+
+
 def test_artifact(model, storage_provider):
     child1: ContainerDeclaration = ContainerDeclaration("source", ChildDictContainer)
     child2: ContainerDeclaration = ContainerDeclaration("destination", ChildDictContainer)

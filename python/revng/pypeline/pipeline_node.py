@@ -213,6 +213,22 @@ class PipelineNode:
         else:
             raise TypeError(f"Unsupported task type: {type(self.task)}")
 
+    def fill_requests(
+        self,
+        model: ReadOnlyModel,
+        requests: Requests,
+        configuration: PipelineConfiguration,
+        storage_provider: StorageProvider,
+    ) -> Requests:
+        assert isinstance(self.task, SavePoint) and self.savepoint_range is not None
+        return self.task.fill_requests(
+            model=model,
+            requests=requests,
+            configuration_id=self.configuration_id(configuration),
+            storage_provider=storage_provider,
+            savepoint_range=self.savepoint_range,
+        )
+
     def configuration_id(self, configuration: PipelineConfiguration) -> ConfigurationId:
         hasher = sha256()
         if isinstance(self.task, Pipe) and self.task in configuration:

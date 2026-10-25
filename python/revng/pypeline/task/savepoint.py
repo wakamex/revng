@@ -6,7 +6,8 @@ from collections.abc import Buffer
 from typing import Mapping, Sequence, final
 
 from revng.pypeline.container import ConfigurationId, ContainerDeclaration, ContainerSet
-from revng.pypeline.object import ObjectID
+from revng.pypeline.model import ReadOnlyModel
+from revng.pypeline.object import ObjectID, ObjectSet
 from revng.pypeline.storage.storage_provider import ContainerLocation, PipeDependencies
 from revng.pypeline.storage.storage_provider import SavePointsRange, StorageProvider
 
@@ -68,6 +69,34 @@ class SavePoint:
                 result[decl].remove(found_obj)
         return result
 
+    @final
+    def fill_requests(
+        self,
+        model: ReadOnlyModel,
+        requests: Requests,
+        configuration_id: ConfigurationId,
+        storage_provider: StorageProvider,
+        savepoint_range: SavePointsRange,
+    ) -> Requests:
+        """
+        Extend each non-empty request for a container below the root kind to every object of its
+        kind that this savepoint does not hold.
+        """
+        result = requests.clone()
+        for decl in self.to_save:
+            kind = decl.container_type.kind
+            if len(result.get(decl)) == 0 or kind.parent() is None:
+                continue
+            location = ContainerLocation(
+                savepoint_id=savepoint_range.start,
+                container_id=decl.name,
+                configuration_id=configuration_id,
+            )
+            all_objects = model.all_objects(kind)
+            found = ObjectSet(kind, set(storage_provider.has(location, all_objects)))
+            result[decl] = result.get(decl) | (all_objects - found)
+        return result
+
     def run(
         self,
         containers: ContainerSet,
@@ -88,6 +117,7 @@ class SavePoint:
         ), "SavePoint containers must be a subset of incoming and outgoing requests."
 
         objects: dict[ContainerLocation, Mapping[ObjectID, Buffer]] = {}
+        serialized: dict[ContainerDeclaration, Mapping[ObjectID, Buffer]] = {}
         for decl in self.to_save:
             location = ContainerLocation(
                 savepoint_id=savepoint_range.start,
@@ -97,6 +127,7 @@ class SavePoint:
             container_incoming = incoming.get(decl)
             if len(container_incoming) > 0:
                 serialized_container = containers[decl].serialize(container_incoming)
+                serialized[decl] = serialized_container
                 compression = containers[decl].get_compression()
                 if compression is not None:
                     objects[location] = {
@@ -106,6 +137,14 @@ class SavePoint:
                     objects[location] = serialized_container
 
         storage_provider.add_objects(pipes_dependencies, objects)
+
+        for decl in self.to_save:
+            # Objects computed only to be saved do not travel further
+            keep = incoming.get(decl) & outgoing.get(decl)
+            if len(incoming.get(decl) - keep) > 0:
+                saved = serialized[decl]
+                containers[decl] = decl.instance()
+                containers[decl].deserialize({obj: saved[obj] for obj in keep})
 
         for decl in self.to_save:
             # Compute the actual set of objects to load, if an object has

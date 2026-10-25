@@ -414,6 +414,15 @@ class Pipeline:
                 f"Node {node} modified the outgoing requests, which is not allowed. "
                 f"Original: {orig}, modified: {node_outgoing_requests}"
             )
+            if isinstance(node.task, SavePoint) and self._computes_from_whole_program(
+                node, node_ingoing_requests, model, configuration, storage_provider
+            ):
+                # The objects missing here come from a pipe that reads the whole program, whose
+                # cost does not depend on how many objects are requested, so compute and save
+                # every object this savepoint lacks. The outgoing requests stay unchanged.
+                node_ingoing_requests = node.fill_requests(
+                    model, node_ingoing_requests, configuration, storage_provider
+                )
             pypeline_logger.debug_log(f"Computed Ingoing requests: {node_ingoing_requests}")
             # Store the computed requests so that we can use them in the run method
             tasks[node].add_requests(node_ingoing_requests, node_outgoing_requests)
@@ -491,6 +500,37 @@ class Pipeline:
             model,
             storage_provider,
         )
+
+    @staticmethod
+    def _computes_from_whole_program(
+        savepoint: PipelineNode,
+        requests: Requests,
+        model: ReadOnlyModel,
+        configuration: PipelineConfiguration,
+        storage_provider: StorageProvider,
+    ) -> bool:
+        """
+        Whether producing `requests` at `savepoint` runs, before the previous savepoint, a pipe
+        that reads a container of the root kind.
+        """
+        if not any(len(requests.get(decl)) > 0 for decl in savepoint.argument_declarations):
+            return False
+        node = savepoint
+        while node.predecessors and isinstance(node.predecessors[0].task, Pipe):
+            node = node.predecessors[0]
+            runs = any(
+                argument.access != TaskArgumentAccess.READ and len(requests.get(decl)) > 0
+                for argument, decl in zip(node.task.arguments, node.bindings)
+            )
+            requests = node.prerequisites_for(model, requests, configuration, storage_provider)
+            if runs and any(
+                argument.access != TaskArgumentAccess.WRITE
+                and decl.container_type.kind.parent() is None
+                and len(requests.get(decl)) > 0
+                for argument, decl in zip(node.task.arguments, node.bindings)
+            ):
+                return True
+        return False
 
     def get_artifact(
         self,
