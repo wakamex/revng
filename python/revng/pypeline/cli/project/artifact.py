@@ -2,7 +2,9 @@
 # This file is distributed under the MIT License. See LICENSE.md for details.
 #
 import asyncio
+import json
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -131,6 +133,13 @@ def build_artifact_command(
             # analysis
             incoming: ObjectSet
 
+            if kwargs.get("objects_file") is not None:
+                objects = ",".join(
+                    line.strip()
+                    for line in Path(kwargs["objects_file"]).read_text().splitlines()
+                    if line.strip() != ""
+                )
+
             if objects is None:
                 incoming = loaded_model.all_objects(artifact_kind)
             else:
@@ -149,6 +158,18 @@ def build_artifact_command(
                     },
                 )
 
+            if kwargs.get("batches_dir") is not None:
+                produce_batches(
+                    session,
+                    loaded_model,
+                    incoming,
+                    configuration,
+                    container_format,
+                    Path(kwargs["batches_dir"]),
+                    kwargs["batch_size"],
+                )
+                return
+
             # Finally, produce the artifact
             res_container = session.get_artifact(loaded_model, artifact, incoming, configuration)
             pypeline_logger.debug_log("Artifact computed")
@@ -160,6 +181,43 @@ def build_artifact_command(
                 # Write to stdout the bytes of the container
                 sys.stdout.buffer.write(res_container.to_bytes(container_format=container_format))
                 sys.stdout.buffer.flush()
+
+    def produce_batches(
+        session,
+        loaded_model: ReadOnlyModel,
+        incoming: ObjectSet,
+        configuration: PipelineConfiguration,
+        container_format: ContainerFormat,
+        batches_dir: Path,
+        batch_size: int,
+    ):
+        """Produce the artifact for `incoming` in batches of `batch_size` objects within this process, each written
+        to its own file in `batches_dir`. A batch whose file exists is skipped, so an interrupted run resumes; each
+        file is written under a temporary name and renamed when complete. Every batch prints one JSON line to stderr.
+        """
+        ordered = sorted(incoming.objects, key=lambda object_id: object_id.serialize())
+        batches = [ordered[i : i + batch_size] for i in range(0, len(ordered), batch_size)]
+        suffix = ".tar" if container_format == ContainerFormat.TAR else ""
+        batches_dir.mkdir(parents=True, exist_ok=True)
+        for index, batch in enumerate(batches):
+            target = batches_dir / f"batch-{index:05d}{suffix}"
+            started = time.monotonic()
+            skipped = target.exists()
+            if not skipped:
+                requests = ObjectSet(kind=incoming.kind, objects=set(batch))
+                container = session.get_artifact(loaded_model, artifact, requests, configuration)
+                partial = target.with_name(target.name + ".partial")
+                container.to_file(partial, container_format=container_format)
+                del container
+                partial.rename(target)
+            record = {
+                "batch": index,
+                "batches": len(batches),
+                "objects": len(batch),
+                "seconds": time.monotonic() - started,
+                "skipped": skipped,
+            }
+            print(json.dumps(record), file=sys.stderr, flush=True)
 
     @click.command(
         cls=WrappablePypeCommand,
@@ -182,6 +240,25 @@ def build_artifact_command(
             "The default output format is 'auto' (see --format)."
         ),
     )
+    @click.option(
+        "--objects-file",
+        type=click.Path(exists=True, dir_okay=False),
+        help="File listing the object IDs to produce, one per line, instead of OBJECTS.",
+    )
+    @click.option(
+        "--batches-dir",
+        type=click.Path(file_okay=False, writable=True),
+        help=(
+            "Produce the objects in batches of --batch-size within this process, writing each batch to "
+            "DIRECTORY/batch-NNNNN; existing batch files are skipped."
+        ),
+    )
+    @click.option(
+        "--batch-size",
+        type=click.IntRange(min=1),
+        default=1000,
+        help="Objects per batch with --batches-dir.",
+    )
     @debug_option
     @container_format_options(ContainerFormat.AUTO)
     @add_pipeline_config_options(pipeline, artifact.node)
@@ -197,6 +274,10 @@ def build_artifact_command(
         runner_context: RunnerContext,
         **kwargs,
     ) -> None:
+        if kwargs.get("batches_dir") is not None and result_path is not None:
+            raise click.UsageError("--batches-dir writes one file per batch and excludes -o")
+        if kwargs.get("objects_file") is not None and objects is not None:
+            raise click.UsageError("--objects-file and OBJECTS are exclusive")
         pypeline_logger.debug_log(f'Running artifact: "{artifact_name}"')
         pypeline_logger.debug_log(f'container_format: "{container_format}"')
         pypeline_logger.debug_log(f'kwargs: "{kwargs}"')

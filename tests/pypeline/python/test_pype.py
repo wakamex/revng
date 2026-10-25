@@ -198,3 +198,41 @@ def test_project(runner: CliRunner, container_format: str, project_storage: list
 
     # Run an analysis list
     run_project("analyze", "all_analyses")
+
+
+@setup_env
+def test_project_artifact_batches(runner: CliRunner, project_storage: list[str]):
+    run = run_partial(
+        runner,
+        obj=ContextObject.make(pipebox_args=["first pipebox arg", "second pipebox arg"]),
+    )
+
+    def run_project(*args: str):
+        return run("project", *project_storage, *args)
+
+    listed = run_project("artifact", "ChildArtifact", "--list").output
+    objects = [line.split()[1] for line in listed.splitlines() if line.startswith(" - ")]
+    assert len(objects) >= 2
+    Path("objects.txt").write_text("\n".join(objects[:2]) + "\n")
+
+    def produce():
+        run_project(
+            "artifact",
+            "ChildArtifact",
+            "--format=tar",
+            "--objects-file",
+            "objects.txt",
+            "--batches-dir",
+            "batches",
+            "--batch-size",
+            "1",
+        )
+        return {path.name: path.stat().st_mtime_ns for path in Path("batches").iterdir()}
+
+    first = produce()
+    assert sorted(first) == ["batch-00000.tar", "batch-00001.tar"]
+    for name in first:
+        check_file_format(Path("batches") / name, "tar")
+
+    # A rerun finds every batch written and skips it
+    assert produce() == first
