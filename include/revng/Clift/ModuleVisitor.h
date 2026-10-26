@@ -139,6 +139,17 @@ private:
   }
 
   mlir::LogicalResult internalVisitOp(mlir::Operation *Op) {
+    // A visitor with no type or attribute hook does not walk the types and
+    // attributes of the operations, which reach every type a module refers to
+    constexpr bool VisitsTypes = requires(mlir::Type Type) {
+      getVisitor().visitType(Type);
+    };
+    constexpr bool VisitsAttrs = requires(mlir::Attribute Attr) {
+      getVisitor().visitAttr(Attr);
+    };
+    if constexpr (not VisitsTypes and not VisitsAttrs)
+      return mlir::success();
+
     for (mlir::Type Type : Op->getResultTypes()) {
       if (internalVisitType(Type).failed())
         return mlir::failure();
