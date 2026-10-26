@@ -127,10 +127,11 @@ class ClifterImpl final : public Clifter {
   const model::Binary &Model;
   mlir::OpBuilder Builder;
 
-  // One per clifted function: the prototype, call sites, stack frame,
-  // variables and segments of a function reach the same types, and each is
-  // walked once
-  clift::ModelTypeImporter ModelTypes;
+  // The prototype, call sites, stack frame, variables and segments of a
+  // function reach the same types, and each is walked once: per clifted
+  // function, or once for every function sharing the caller's importer
+  std::unique_ptr<clift::ModelTypeImporter> OwnModelTypes;
+  clift::ModelTypeImporter &ModelTypes;
 
   const llvm::DataLayout *DataLayout;
 
@@ -153,12 +154,16 @@ public:
   // It is important only to query minimal properties about the model in the
   // importer constructor to avoid all imported functions depending on those
   // properties.
-  explicit ClifterImpl(mlir::ModuleOp Module, const model::Binary &Model) :
+  explicit ClifterImpl(mlir::ModuleOp Module,
+                       const model::Binary &Model,
+                       clift::ModelTypeImporter *Types) :
     Context(Module.getContext()),
     CurrentModule(Module),
     Model(Model),
     Builder(Context),
-    ModelTypes(Context),
+    OwnModelTypes(Types ? nullptr :
+                          std::make_unique<clift::ModelTypeImporter>(Context)),
+    ModelTypes(Types ? *Types : *OwnModelTypes),
     DataLayout(nullptr) {
     revng_assert(clift::isCliftModule(Module));
     Builder.setInsertionPointToEnd(Module.getBody());
@@ -1986,6 +1991,7 @@ clift::FunctionOp ClifterImpl::import(const llvm::Function *F) {
 } // namespace
 
 std::unique_ptr<Clifter> Clifter::make(mlir::ModuleOp Module,
-                                       const model::Binary &Model) {
-  return std::make_unique<ClifterImpl>(Module, Model);
+                                       const model::Binary &Model,
+                                       ModelTypeImporter *Types) {
+  return std::make_unique<ClifterImpl>(Module, Model, Types);
 }

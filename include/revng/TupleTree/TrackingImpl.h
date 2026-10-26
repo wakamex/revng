@@ -500,6 +500,13 @@ void Tracking::openSession(const M &LHS) {
 }
 
 template<typename M>
+bool Tracking::readWhole(const M &LHS, const void *Field) {
+  if (TrackingSession *Session = TrackingSession::find(&LHS))
+    return Session->readWhole(Field);
+  return false;
+}
+
+template<typename M>
 void Tracking::push(const M &LHS) {
   if (TrackingSession *Session = TrackingSession::find(&LHS))
     Session->push();

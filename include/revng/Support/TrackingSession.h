@@ -8,6 +8,8 @@
 #include <limits>
 #include <vector>
 
+#include "llvm/ADT/DenseSet.h"
+
 #include "llvm/ADT/SmallVector.h"
 
 #include "revng/Support/AccessTracker.h"
@@ -101,6 +103,8 @@ private:
   std::vector<uint32_t> Containers;
   /// The number of levels of a container whose levels are implicit
   size_t ContainerLevels = 1;
+  /// For each level, the top-level fields of the root read as a whole
+  std::vector<llvm::SmallDenseSet<uint32_t, 2>> WholeTops{ 1 };
 
 private:
   TrackingSession(const void *Root) : Root(Root) {}
@@ -155,6 +159,11 @@ public:
   /// Clear the innermost level of the trackers and every level of the
   /// containers
   void clear();
+  /// Record, in the innermost level, a read of everything under the top-level
+  /// field of the root that contains \p Address, as reading more trackers
+  /// than the coarse threshold under it would. Returns false if \p Address is
+  /// not in the tree.
+  bool readWhole(const void *Address);
   /// @}
 
   size_t objectCount() const { return Objects.size(); }

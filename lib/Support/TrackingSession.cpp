@@ -155,6 +155,7 @@ void TrackingSession::push() {
     Objects[Index].Kind->pushLevel(Objects[Index]);
 
   ++ContainerLevels;
+  WholeTops.emplace_back();
 }
 
 void TrackingSession::pop() {
@@ -169,6 +170,10 @@ void TrackingSession::pop() {
   });
 
   ContainerLevels = std::max<size_t>(ContainerLevels - 1, 1);
+  if (WholeTops.size() > 1)
+    WholeTops.pop_back();
+  else
+    WholeTops.back().clear();
 
   llvm::erase_if(Containers, [this](uint32_t Index) {
     const Object &Container = Objects[Index];
@@ -202,13 +207,15 @@ void TrackingSession::collect(llvm::SmallVectorImpl<TupleTreePath> &Read,
       ++Counts[TopLevel[Index]];
 
   llvm::SmallDenseSet<uint32_t, 4> CoarseTops;
-  for (const auto &[Top, Count] : Counts) {
-    if (Count > CoarseThreshold) {
+  for (const auto &[Top, Count] : Counts)
+    if (Count > CoarseThreshold)
       CoarseTops.insert(Top);
-      TupleTreePath Path;
-      appendPath(Top, Path);
-      Coarse.push_back(std::move(Path));
-    }
+  for (const auto &Level : WholeTops)
+    CoarseTops.insert(Level.begin(), Level.end());
+  for (uint32_t Top : CoarseTops) {
+    TupleTreePath Path;
+    appendPath(Top, Path);
+    Coarse.push_back(std::move(Path));
   }
   auto IsCoarse = [&](uint32_t Index) {
     return TopLevel[Index] != None and CoarseTops.contains(TopLevel[Index]);
@@ -257,6 +264,15 @@ void TrackingSession::clear() {
   }
   Containers.clear();
   ContainerLevels = 1;
+  WholeTops.back().clear();
+}
+
+bool TrackingSession::readWhole(const void *Address) {
+  uint32_t Index = objectAt(Address);
+  if (Index == None or TopLevel[Index] == None)
+    return false;
+  WholeTops.back().insert(TopLevel[Index]);
+  return true;
 }
 
 void detail::onFirstAccess(AccessTracker &Tracker) {

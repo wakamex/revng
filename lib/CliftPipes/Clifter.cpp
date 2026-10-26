@@ -14,7 +14,10 @@ Clifter::Clifter(const class Model &Model,
                  llvm::StringRef DynamicConfig,
                  const LLVMFunctionContainer &Input,
                  CliftFunctionContainer &Output) :
-  Binary(*Model.get().get()), Input(Input), Output(Output) {
+  Binary(*Model.get().get()),
+  Input(Input),
+  Output(Output),
+  Types(Output.getContext(), Binary) {
 }
 
 void Clifter::runOnFunction(const model::Function &Function) {
@@ -25,7 +28,7 @@ void Clifter::runOnFunction(const model::Function &Function) {
 
   auto ModuleOpObject = clift::makeModule(Output.getContext());
 
-  auto Importer = clift::Clifter::make(ModuleOpObject.get(), Binary);
+  auto Importer = clift::Clifter::make(ModuleOpObject.get(), Binary, &Types);
   Importer->import(&LLVMFunction);
 
   Output.assign(Object, std::move(ModuleOpObject));

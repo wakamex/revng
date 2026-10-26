@@ -646,6 +646,33 @@ BOOST_AUTO_TEST_CASE(TrackingRecordsFewReadsOneByOne) {
   }
 }
 
+BOOST_AUTO_TEST_CASE(TrackingRecordsAFieldReadWholeForItsLevelOnly) {
+  using revng::Tracking;
+  TupleTree<model::Binary> Model;
+  (void) Model->makeStructDefinition(8);
+  const model::Binary &Binary = *Model;
+
+  // Without a session the read cannot be recorded
+  Tracking::clearAndResume(Binary);
+  revng_check(not Tracking::readWhole(Binary, &Binary.TypeDefinitions()));
+  Tracking::stop(Binary);
+
+  Tracking::clearAndResume(Binary);
+  Tracking::openSession(Binary);
+  Tracking::push(Binary);
+  revng_check(Tracking::readWhole(Binary, &Binary.TypeDefinitions()));
+  std::vector<std::string> Collected = toStrings(Tracking::collect(Binary));
+  revng_check(llvm::is_contained(Collected, "coarse /TypeDefinitions"));
+
+  // The read belonged to the level collect cleared
+  Binary.Architecture();
+  Collected = toStrings(Tracking::collect(Binary));
+  revng_check(not llvm::is_contained(Collected, "coarse /TypeDefinitions"));
+  revng_check(llvm::is_contained(Collected, "read /Architecture"));
+  Tracking::pop(Binary);
+  Tracking::stop(Binary);
+}
+
 BOOST_AUTO_TEST_CASE(DiffPathsShouldMarkTheChangedTopLevelField) {
   TupleTree<model::Binary> Before;
   auto &Struct = Before->makeStructDefinition(8).first;

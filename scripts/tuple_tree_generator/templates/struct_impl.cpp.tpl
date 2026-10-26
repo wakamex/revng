@@ -237,4 +237,8 @@ void revng::Tracking::stop(const /*= base_namespace =*/::/*= struct.name =*/ &LH
 template
 void revng::Tracking::openSession(const /*= base_namespace =*/::/*= struct.name =*/ &LHS);
 
+template
+bool revng::Tracking::readWhole(const /*= base_namespace =*/::/*= struct.name =*/ &LHS,
+                                const void *Field);
+
 /** endif **/

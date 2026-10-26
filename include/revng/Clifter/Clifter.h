@@ -7,14 +7,18 @@
 #include "llvm/IR/Function.h"
 
 #include "revng/Clift/Clift.h"
+#include "revng/CliftImportModel/ImportModel.h"
 #include "revng/Model/Binary.h"
 
 namespace clift {
 
 class Clifter {
 public:
+  /// \p Types, if set, converts the model types: share one across the
+  /// functions of a module context, so that each type is converted once
   static std::unique_ptr<Clifter> make(mlir::ModuleOp Module,
-                                       const model::Binary &Model);
+                                       const model::Binary &Model,
+                                       ModelTypeImporter *Types = nullptr);
 
   virtual ~Clifter() = default;
 

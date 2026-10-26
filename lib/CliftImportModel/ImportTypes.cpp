@@ -81,6 +81,13 @@ public:
 
   ~CliftConverter() { revng_assert(DefinitionGuardSet.empty()); }
 
+  /// Forget the converted types, so that the next conversions read the model
+  /// again
+  void clearCache() {
+    revng_assert(IncompleteTypes.empty());
+    Cache.clear();
+  }
+
   mlir::Type convertTypeDefinition(const model::TypeDefinition &ModelType) {
     mlir::Type T = fromTypeDefinition(ModelType, /*RequireComplete=*/true);
     if (T and not processIncompleteTypes())
@@ -696,6 +703,9 @@ mlir::Type clift::importType(mlir::MLIRContext *Context,
 struct clift::ModelTypeImporter::Impl {
   std::function<mlir::InFlightDiagnostic()> EmitError;
   CliftConverter Converter;
+  /// The model whose reads a shared importer records as a whole, null for an
+  /// importer used by one group of imports
+  const model::Binary *Model = nullptr;
 
   explicit Impl(mlir::MLIRContext *Context) :
     EmitError([Context]() -> mlir::InFlightDiagnostic {
@@ -703,20 +713,39 @@ struct clift::ModelTypeImporter::Impl {
                                            mlir::DiagnosticSeverity::Error);
     }),
     Converter(Context, EmitError) {}
+
+  /// Before an import by a shared importer: the imports of this group may
+  /// return types an earlier group converted, without reading the model, so
+  /// record a read of all the type definitions. Without a tracking session
+  /// that cannot be recorded, and the conversions read the model again.
+  void recordReads() {
+    if (Model == nullptr)
+      return;
+    if (not revng::Tracking::readWhole(*Model, &Model->TypeDefinitions()))
+      Converter.clearCache();
+  }
 };
 
 clift::ModelTypeImporter::ModelTypeImporter(mlir::MLIRContext *Context) :
   TheImpl(std::make_unique<Impl>(Context)) {
 }
 
+clift::ModelTypeImporter::ModelTypeImporter(mlir::MLIRContext *Context,
+                                            const model::Binary &Model) :
+  TheImpl(std::make_unique<Impl>(Context)) {
+  TheImpl->Model = &Model;
+}
+
 clift::ModelTypeImporter::~ModelTypeImporter() = default;
 
 mlir::Type
 clift::ModelTypeImporter::importType(const model::TypeDefinition &ModelType) {
+  TheImpl->recordReads();
   return TheImpl->Converter.convertTypeDefinition(ModelType);
 }
 
 mlir::Type clift::ModelTypeImporter::importType(const model::Type &ModelType) {
+  TheImpl->recordReads();
   return TheImpl->Converter.convertType(ModelType);
 }
 

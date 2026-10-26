@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "revng/CliftImportModel/ImportModel.h"
 #include "revng/PipeboxCommon/CliftContainers.h"
 #include "revng/PipeboxCommon/Common.h"
 #include "revng/PipeboxCommon/LLVMContainer.h"
@@ -16,6 +17,9 @@ private:
   const model::Binary &Binary;
   const LLVMFunctionContainer &Input;
   CliftFunctionContainer &Output;
+  /// The functions' modules share the output's context, so each model type is
+  /// converted once for all of them
+  clift::ModelTypeImporter Types;
 
 public:
   static constexpr llvm::StringRef Name = "clifter";

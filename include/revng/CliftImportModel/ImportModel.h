@@ -42,10 +42,15 @@ mlir::Type importType(mlir::MLIRContext *Context, const model::Type &ModelType);
 /// Imports model types into \p Context, keeping what it has imported: every
 /// import after the first of a type returns it without walking the types it
 /// reaches again. Use one for a group of imports whose reads of the model are
-/// recorded together, such as those of one function.
+/// recorded together, such as those of one function, or share one across
+/// groups with the second constructor: each import then records, in the
+/// tracking session open on \p Model, a read of all its type definitions,
+/// since a type converted for an earlier group is returned without reading
+/// the model.
 class ModelTypeImporter {
 public:
   explicit ModelTypeImporter(mlir::MLIRContext *Context);
+  ModelTypeImporter(mlir::MLIRContext *Context, const model::Binary &Model);
   ~ModelTypeImporter();
 
   ModelTypeImporter(const ModelTypeImporter &) = delete;

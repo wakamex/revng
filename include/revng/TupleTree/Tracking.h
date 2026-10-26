@@ -96,6 +96,13 @@ struct Tracking {
   /// \p LHS must not change shape, nor be destroyed, until then.
   template<typename M>
   static void openSession(const M &LHS);
+
+  /// Record a read of everything under the top-level field of \p LHS that
+  /// contains \p Field, in the session open on \p LHS: collect reports the
+  /// field as coarse. Returns false, recording nothing, without a session or
+  /// if \p Field is not in the tree.
+  template<typename M>
+  static bool readWhole(const M &LHS, const void *Field);
 };
 
 } // namespace revng
