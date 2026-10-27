@@ -1081,7 +1081,7 @@ private:
 
       auto Op = Builder.create<ImmediateOp>(SurroundingLocation,
                                             C.getIntptrType(),
-                                            C.getPointerSize() * 8);
+                                            /*Value=*/0);
 
       LoggerIndent Indent(ExpressionLog);
       rc_return emitImplicitBitcast(SurroundingLocation,
