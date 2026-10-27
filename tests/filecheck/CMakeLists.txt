@@ -452,6 +452,7 @@ set(FILECHECK_TESTS
     segment-references/c-strings-outside-code.S
     lift/gvec-equality.S
     lift/helper-abort-message.S
+    lift/helper-written-csv-passthrough.S
     lift/jump-table-extent.S
     lift/no-build-paths.S
     lift/trace-type-shrinking.S

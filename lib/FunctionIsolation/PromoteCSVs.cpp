@@ -7,6 +7,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/InstIterator.h"
 
@@ -680,6 +681,15 @@ void PromoteCSVs::wrapCallsToHelpers(Function *F) {
 
   for (CallInst *Call : ToWrap) {
     CSVsUsage &Usage = UsedCSVs.get(Call);
+
+    // A callee can leave a CSV it may write unchanged, and the wrapper copies
+    // every written CSV back out: pass in its current value too, so that the
+    // CSV keeps it when the callee does not write it
+    SmallPtrSet<GlobalVariable *, 32> Read(Usage.Read.begin(),
+                                           Usage.Read.end());
+    for (GlobalVariable *CSV : Usage.Written)
+      if (Read.insert(CSV).second)
+        Usage.Read.push_back(CSV);
 
     // Sort to ensure compatibility between caller and callee
     Usage.sortByName();
