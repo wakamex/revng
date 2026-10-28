@@ -2,8 +2,6 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-#include "llvm/Object/ELFObjectFile.h"
-
 #include "StaticFunctionPointers.h"
 
 using namespace llvm;
@@ -18,42 +16,6 @@ collectReadOnlyFunctionPointers(const model::Binary &Model,
   if (Model.Architecture() != model::Architecture::x86_64
       or Model.OperatingSystem() != model::OperatingSystem::Linux)
     return Result;
-
-  std::vector<std::pair<uint64_t, uint64_t>> Relro;
-  auto Bytes = View.data();
-  StringRef Buffer(reinterpret_cast<const char *>(Bytes.data()), Bytes.size());
-  auto Object = object::ObjectFile::createObjectFile({ Buffer, "" });
-  if (not Object) {
-    consumeError(Object.takeError());
-    return Result;
-  }
-  auto *ELF = dyn_cast<object::ELF64LEObjectFile>(Object->get());
-  if (ELF == nullptr)
-    return Result;
-  const auto &Header = ELF->getELFFile().getHeader();
-  if (Header.e_machine != ELF::EM_X86_64
-      or (Header.e_type != ELF::ET_EXEC and Header.e_type != ELF::ET_DYN))
-    return Result;
-  auto Headers = ELF->getELFFile().program_headers();
-  if (not Headers) {
-    consumeError(Headers.takeError());
-    return Result;
-  }
-  for (const auto &Header : *Headers) {
-    if (Header.p_type != ELF::PT_GNU_RELRO)
-      continue;
-    MetaAddress Mapped = View.offsetToAddress(Header.p_offset);
-    auto End = OverflowSafeInt<uint64_t>(uint64_t(Header.p_vaddr))
-               + uint64_t(Header.p_memsz);
-    // Require a complete final page, without inferring protection for a
-    // partially covered page. The start is kept inside the declared region.
-    if (not Mapped.isValid() or not End or *End % 4096 != 0)
-      continue;
-    auto MappedEnd = OverflowSafeInt<uint64_t>(Mapped.address())
-                     + uint64_t(Header.p_memsz);
-    if (MappedEnd)
-      Relro.emplace_back(Mapped.address(), *MappedEnd);
-  }
 
   std::map<MetaAddress, std::vector<uint64_t>> RelocationSizes;
   for (const auto &Segment : Model.Segments())
@@ -80,9 +42,8 @@ collectReadOnlyFunctionPointers(const model::Binary &Model,
           Overlaps += It->first + Size > Address;
       if (Overlaps != 1)
         continue;
-      bool Protected = View.isReadOnly(Address, 8);
-      for (auto [Start, Limit] : Relro)
-        Protected |= Start <= Address.address() and *End <= Limit;
+      bool Protected = View.isReadOnly(Address, 8)
+                       or View.isInRelro(Address, 8);
       if (not Protected or not View.addressToOffset(Address, 8))
         continue;
       MetaAddress Target = Segment.StartAddress() + Relocation.Addend();

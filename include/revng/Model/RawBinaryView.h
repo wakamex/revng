@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
@@ -26,12 +27,15 @@ private:
   const model::Binary &Binary;
   llvm::ArrayRef<uint8_t> Data;
 
+  /// Address ranges, [start, end), that the loader makes read-only once it has
+  /// applied the relocations (PT_GNU_RELRO)
+  std::vector<std::pair<uint64_t, uint64_t>> Relro;
+
 public:
   RawBinaryView(const model::Binary &Binary, llvm::StringRef Data) :
     RawBinaryView(Binary, { Data.bytes_begin(), Data.bytes_end() }) {}
 
-  RawBinaryView(const model::Binary &Binary, llvm::ArrayRef<uint8_t> Data) :
-    Binary(Binary), Data(Data) {}
+  RawBinaryView(const model::Binary &Binary, llvm::ArrayRef<uint8_t> Data);
 
 public:
   uint64_t size() { return Data.size(); }
@@ -67,6 +71,11 @@ public:
   MetaAddress offsetToAddress(uint64_t Offset) const;
 
   [[nodiscard]] bool isReadOnly(MetaAddress Address, uint64_t Size) const;
+
+  /// \return whether [Address, Address + Size) lies in memory the loader makes
+  ///         read-only after relocation (RELRO). Only the values relocations
+  ///         put there are final: the file holds the unrelocated bytes.
+  [[nodiscard]] bool isInRelro(MetaAddress Address, uint64_t Size) const;
 
   using SegmentDataPair = std::pair<const model::Segment &,
                                     llvm::ArrayRef<uint8_t>>;

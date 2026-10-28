@@ -22,7 +22,8 @@ revng_add_analyses_library_internal(
   Verification.cpp
   Visits.cpp)
 
-target_link_libraries(revngModel revngSupport)
+llvm_map_components_to_libnames(MODEL_LLVM_LIBRARIES Object)
+target_link_libraries(revngModel revngSupport ${MODEL_LLVM_LIBRARIES})
 
 set(SCHEMA_PATH "${CMAKE_SOURCE_DIR}/include/revng/Model/model-schema.yml")
 set(JSONSCHEMA_PATH "${CMAKE_BINARY_DIR}/model-jsonschema.yml")

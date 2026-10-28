@@ -2,7 +2,64 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/Object/ELFObjectFile.h"
+
 #include "revng/Model/RawBinaryView.h"
+
+using namespace llvm;
+
+/// The ranges of an x86-64 Linux ELF's PT_GNU_RELRO headers, in addresses of
+/// \p View. The protection follows the Linux x86-64 ABI, so other targets get
+/// none.
+static std::vector<std::pair<uint64_t, uint64_t>>
+readRelro(const model::Binary &Binary, const RawBinaryView &View) {
+  std::vector<std::pair<uint64_t, uint64_t>> Result;
+  if (Binary.Architecture() != model::Architecture::x86_64 or
+      Binary.OperatingSystem() != model::OperatingSystem::Linux)
+    return Result;
+
+  auto Bytes = View.data();
+  StringRef Buffer(reinterpret_cast<const char *>(Bytes.data()), Bytes.size());
+  auto Object = object::ObjectFile::createObjectFile({Buffer, ""});
+  if (not Object) {
+    consumeError(Object.takeError());
+    return Result;
+  }
+  auto *ELF = dyn_cast<object::ELF64LEObjectFile>(Object->get());
+  if (ELF == nullptr)
+    return Result;
+  const auto &Header = ELF->getELFFile().getHeader();
+  if (Header.e_machine != ELF::EM_X86_64 or
+      (Header.e_type != ELF::ET_EXEC and Header.e_type != ELF::ET_DYN))
+    return Result;
+  auto Headers = ELF->getELFFile().program_headers();
+  if (not Headers) {
+    consumeError(Headers.takeError());
+    return Result;
+  }
+  for (const auto &Header : *Headers) {
+    if (Header.p_type != ELF::PT_GNU_RELRO)
+      continue;
+    MetaAddress Mapped = View.offsetToAddress(Header.p_offset);
+    auto End = OverflowSafeInt<uint64_t>(uint64_t(Header.p_vaddr)) +
+               uint64_t(Header.p_memsz);
+    // Require a complete final page, without inferring protection for a
+    // partially covered page. The start is kept inside the declared region.
+    if (not Mapped.isValid() or not End or *End % 4096 != 0)
+      continue;
+    auto MappedEnd =
+        OverflowSafeInt<uint64_t>(Mapped.address()) + uint64_t(Header.p_memsz);
+    if (MappedEnd)
+      Result.emplace_back(Mapped.address(), *MappedEnd);
+  }
+  return Result;
+}
+
+RawBinaryView::RawBinaryView(const model::Binary &Binary,
+                             llvm::ArrayRef<uint8_t> Data)
+    : Binary(Binary), Data(Data) {
+  Relro = readRelro(Binary, *this);
+}
 
 std::optional<llvm::ArrayRef<uint8_t>>
 RawBinaryView::getByOffset(uint64_t Offset, uint64_t Size) const {
@@ -134,6 +191,17 @@ MetaAddress RawBinaryView::offsetToAddress(uint64_t Offset) const {
     }
   }
 
+  return false;
+}
+
+[[nodiscard]] bool RawBinaryView::isInRelro(MetaAddress Address,
+                                            uint64_t Size) const {
+  auto End = OverflowSafeInt(Address.address()) + Size;
+  if (not End)
+    return false;
+  for (auto [Start, Limit] : Relro)
+    if (Start <= Address.address() and *End <= Limit)
+      return true;
   return false;
 }
 
