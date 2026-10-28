@@ -445,14 +445,16 @@ private:
   /// Reference to the cache containing the pre-computed `Traversal`s and
   /// `ArrayPath`s. This passed in the constructor, as we want to cache the
   /// information across different runs
-  TraversalInfoMap &Data;
+  llvm::DenseMap<mlir::Type, TraversalInfo> &Data;
 
   /// Memoizes `countTraversals`. A type's traversal count depends only on the
-  /// type, so it is safe to cache and reuse across `BaseType`s.
-  llvm::DenseMap<mlir::Type, uint64_t> TraversalCountCache;
+  /// type, so it is safe to cache and reuse across `BaseType`s and, like
+  /// `Data`, across the analyzers built for each access.
+  llvm::DenseMap<mlir::Type, uint64_t> &TraversalCountCache;
 
 public:
-  TypeTraversalAnalyzer(TraversalInfoMap &Data) : Data(Data) {}
+  TypeTraversalAnalyzer(TraversalCache &Cache) :
+    Data(Cache.Infos), TraversalCountCache(Cache.Counts) {}
 
 public:
   /// Retrieve the precomputed `Traversal`s for `BaseType` (or compute them
@@ -830,9 +832,9 @@ private:
 
 public:
   /// We need an explicit constructor in order to propagate the
-  /// `TraversalInfoMap` which is used as a global cache for storing
+  /// `TraversalCache` which is used as a global cache for storing
   /// `Traversal`s and `ArrayPath`s
-  BestTraversalChooser(TraversalInfoMap &Data) : TraversalAnalyzer(Data) {}
+  BestTraversalChooser(TraversalCache &Cache) : TraversalAnalyzer(Cache) {}
 
 public:
   /// Public entry point for computing the `BestTraversal` for the
@@ -1201,7 +1203,7 @@ BestTraversalChooser::getBestTraversal(mlir::Type BaseType,
 std::optional<Traversal>
 computeBestTraversal(ExpressionOpInterface PointerToReplace,
                      const PointerArithmetic &Arithmetic,
-                     TraversalInfoMap &Data) {
-  auto BestTraversalC = BestTraversalChooser(Data);
+                     TraversalCache &Cache) {
+  auto BestTraversalC = BestTraversalChooser(Cache);
   return BestTraversalC.computeBestTraversal(PointerToReplace, Arithmetic);
 }

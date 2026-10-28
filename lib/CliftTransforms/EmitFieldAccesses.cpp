@@ -23,7 +23,7 @@ using namespace clift;
 
 namespace {
 
-static thread_local TraversalInfoMap *ThreadTraversalCache;
+static thread_local TraversalCache *ThreadTraversalCache;
 
 struct EmitFieldAccessesPattern
   : mlir::OpInterfaceRewritePattern<ExpressionOpInterface> {
@@ -37,16 +37,14 @@ struct EmitFieldAccessesPattern
   mlir::LogicalResult
   matchAndRewrite(ExpressionOpInterface Op,
                   mlir::PatternRewriter &Rewriter) const override {
-    std::optional<TraversalInfoMap> LocalTraversalCache;
-    TraversalInfoMap *TraversalCache = ThreadTraversalCache;
+    std::optional<TraversalCache> LocalCache;
+    TraversalCache *Cache = ThreadTraversalCache;
 
-    if (TraversalCache == nullptr)
-      TraversalCache = &LocalTraversalCache.emplace();
+    if (Cache == nullptr)
+      Cache = &LocalCache.emplace();
 
     if (std::optional<PointerArithmetic> PA = computePointerArithmetic(Op)) {
-      if (std::optional<Traversal> BT = computeBestTraversal(Op,
-                                                             *PA,
-                                                             *TraversalCache)) {
+      if (std::optional<Traversal> BT = computeBestTraversal(Op, *PA, *Cache)) {
 
         if (replaceFieldAccess(Rewriter, Op, *PA, *BT))
           return mlir::success();
@@ -84,7 +82,7 @@ struct EmitFieldAccessesPass
 } // namespace
 
 struct EFAThreadCache::ImplType {
-  TraversalInfoMap Cache;
+  TraversalCache Cache;
 
   ImplType() {
     revng_assert(ThreadTraversalCache == nullptr);

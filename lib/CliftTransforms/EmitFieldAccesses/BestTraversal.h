@@ -119,9 +119,16 @@ struct TraversalInfo {
   std::vector<ArrayPath> ArrayPaths;
 };
 
-/// The map used to cache the `Traversal`s and `ArrayPath`s computed starting
-/// from a `mlir::Type`
-using TraversalInfoMap = llvm::DenseMap<mlir::Type, TraversalInfo>;
+/// What EFA caches about `mlir::Type`s while it rewrites the accesses of one
+/// operation. Both depend only on the type.
+struct TraversalCache {
+  /// The `Traversal`s and `ArrayPath`s computed starting from a `mlir::Type`
+  llvm::DenseMap<mlir::Type, TraversalInfo> Infos;
+
+  /// How many `Traversal`s each `mlir::Type` has, for every type counted so
+  /// far, including the types nested in a `BaseType`
+  llvm::DenseMap<mlir::Type, uint64_t> Counts;
+};
 
 /// Helper function used to obtain the `BaseType` for the `Traversal` analysis.
 /// Specifically, this is used to enable the `p[i]` rewrites. In situations
@@ -134,4 +141,4 @@ mlir::Type deriveBaseType(mlir::Value BasePointer);
 std::optional<Traversal>
 computeBestTraversal(clift::ExpressionOpInterface PointerToReplace,
                      const PointerArithmetic &Arithmetic,
-                     TraversalInfoMap &Data);
+                     TraversalCache &Data);
