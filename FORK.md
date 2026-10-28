@@ -24,4 +24,6 @@ A change belongs in this fork when it makes rev.ng correct, complete, analyzable
 
 ## Current state
 
-Value recovery, helper inlining and storage scale to whole-image lifts of a 90 MB binary; detect-abi memory is the next limit. The analyzable and executable properties are goals: compiling and running emitted C is so far exercised only on small inputs and on individual functions with externally supplied runtime support.
+The whole pipeline completes on a 90 MB binary: lifting, ABI detection, data layout analysis and C emission of all 109,919 of its functions, the last in 24.85 hours at a peak of 68 GB. The analyzable and executable properties are goals: compiling and running emitted C is so far exercised only on small inputs and on individual functions with externally supplied runtime support.
+
+[FORK-CHANGES.md](FORK-CHANGES.md) lists every change so far, with its commits, tests and upstream status.

@@ -1,5 +1,9 @@
 # The rev.ng binary analysis framework and decompiler
 
+## About this fork
+
+This is a fork of rev.ng that makes its whole pipeline, from lifting to C emission, complete on binaries with over 100,000 functions, and fixes wrong or crashing decompiled output it found on the way. [FORK.md](FORK.md) states its goals and [FORK-CHANGES.md](FORK-CHANGES.md) lists every change, grouped by what it fixes, with links to the commits, their tests and their prospects for upstream. The rest of this README is upstream's, and its build instructions apply unchanged.
+
 Welcome to the [rev.ng](https://rev.ng) project!
 
 rev.ng is an open source binary analysis framework based on LLVM and QEMU.
