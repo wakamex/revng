@@ -9,6 +9,7 @@
 
 #include "revng/FunctionIsolation/RemoveExceptionalCalls.h"
 #include "revng/Model/FunctionTags.h"
+#include "revng/Support/EmitAbort.h"
 #include "revng/Support/IRHelpers.h"
 
 using namespace llvm;
@@ -20,7 +21,6 @@ static Register X("remove-exceptional-functions",
                   "Remove Exceptional Functions");
 
 bool RemoveExceptionalCalls::runOnModule(llvm::Module &M) {
-  LLVMContext &C = M.getContext();
 
   // Collect all calls to exceptional functions in lifted functions
   std::set<CallBase *> ToErase;
@@ -41,13 +41,18 @@ bool RemoveExceptionalCalls::runOnModule(llvm::Module &M) {
 
     // Record the old terminator so that we don't need to look for it again
     llvm::Instruction *OldTerminator = BB->getTerminator();
-
-    // Terminate with an unreachable
-    auto Unreachable = new UnreachableInst(C, BB);
-    Unreachable->setDebugLoc(OldTerminator->getDebugLoc());
+    DebugLoc Location = OldTerminator->getDebugLoc();
 
     // Drop the old terminator
     eraseFromParent(OldTerminator);
+
+    // Terminate with an abort naming the exceptional function. A bare
+    // unreachable would let the optimizer delete the path and the condition
+    // leading to it, such as the check before a trap.
+    StringRef Name = "exception";
+    if (Function *Callee = getCalledFunction(Call))
+      Name = Callee->getName();
+    emitAbort(BB, Twine("Exception raised by ") + Name, Location);
 
     // Drop function call
     auto *Undef = UndefValue::get(Call->getType());
