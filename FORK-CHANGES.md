@@ -55,6 +55,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 18 | Break DLA instance loops no offset-0 root reaches | correctness | data layout analysis | 60 | 50 |
 | 19 | Emit image-resident segments as references; define the overflow helpers the C backend declares | correctness (recompilation) | C emission | 35 | 80 |
 | 20 | Data layout analysis quality series (pointer unions, function views, register-mapped call arguments, spill tracking, constant stores, loop scopes) | correctness (type quality) | data layout analysis | 45 | 30 |
+| 40 | Calls through function pointer slots the loader makes read-only (RELRO GOT slots) become direct calls to functions | correctness | lift | 85 | 85 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -76,6 +77,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 18. [`d4d95145d`](https://github.com/wakamex/revng/commit/d4d95145d4dcc0b7b6998ddc68a6ebdfe585e000): invalid-node abort in the backend
 19. [`e33f25bd2`](https://github.com/wakamex/revng/commit/e33f25bd28cf3a232ad42814197f3c6fbf6d3c2a), [`7899364c2`](https://github.com/wakamex/revng/commit/7899364c2d7d2d2f46522d9b5165987477ee7273): recompilation only
 20. [`3d352668c`](https://github.com/wakamex/revng/commit/3d352668c972c60a35083956bd809a8b30e2cbdb) to [`ece481fd7`](https://github.com/wakamex/revng/commit/ece481fd74cbb77b3ecde19b68e80d363fc2f109), [`8d7d22b15`](https://github.com/wakamex/revng/commit/8d7d22b15526facde4228386833f1cf571227eb6): changes inferred types; a held-out evaluation still showed regressions, so each needs judgment
+40. [`8e04ee757`](https://github.com/wakamex/revng/commit/8e04ee7577d0699b3ed1d922dcb699751414d34b), [`21b298cef`](https://github.com/wakamex/revng/commit/21b298cef93c8726047028c3d461d0498baa837d): a static position-independent Rust binary calls 3,975 functions through 296,804 `call *slot(%rip)` instructions, and 3,941 of those functions were missing from the model, the calls had no prototype, and calls to panics fell through into landing pads; test `lift/relro-got-call.S`, including a writable GOT whose calls stay indirect
 
 ## Determinism and termination
 
