@@ -455,6 +455,7 @@ set(FILECHECK_TESTS
     lift/helper-written-csv-passthrough.S
     lift/jump-table-extent.S
     lift/no-build-paths.S
+    lift/relro-got-call.S
     lift/segment-base-opaque.S
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S

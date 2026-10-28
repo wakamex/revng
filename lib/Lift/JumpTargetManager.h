@@ -103,6 +103,16 @@ private:
   void pinExitTB(llvm::CallInst *ExitTBCall,
                  ProgramCounterHandler::DispatcherTargets &Destinations);
 
+  /// If \p ExitTBCall leaves an indirect function call, make it a direct call
+  /// to \p Target, its only destination
+  ///
+  /// \return true if the call has been made direct
+  bool pinDirectCall(llvm::CallInst *ExitTBCall, MetaAddress Target);
+
+  /// Whether the address the call marked by \p Marker jumps to cannot change:
+  /// a constant, or a load from memory that is read-only once loaded
+  bool hasFixedTarget(llvm::CallInst *Marker) const;
+
   void pinConstantStoreInternal(MetaAddress Address,
                                 llvm::CallInst *ExitTBCall);
 

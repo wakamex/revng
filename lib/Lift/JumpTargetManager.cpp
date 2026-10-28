@@ -7,6 +7,7 @@
 
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/Progress.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
@@ -128,6 +129,181 @@ void TDBP::pinExitTB(CallInst *ExitTBCall, DispatcherTargets &Destinations) {
   }
 }
 
+/// The value \p V holds, looking through the lifter's temporaries: a load from
+/// an alloca is the value last stored to it earlier in the same block
+static Value *forwardTemporaries(Value *V) {
+  while (auto *Load = dyn_cast<LoadInst>(V)) {
+    auto *Temporary = dyn_cast<AllocaInst>(Load->getPointerOperand());
+    if (Temporary == nullptr)
+      return V;
+
+    StoreInst *Last = nullptr;
+    for (Instruction *I = Load->getPrevNode(); I != nullptr;
+         I = I->getPrevNode()) {
+      auto *Store = dyn_cast<StoreInst>(I);
+      if (Store != nullptr and Store->getPointerOperand() == Temporary) {
+        Last = Store;
+        break;
+      }
+      // Anything else that may write it hides the value
+      if (I->mayWriteToMemory() and not isa<StoreInst>(I))
+        return V;
+    }
+    if (Last == nullptr)
+      return V;
+    V = Last->getValueOperand();
+  }
+  return V;
+}
+
+/// The address \p V computes, if it is a constant: an integer constant, or the
+/// start of a segment, from its getter, plus an integer constant
+static std::optional<uint64_t> constantAddress(Value *V) {
+  using namespace PatternMatch;
+  ConstantInt *Offset = nullptr;
+  if (match(V, m_ConstantInt(Offset)))
+    return Offset->getZExtValue();
+
+  Value *Base = V;
+  uint64_t Addend = 0;
+  if (match(V, m_Add(m_Value(Base), m_ConstantInt(Offset))))
+    Addend = Offset->getZExtValue();
+
+  auto *Getter = dyn_cast<CallInst>(Base);
+  if (Getter == nullptr)
+    return std::nullopt;
+  Function *Callee = getCalledFunction(Getter);
+  if (Callee == nullptr or not hasSegmentKeyMetadata(*Callee))
+    return std::nullopt;
+  return extractSegmentKeyFromMetadata(*Callee).address() + Addend;
+}
+
+static Logger DirectCallLog("pin-direct-calls");
+
+bool TDBP::hasFixedTarget(CallInst *Marker) const {
+  GlobalVariable *AddressCSV = PCH->pcCSVs()[3];
+  StoreInst *PCStore = nullptr;
+  for (Instruction *I = Marker->getPrevNode(); I != nullptr;
+       I = I->getPrevNode()) {
+    auto *Store = dyn_cast<StoreInst>(I);
+    if (Store != nullptr and Store->getPointerOperand() == AddressCSV) {
+      PCStore = Store;
+      break;
+    }
+  }
+  if (PCStore == nullptr) {
+    revng_log(DirectCallLog, "No store to the PC before the call");
+    return false;
+  }
+
+  Value *Stored = forwardTemporaries(PCStore->getValueOperand());
+  if (isa<ConstantInt>(Stored))
+    return true;
+
+  // A load from an address whose contents the program cannot change
+  using namespace PatternMatch;
+  Value *AddressValue = nullptr;
+  std::optional<uint64_t> Address;
+  if (Stored->getType()->isIntegerTy() and
+      match(Stored, m_Load(m_IntToPtr(m_Value(AddressValue)))))
+    Address = constantAddress(AddressValue);
+  if (not Address) {
+    if (DirectCallLog.isEnabled()) {
+      DirectCallLog << "The PC is neither a constant nor a load from one: ";
+      Stored->print(*DirectCallLog.getAsLLVMStream());
+      DirectCallLog << DoLog;
+    }
+    return false;
+  }
+  auto Location =
+      MetaAddress::fromGeneric(JTM->model()->Architecture(), *Address);
+  uint64_t Size = Stored->getType()->getIntegerBitWidth() / 8;
+  const RawBinaryView &View = JTM->binaryView();
+  bool Fixed =
+      View.isReadOnly(Location, Size) or View.isInRelro(Location, Size);
+  revng_log(DirectCallLog,
+            "The PC is loaded from "
+                << Location.toString()
+                << (Fixed ? ", which cannot change" : ", which can change"));
+  return Fixed;
+}
+
+bool TDBP::pinDirectCall(CallInst *ExitTBCall, MetaAddress Target) {
+  BasicBlock *BB = ExitTBCall->getParent();
+  auto *FunctionCall = functionOrNull(FunctionCallMarker.get(*BB->getModule()));
+  if (FunctionCall == nullptr)
+    return false;
+
+  constexpr auto CalleeIndex =
+      static_cast<unsigned>(FunctionCallArgument::Callee);
+
+  // A call made direct in an earlier round keeps its marker before the branch
+  auto *Existing = getMarker(BB->getTerminator(), FunctionCall);
+  if (Existing != nullptr and
+      not isa<ConstantPointerNull>(Existing->getArgOperand(CalleeIndex)))
+    return true;
+
+  // The function_call marker is among the markers right before exitTB
+  CallInst *Marker = nullptr;
+  for (Instruction *I = ExitTBCall->getPrevNode(); I != nullptr and isMarker(I);
+       I = I->getPrevNode()) {
+    auto *Call = dyn_cast<CallInst>(I);
+    if (Call != nullptr and getCalledFunction(Call) == FunctionCall) {
+      Marker = Call;
+      break;
+    }
+  }
+
+  if (Marker == nullptr or
+      not isa<ConstantPointerNull>(Marker->getArgOperand(CalleeIndex)))
+    return false;
+
+  revng_log(DirectCallLog, "Indirect call in "
+                               << getBasicBlockAddress(BB).toString()
+                               << " has the one destination "
+                               << Target.toString());
+  if (not hasFixedTarget(Marker))
+    return false;
+
+  BasicBlock *Callee = JTM->registerJT(Target, JumpTargetReason::Callee);
+  if (Callee == nullptr)
+    return false;
+
+  LLVMContext &Context = getContext(ExitTBCall);
+  uint64_t OldTargetsCount = getLimitedValue(ExitTBCall->getArgOperand(0));
+
+  if (auto *Dispatcher = dyn_cast<SwitchInst>(BB->getTerminator()))
+    PCH->destroyDispatcher(Dispatcher);
+  exitTBCleanup(ExitTBCall);
+  ExitTBCall->setArgOperand(0, ConstantInt::get(Type::getInt32Ty(Context), 1));
+  Marker->setArgOperand(CalleeIndex, BlockAddress::get(Callee));
+
+  // Branch as a direct call does in the current form: to the callee, or to the
+  // fallthrough when the CFG leaves function calls out
+  BasicBlock *Successor = Callee;
+  if (JTM->cfgForm() == CFGForm::NoFunctionCalls) {
+    auto FallthroughIndex =
+        static_cast<unsigned>(FunctionCallArgument::Fallthrough);
+    Value *Fallthrough = Marker->getArgOperand(FallthroughIndex);
+    Successor = cast<BlockAddress>(Fallthrough)->getBasicBlock();
+  }
+  Instruction *Last = BranchInst::Create(Successor, BB);
+
+  // As in pinExitTB, move the markers before exitTB right before the branch,
+  // where a direct call has its function_call marker
+  auto It = ExitTBCall->getIterator();
+  while (It != BB->begin() and isMarker(&*std::prev(It))) {
+    Instruction *I = &*std::prev(It);
+    I->moveBefore(Last);
+    Last = I;
+  }
+
+  if (OldTargetsCount < 1)
+    JTM->recordNewBranches(BB, 1 - OldTargetsCount);
+
+  return true;
+}
+
 bool TDBP::pinMaterializedValues(Function &F) {
   QuickMetadata QMD(getContext(&F));
   Module *M = F.getParent();
@@ -177,6 +353,14 @@ bool TDBP::pinMaterializedValues(Function &F) {
         bool HasDirectDestinations = DirectDestinations.size() > 0;
         bool HasSymbolDestinations = SymbolDestinations.size() > 0;
         bool HasOneSymbolDestination = SymbolDestinations.size() == 1;
+        // An indirect call whose only destination is one address, such as a
+        // function pointer the loader writes into read-only memory, is a call
+        // to that address
+        if (DirectDestinations.size() == 1 and not HasSymbolDestinations and
+            pinDirectCall(Call, DirectDestinations[0])) {
+          continue;
+        }
+
         if (HasDirectDestinations and not HasSymbolDestinations) {
           // We have at least a direct destination, prepare a list of jump
           // targets
@@ -546,7 +730,9 @@ MaterializedValue JumpTargetManager::readFromPointer(MetaAddress LoadAddress,
                     "Found a Segment relocation:\n"
                       << Relocation.toString());
           auto Value = NewAPInt(Address.address());
-          if (Segment.IsWriteable())
+          // A relocation in RELRO memory is final once the loader applies it
+          if (Segment.IsWriteable() and
+              not BinaryView.isInRelro(LoadAddress, LoadSize))
             Result = MaterializedValue::fromMutable(Value);
           else
             Result = MaterializedValue::fromConstant(Value);
