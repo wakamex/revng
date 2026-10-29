@@ -14,13 +14,16 @@
 // them to a more human-readable format. This enhancement is crucial for
 // improving code comprehension.
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Passes/PassBuilder.h"
 
 #include "revng/Canonicalize/SimplifySwitch.h"
 #include "revng/Model/Architecture.h"
+#include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
 #include "revng/Pipebox/Helpers.h"
+#include "revng/Support/IRBuilder.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/ValueMaterializer/DataFlowRangeAnalysis.h"
 #include "revng/ValueMaterializer/ValueMaterializer.h"
@@ -172,6 +175,76 @@ static bool handleSwitch(SwitchInst *Switch,
   return true;
 }
 
+/// Whether the value of \p V depends on where a segment is placed, through
+/// arithmetic on segment addresses. Loaded values and call results do not.
+static bool dependsOnSegmentAddress(Value *V) {
+  SmallPtrSet<Value *, 16> Visited;
+  SmallVector<Value *, 16> Worklist{ V };
+  while (not Worklist.empty()) {
+    Value *Current = Worklist.pop_back_val();
+    if (not Visited.insert(Current).second)
+      continue;
+    if (isCallToTagged(Current, FunctionTags::SegmentGlobalGetter))
+      return true;
+    auto *I = dyn_cast<Instruction>(Current);
+    if (I == nullptr or isa<LoadInst>(I) or isa<CallBase>(I))
+      continue;
+    for (Value *Operand : I->operands())
+      Worklist.push_back(Operand);
+  }
+  return false;
+}
+
+/// The segment address \p V is computed from, when \p V is that address plus
+/// terms that do not depend on segment addresses.
+static CallInst *getSegmentBase(Value *V) {
+  if (isCallToTagged(V, FunctionTags::SegmentGlobalGetter))
+    return cast<CallInst>(V);
+  auto *Add = dyn_cast<BinaryOperator>(V);
+  if (Add == nullptr or Add->getOpcode() != Instruction::Add)
+    return nullptr;
+  for (unsigned I = 0; I < 2; ++I)
+    if (CallInst *Base = getSegmentBase(Add->getOperand(I)))
+      if (not dependsOnSegmentAddress(Add->getOperand(1 - I)))
+        return Base;
+  return nullptr;
+}
+
+/// \p V minus \p Base, the segment address \p V is computed from, as the
+/// sum of the terms of \p V other than \p Base.
+static Value *offsetFrom(Value *V, CallInst *Base, revng::IRBuilder &B) {
+  if (V == Base)
+    return ConstantInt::get(V->getType(), 0);
+  auto *Add = cast<BinaryOperator>(V);
+  unsigned I = getSegmentBase(Add->getOperand(0)) == Base ? 0 : 1;
+  Value *Term = Add->getOperand(1 - I);
+  if (Add->getOperand(I) == Base)
+    return Term;
+  return B.CreateAdd(offsetFrom(Add->getOperand(I), Base, B), Term);
+}
+
+/// A switch over a code address computed from a segment's address, such as
+/// the target read from a table of offsets relative to the table, has case
+/// values that are original addresses. Compare the offset from the segment
+/// with the case values' offsets instead, so that the switch selects the same
+/// case wherever the segment is placed.
+static bool rebaseOnSegment(SwitchInst *Switch) {
+  CallInst *Base = getSegmentBase(Switch->getCondition());
+  if (Base == nullptr)
+    return false;
+
+  Function *Getter = getCalledFunction(Base);
+  uint64_t Start = extractSegmentKeyFromMetadata(*Getter).address();
+  auto *Type = cast<IntegerType>(Switch->getCondition()->getType());
+  revng::IRBuilder B(Switch);
+  Switch->setCondition(offsetFrom(Switch->getCondition(), Base, B));
+  for (auto &Case : Switch->cases()) {
+    APInt Offset = Case.getCaseValue()->getValue() - Start;
+    Case.setValue(ConstantInt::get(Type->getContext(), Offset));
+  }
+  return true;
+}
+
 namespace revng::pypeline::piperuns {
 
 struct SimplifySwitchPass : public llvm::ModulePass {
@@ -211,6 +284,8 @@ public:
         if (handleSwitch(Switch, LVI, DFRA, DT, MO)) {
           Switch->eraseFromParent();
           Result |= true;
+        } else {
+          Result |= rebaseOnSegment(Switch);
         }
       }
     }

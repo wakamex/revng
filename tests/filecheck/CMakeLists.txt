@@ -457,6 +457,7 @@ set(FILECHECK_TESTS
     lift/no-build-paths.S
     lift/relro-got-call.S
     lift/segment-base-opaque.S
+    lift/segment-relative-switch.S
     lift/trap-check-kept.S
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S
