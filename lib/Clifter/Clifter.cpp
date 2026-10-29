@@ -1073,7 +1073,7 @@ private:
       unsigned Width = C.getIntegerSize(T->getBitWidth()) * 8;
       rc_return Builder.create<ImmediateOp>(SurroundingLocation,
                                             C.importLLVMIntegerType(T),
-                                            I->getValue().sextOrTrunc(Width));
+                                            I->getValue().zextOrTrunc(Width));
     }
 
     if (auto N = llvm::dyn_cast<llvm::ConstantPointerNull>(V)) {

@@ -461,6 +461,7 @@ set(FILECHECK_TESTS
     lift/trap-check-kept.S
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S
+    lift/wide-division-quotient-bit.S
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll
