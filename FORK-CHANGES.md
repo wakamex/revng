@@ -55,6 +55,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 18 | Break DLA instance loops no offset-0 root reaches | correctness | data layout analysis | 60 | 50 |
 | 19 | Emit image-resident segments as references; define the overflow helpers the C backend declares | correctness (recompilation) | C emission | 35 | 80 |
 | 20 | Data layout analysis quality series (pointer unions, function views, register-mapped call arguments, spill tracking, constant stores, loop scopes) | correctness (type quality) | data layout analysis | 45 | 30 |
+| 46 | Out of SSA, a PHI is kept out of a shared variable that another incoming would overwrite while it is still to be read (Rust's insertion sort lost and duplicated elements) | correctness | exit-ssa | 90 | 85 |
+| 47 | Pointer arithmetic takes a signed offset, so the C never adds a negative offset as an unsigned integer, which overflows the pointer | correctness | Clifter (C emission) | 85 | 90 |
 | 40 | Calls through function pointer slots the loader makes read-only (RELRO GOT slots) become direct calls to functions | correctness | lift | 85 | 85 |
 | 41 | A call to an exceptional function, such as the one a trap raises, becomes `revng_abort` instead of a bare `unreachable`, so the check before a trap stays in the C | correctness | enforce-abi (remove-exceptional-functions) | 90 | 95 |
 | 42 | A switch over a code address computed from a segment address, such as a jump through a table of offsets from the table, tests the offset, so it selects the right case wherever the segment is placed | correctness (recompilation) | simplify-switch | 70 | 90 |
@@ -88,6 +90,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 43. [`55e557399`](https://github.com/wakamex/revng/commit/55e55739925b9c18fb5e2d2e6630ac9dce91482c): the C of `switch (kind(x))` called `kind` once per copy of the switch; test `llvm-passes/inline-divergent-scopes-call-condition.ll`
 44. [`6a6330bfa`](https://github.com/wakamex/revng/commit/6a6330bfa44e4431f1215e2d91b795341898f035): regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a), the same commit as item 1; Rust's `__udivti3` returned a wrong quotient in 2,496 of 20,000 random calls; one-instruction test `lift/wide-division-quotient-bit.S`
 45. [`82af8b53b`](https://github.com/wakamex/revng/commit/82af8b53bcb2e4947f167451f226fc552895d534): one-instruction test `lift/sign-extended-bit.S`
+46. [`919d212eb`](https://github.com/wakamex/revng/commit/919d212ebfe958eeafa0112c8ba7b200b6a21369): 24 of the 120 permutations of 5 sorted wrongly in Rust's recovered small sort; reduced IR test `llvm-passes/exit-ssa-live-incoming.ll`
+47. [`62cca328d`](https://github.com/wakamex/revng/commit/62cca328de1f1cc8716bfe8860601ce7bc128769): clang 22 at -O2 turned a loop over `p + -8UL` into one that ran past the stack; test `lift/signed-pointer-offset.S`; adds `(int64_t)` casts to non-constant pointer offsets
 
 ## Determinism and termination
 
