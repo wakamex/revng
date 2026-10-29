@@ -14,9 +14,12 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Dominators.h"
@@ -148,6 +151,50 @@ static bool haveIncompatibleIncomings(const std::set<IncomingInfo> &LHS,
   return false;
 }
 
+/// Whether \p To is reached from \p From, along a path that does not go through
+/// \p Barrier after leaving it. Reaching a block means reaching its end.
+static bool reaches(BasicBlock *From, BasicBlock *To, BasicBlock *Barrier) {
+  if (From == To)
+    return true;
+  SmallPtrSet<BasicBlock *, 32> Visited{ From };
+  SmallVector<BasicBlock *, 32> Worklist{ From };
+  while (not Worklist.empty()) {
+    for (BasicBlock *Successor : successors(Worklist.pop_back_val())) {
+      if (Successor == To)
+        return true;
+      if (Successor != Barrier and Visited.insert(Successor).second)
+        Worklist.push_back(Successor);
+    }
+  }
+  return false;
+}
+
+/// The PHINodes of a class share one local variable, and an incoming value
+/// that is itself a PHINode of the class gets no store: the variable is
+/// expected to still hold it at the end of the incoming block. That fails if
+/// the store of another incoming of the class can execute after the incoming
+/// PHINode and before the end of that block.
+static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
+                                     llvm::function_ref<bool(Value *)>
+                                       InClass) {
+  for (const IncomingInfo &Internal : Incomings) {
+    if (not InClass(Internal.IncomingValue))
+      continue;
+    BasicBlock *Definition = cast<PHINode>(Internal.IncomingValue)->getParent();
+    for (const IncomingInfo &Stored : Incomings) {
+      if (InClass(Stored.IncomingValue)
+          or isa<UndefValue>(Stored.IncomingValue))
+        continue;
+      if (reaches(Definition, Stored.IncomingBlock, Definition)
+          and reaches(Stored.IncomingBlock,
+                      Internal.IncomingBlock,
+                      Definition))
+        return true;
+    }
+  }
+  return false;
+}
+
 static std::vector<SetVector<PHINode *>> getPHIEquivalenceClasses(Function &F) {
 
   llvm::ModuleSlotTracker MST(F.getParent(),
@@ -251,6 +298,23 @@ static std::vector<SetVector<PHINode *>> getPHIEquivalenceClasses(Function &F) {
           continue;
         }
         revng_log(Log, "PHI and PHIUser DON'T haveIncompatibleIncomings");
+
+        std::set<IncomingInfo> Merged = PHIIncomingInfo->second;
+        Merged.insert(UserIncomingInfo->second.begin(),
+                      UserIncomingInfo->second.end());
+        const auto InMergedClass = [&](Value *V) {
+          auto *Incoming = dyn_cast<PHINode>(V);
+          if (Incoming == nullptr
+              or PHISameVariableClasses.findValue(Incoming)
+                   == PHISameVariableClasses.end())
+            return false;
+          PHINode *Leader = PHISameVariableClasses.getLeaderValue(Incoming);
+          return Leader == PHILeader or Leader == UserLeader;
+        };
+        if (clobbersInternalIncoming(Merged, InMergedClass)) {
+          revng_log(Log, "a store of the merged class clobbers an incoming");
+          continue;
+        }
 
         // Here the two are compatible so we join the equivalence classes.
         PHISameVariableClasses.unionSets(&PHI, PHIUser);
