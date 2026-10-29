@@ -458,6 +458,7 @@ set(FILECHECK_TESTS
     lift/relro-got-call.S
     lift/segment-base-opaque.S
     lift/segment-relative-switch.S
+    lift/sign-extended-bit.S
     lift/trap-check-kept.S
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S

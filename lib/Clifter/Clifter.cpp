@@ -1325,6 +1325,15 @@ private:
         using Operators = llvm::CastInst::CastOps;
 
       case Operators::SExt:
+        // An i1 is held as 0 or 1 in its C integer, so extending that integer
+        // keeps 1: negate the zero-extended value instead.
+        if (I->getSrcTy()->isIntegerTy(1)) {
+          mlir::Value Extended = emitExtendOp<ZeroExtendOp>(Loc,
+                                                            Operand,
+                                                            I->getSrcTy(),
+                                                            I->getDestTy());
+          rc_return Builder.create<NegOp>(Loc, Extended.getType(), Extended);
+        }
         rc_return emitExtendOp<SignExtendOp>(Loc,
                                              Operand,
                                              I->getSrcTy(),
