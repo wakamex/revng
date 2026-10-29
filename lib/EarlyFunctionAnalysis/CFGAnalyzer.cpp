@@ -204,6 +204,13 @@ CFGAnalyzer::CFGAnalyzer(llvm::Module &M,
   OutputAAWriter(streamFromOption(AAWriterPath)),
   OutputIBI(streamFromOption(IndirectBranchInfoSummaryPath)) {
 
+  if (NamedMDNode *RelroMD = M.getNamedMetadata(RelroMDName)) {
+    QuickMetadata QMD(M.getContext());
+    for (MDNode *Range : RelroMD->operands())
+      Relro.emplace_back(QMD.extract<uint64_t>(Range, 0),
+                         QMD.extract<uint64_t>(Range, 1));
+  }
+
   // Collect all ABI CSVs except for the stack pointer
   for (GlobalVariable *CSV : Globals.abiRegisters())
     if (CSV != nullptr and not Globals.isSPReg(CSV))
@@ -934,9 +941,40 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
   SmallVector<std::tuple<BranchFacts, int64_t, const FunctionSummary *>, 4>
     MaybeIndirectTailCalls;
 
-  // A call whose callee is loaded from an imported function's relocated slot
-  // calls that function
+  // A call whose callee is loaded from a slot that the loader fills and that
+  // the program cannot change calls the function the slot points to: an
+  // imported function, or a function of the binary in read-only memory
   auto PointerSize = getPointerSize(Binary->Architecture());
+  auto IsFixed = [&](uint64_t Address) {
+    for (auto [Start, End] : Relro)
+      if (Start <= Address and Address + PointerSize <= End)
+        return true;
+    for (const model::Segment &Segment : Binary->Segments())
+      if (Segment.contains(MetaAddress::fromGeneric(Binary->Architecture(),
+                                                    Address)))
+        return not Segment.IsWriteable();
+    return false;
+  };
+  auto FunctionAt = [&](uint64_t Address) -> MetaAddress {
+    if (not IsFixed(Address))
+      return MetaAddress::invalid();
+    for (const model::Segment &Segment : Binary->Segments()) {
+      for (const model::Relocation &Relocation : Segment.Relocations()) {
+        if (Relocation.Address().address() != Address
+            or model::RelocationType::getSize(Relocation.Type())
+                 != PointerSize)
+          continue;
+        MetaAddress Target = (Segment.StartAddress() + Relocation.Addend())
+                               .toPC(Binary->Architecture());
+        bool IsFunction = Target.isValid()
+                          and Binary->Functions().count(Target) != 0;
+        if (Recording != nullptr and Target.isValid())
+          Recording->recordIsFunction(Target, IsFunction);
+        return IsFunction ? Target : MetaAddress::invalid();
+      }
+    }
+    return MetaAddress::invalid();
+  };
   auto ImportedFunctionAt = [&](uint64_t Address) -> std::string {
     for (const model::DynamicFunction &Function :
          Binary->ImportedDynamicFunctions())
@@ -952,7 +990,10 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
     if (not Call.IsCall or not Call.CalleeLoadAddress)
       continue;
     std::string Symbol = ImportedFunctionAt(*Call.CalleeLoadAddress);
+    MetaAddress Function = MetaAddress::invalid();
     if (Symbol.empty())
+      Function = FunctionAt(*Call.CalleeLoadAddress);
+    if (Symbol.empty() and Function.isInvalid())
       continue;
     for (efa::BasicBlock &Block : CFG) {
       if (Block.ID().start() != Call.Block.start())
@@ -963,9 +1004,14 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
             or not Edge->DynamicFunction().empty())
           continue;
         revng_log(Log,
-                  "The call in " << Block.ID().toString() << " calls "
-                                 << Symbol << " through its slot");
-        Edge->DynamicFunction() = Symbol;
+                  "The call in "
+                    << Block.ID().toString() << " calls "
+                    << (Symbol.empty() ? Function.toString() : Symbol)
+                    << " through its slot");
+        if (Symbol.empty())
+          Edge->Destination() = BasicBlockID(Function);
+        else
+          Edge->DynamicFunction() = Symbol;
       }
     }
   }

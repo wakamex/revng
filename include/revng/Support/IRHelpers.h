@@ -73,6 +73,9 @@ inline void eraseFromParent(llvm::Value *V) {
 constexpr const char *FunctionEntryMDName = "revng.function.entry";
 constexpr const char *ControlFlowGraphMDName = "revng.function.metadata";
 constexpr const char *ExplicitParenthesesMDName = "revng.explicit_parentheses";
+/// Named metadata of the lifted module: the [start, end) address ranges the
+/// loader makes read-only once it has applied the relocations
+constexpr const char *RelroMDName = "revng.relro";
 constexpr llvm::StringRef InlineHelpersSection = "revng_inline";
 constexpr llvm::StringRef NoOpHelpersSection = "revng_noop";
 constexpr llvm::StringRef HelpersListName = "helpers_list";

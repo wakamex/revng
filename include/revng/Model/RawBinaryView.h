@@ -77,6 +77,12 @@ public:
   ///         put there are final: the file holds the unrelocated bytes.
   [[nodiscard]] bool isInRelro(MetaAddress Address, uint64_t Size) const;
 
+  /// The address ranges, [start, end), that the loader makes read-only once it
+  /// has applied the relocations
+  const std::vector<std::pair<uint64_t, uint64_t>> &relro() const {
+    return Relro;
+  }
+
   using SegmentDataPair = std::pair<const model::Segment &,
                                     llvm::ArrayRef<uint8_t>>;
   cppcoro::generator<SegmentDataPair> segments() const;

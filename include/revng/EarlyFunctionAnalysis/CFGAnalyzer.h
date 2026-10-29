@@ -176,6 +176,10 @@ private:
   /// Where `analyze` records what it reads from the oracle and the model
   PreliminaryAnalysisInputs *Recording = nullptr;
 
+  /// The ranges the loader makes read-only after relocating, from the lifted
+  /// module
+  std::vector<std::pair<uint64_t, uint64_t>> Relro;
+
 public:
   CFGAnalyzer(llvm::Module &M,
               RootFunction &Root,

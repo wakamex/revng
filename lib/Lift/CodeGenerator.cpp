@@ -683,6 +683,16 @@ void CodeGenerator::translate(LibTcg &LibTcg,
   T.advance("Create revng.jt.reason", true);
   JumpTargets.createJumpTargetReasonMD();
 
+  // Record the ranges the loader makes read-only once it has applied the
+  // relocations, for the analyses of the lifted code that need to know which
+  // pointers in memory cannot change, such as GOT slots
+  {
+    QuickMetadata QMD(Context);
+    auto *Relro = TheModule->getOrInsertNamedMetadata(RelroMDName);
+    for (auto [Start, End] : RawBinary.relro())
+      Relro->addOperand(QMD.tuple({ QMD.get(Start), QMD.get(End) }));
+  }
+
   T.advance("Finalization", true);
   ExternalJumpsHandler JumpOutHandler(*Model,
                                       JumpTargets.dispatcher(),
