@@ -44,6 +44,7 @@ private:
   llvm::Function *PostCallHook = nullptr;
   llvm::Function *RetHook = nullptr;
   llvm::GlobalVariable *SPCSV = nullptr;
+  llvm::GlobalVariable *PCCSV = nullptr;
   llvm::SmallSet<MetaAddress, 4> *ReturnBlocks = nullptr;
   OpaqueRegisterUser Clobberer;
 
@@ -53,6 +54,7 @@ public:
                  llvm::Function *PostCallHook,
                  llvm::Function *RetHook,
                  llvm::GlobalVariable *SPCSV,
+                 llvm::GlobalVariable *PCCSV,
                  llvm::SmallSet<MetaAddress, 4> *ReturnBlocks);
 
 public:
@@ -111,6 +113,15 @@ struct IndirectBranchFacts {
   /// For each register of `CFGAnalyzer::abiCSVs`, whether it is known to hold
   /// its value at the function's entry
   llvm::SmallVector<bool, 16> PreservedRegisters;
+
+  /// Whether these are the facts of a call whose callee is unknown before the
+  /// pipeline, rather than of an indirect branch
+  bool IsCall = false;
+
+  /// For such a call, the constant address the pipeline found the callee's
+  /// address loaded from, as a call through a pointer loaded earlier into a
+  /// register reads a GOT slot
+  std::optional<uint64_t> CalleeLoadAddress;
 };
 
 /// A function outlined and prepared for the optimization pipeline, with what

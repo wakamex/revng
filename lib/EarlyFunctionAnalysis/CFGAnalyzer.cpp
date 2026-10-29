@@ -5,6 +5,8 @@
 #include <fstream>
 #include <string>
 
+#include "llvm/IR/PatternMatch.h"
+#include "llvm/Support/ModRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -93,6 +95,9 @@ static opt<bool> RoundTrip("detect-abi-round-trip",
                            init(false));
 
 static Logger Log("cfg-analyzer");
+
+/// The marker recording the address an unknown callee is called at
+static constexpr const char *IndirectCallCalleeName = "indirect_call_callee";
 
 static MetaAddress getFinalAddressOfBasicBlock(llvm::BasicBlock *BB) {
   auto &&[End, Size] = getPC(BB->getTerminator());
@@ -229,6 +234,7 @@ OutlinedFunction CFGAnalyzer::outline(const MetaAddress &Entry) {
                             PostCallHook.get(),
                             RetHook.get(),
                             Globals.spReg(),
+                            Globals.pcReg(),
                             HasCFG ? &ReturnBlocks : nullptr);
 
   OutlinedFunction Result = Outliner.outline(Entry, &Summarizer);
@@ -814,11 +820,52 @@ static bool isNoReturn(const model::Binary &Binary,
   return false;
 }
 
+/// The address \p V loads from, if it is a load from a constant address: an
+/// integer, or the start of a segment, from its getter, plus an integer
+static std::optional<uint64_t> constantLoadAddress(llvm::Value *V) {
+  using namespace llvm;
+  using namespace PatternMatch;
+  Value *Address = nullptr;
+  if (not match(V, m_Load(m_IntToPtr(m_Value(Address)))))
+    return std::nullopt;
+
+  ConstantInt *Offset = nullptr;
+  if (match(Address, m_ConstantInt(Offset)))
+    return Offset->getZExtValue();
+
+  Value *Base = Address;
+  uint64_t Addend = 0;
+  if (match(Address, m_Add(m_Value(Base), m_ConstantInt(Offset))))
+    Addend = Offset->getZExtValue();
+
+  auto *Getter = dyn_cast<CallInst>(Base);
+  Function *Callee = Getter ? getCalledFunction(Getter) : nullptr;
+  if (Callee == nullptr or not hasSegmentKeyMetadata(*Callee))
+    return std::nullopt;
+  return extractSegmentKeyFromMetadata(*Callee).address() + Addend;
+}
+
 std::vector<IndirectBranchFacts>
 CFGAnalyzer::readIndirectBranchInfo(llvm::Function &F,
                                     llvm::Function &Marker) {
   using namespace llvm;
   std::vector<IndirectBranchFacts> Result;
+
+  if (Function *Probe = F.getParent()->getFunction(IndirectCallCalleeName)) {
+    for (CallBase *CI : callers(Probe)) {
+      if (CI->getParent()->getParent() != &F)
+        continue;
+      IndirectBranchFacts &Call = Result.emplace_back();
+      Call.Block = BasicBlockID::fromValue(CI->getArgOperand(0));
+      Call.IsCall = true;
+      Call.CalleeLoadAddress = constantLoadAddress(CI->getArgOperand(1));
+      revng_log(Log,
+                "Call in " << Call.Block.toString() << " loads its callee from "
+                           << (Call.CalleeLoadAddress ?
+                                 std::to_string(*Call.CalleeLoadAddress) :
+                                 std::string("no constant address")));
+    }
+  }
 
   for (CallBase *CI : callers(&Marker)) {
     if (CI->getParent()->getParent() != &F)
@@ -887,7 +934,45 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
   SmallVector<std::tuple<BranchFacts, int64_t, const FunctionSummary *>, 4>
     MaybeIndirectTailCalls;
 
+  // A call whose callee is loaded from an imported function's relocated slot
+  // calls that function
+  auto PointerSize = getPointerSize(Binary->Architecture());
+  auto ImportedFunctionAt = [&](uint64_t Address) -> std::string {
+    for (const model::DynamicFunction &Function :
+         Binary->ImportedDynamicFunctions())
+      for (const model::Relocation &Relocation : Function.Relocations())
+        if (Relocation.Address().address() == Address
+            and model::RelocationType::getSize(Relocation.Type())
+                  == PointerSize
+            and Relocation.Addend() == 0)
+          return Function.Name();
+    return {};
+  };
+  for (const IndirectBranchFacts &Call : Branches) {
+    if (not Call.IsCall or not Call.CalleeLoadAddress)
+      continue;
+    std::string Symbol = ImportedFunctionAt(*Call.CalleeLoadAddress);
+    if (Symbol.empty())
+      continue;
+    for (efa::BasicBlock &Block : CFG) {
+      if (Block.ID().start() != Call.Block.start())
+        continue;
+      for (auto &Successor : Block.Successors()) {
+        auto *Edge = dyn_cast<efa::CallEdge>(Successor.get());
+        if (Edge == nullptr or Edge->Destination().isValid()
+            or not Edge->DynamicFunction().empty())
+          continue;
+        revng_log(Log,
+                  "The call in " << Block.ID().toString() << " calls "
+                                 << Symbol << " through its slot");
+        Edge->DynamicFunction() = Symbol;
+      }
+    }
+  }
+
   for (const IndirectBranchFacts &Branch : Branches) {
+    if (Branch.IsCall)
+      continue;
     BranchFacts CI = &Branch;
     bool JumpsToReturnAddress = Branch.JumpsToReturnAddress;
 
@@ -1412,12 +1497,14 @@ CallSummarizer::CallSummarizer(llvm::Module *M,
                                Function *PostCallHook,
                                llvm::Function *RetHook,
                                GlobalVariable *SPCSV,
+                               GlobalVariable *PCCSV,
                                llvm::SmallSet<MetaAddress, 4> *ReturnBlocks) :
   M(M),
   PreCallHook(PreCallHook),
   PostCallHook(PostCallHook),
   RetHook(RetHook),
   SPCSV(SPCSV),
+  PCCSV(PCCSV),
   ReturnBlocks(ReturnBlocks),
   Clobberer(M) {
 }
@@ -1442,6 +1529,25 @@ void CallSummarizer::handleCall(MetaAddress CallerBlock,
                                    IsTailCallValue };
 
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+
+  // For a call whose callee is unknown, record the address it jumps to, so
+  // that after the pipeline a callee loaded from a GOT slot can be recognized
+  // even when the slot was read before, into a register the callee preserves
+  if (Callee.isInvalid() and isa<ConstantPointerNull>(SymbolNamePointer)
+      and not IsTailCall) {
+    auto *Type = FunctionType::get(Type::getVoidTy(Context),
+                                   { Args[0]->getType(),
+                                     PCCSV->getValueType() },
+                                   false);
+    FunctionCallee Probe = M->getOrInsertFunction(IndirectCallCalleeName,
+                                                  Type);
+    if (auto *ProbeFunction = dyn_cast<Function>(Probe.getCallee())) {
+      ProbeFunction->setMemoryEffects(MemoryEffects::inaccessibleMemOnly());
+      ProbeFunction->addFnAttr(Attribute::NoUnwind);
+      ProbeFunction->addFnAttr(Attribute::WillReturn);
+    }
+    Builder.CreateCall(Probe, { Args[0], Builder.createLoad(PCCSV) });
+  }
 
   Builder.CreateCall(PreCallHook, Args);
 

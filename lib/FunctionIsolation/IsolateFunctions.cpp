@@ -263,6 +263,11 @@ private:
     }
 
     StringRef SymbolName = extractFromConstantStringPtr(SymbolNamePointer);
+    // A callee unknown when lifting, such as one loaded from a GOT slot into a
+    // register before a loop, may have been found by the analysis to be an
+    // imported function: the CFG names it
+    if (SymbolName.empty() and Callee.isInvalid())
+      SymbolName = CallEdge->DynamicFunction();
     revng_assert(SymbolName == CallEdge->DynamicFunction());
 
     if (Callee != CallEdge->Destination().notInlinedAddress()) {
