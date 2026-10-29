@@ -63,6 +63,13 @@ static void initialize() {
   constexpr const char *MainLibrary = "librevngSupport";
   using llvm::StringRef;
   StringRef MainLibraryFullPath = Resources->LibrariesFullPath.at(MainLibrary);
+
+  // The loader reports the path it found the library at, which may go through
+  // `..` from a run path, such as `lib/revng/analyses/../../`, or through
+  // symbolic links: the root is two levels above the library's real location
+  llvm::SmallString<128> RealPath;
+  if (not llvm::sys::fs::real_path(MainLibraryFullPath, RealPath))
+    MainLibraryFullPath = RealPath;
   Resources->CurrentRoot = parent_path(parent_path(MainLibraryFullPath));
 }
 
