@@ -471,6 +471,7 @@ set(FILECHECK_TESTS
     llvm-passes/generic-region-info.ll
     llvm-passes/helpers-list-order.ll
     llvm-passes/inline-divergent-scopes-and-materialize-trivial-goto.ll
+    llvm-passes/inline-divergent-scopes-call-condition.ll
     llvm-passes/inline-divergent-scopes.ll
     llvm-passes/inline-helpers.ll
     llvm-passes/mark-inline-helpers-up-to.ll

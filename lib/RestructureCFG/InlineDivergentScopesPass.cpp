@@ -2,6 +2,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -281,6 +282,47 @@ static void simplifyTerminator(llvm::BasicBlock *BB,
   }
 }
 
+/// Whether computing \p V has a side effect, such as a call, that the C would
+/// repeat each time it prints the expression of \p V.
+static bool computationHasSideEffects(Value *V) {
+  SmallPtrSet<Value *, 16> Visited;
+  SmallVector<Value *, 16> Worklist{ V };
+  while (not Worklist.empty()) {
+    auto *I = dyn_cast<Instruction>(Worklist.pop_back_val());
+    if (I == nullptr or isa<AllocaInst>(I) or not Visited.insert(I).second)
+      continue;
+    if (I->mayHaveSideEffects())
+      return true;
+    for (Value *Operand : I->operands())
+      Worklist.push_back(Operand);
+  }
+  return false;
+}
+
+/// The transformation tests the condition of \p Terminator again in the
+/// blocks it adds, each a copy of \p Terminator. When computing the condition
+/// has side effects, assign it to a local variable first, so that the copies
+/// test the variable and the C computes the condition once.
+static void assignConditionToVariable(Instruction *Terminator) {
+  auto *Branch = dyn_cast<BranchInst>(Terminator);
+  if (not isa<SwitchInst>(Terminator)
+      and (Branch == nullptr or not Branch->isConditional()))
+    return;
+  Value *Condition = Terminator->getOperand(0);
+  if (not computationHasSideEffects(Condition))
+    return;
+
+  Function *F = Terminator->getFunction();
+  revng::IRBuilder B(F->getContext());
+  B.SetInsertPointPastAllocas(F, Terminator->getDebugLoc());
+  AllocaInst *Variable = B.createSimpleAlloca(Condition->getType());
+  B.SetInsertPoint(Terminator);
+  B.createStoreToVariable(Condition, Variable);
+  Terminator->setOperand(0,
+                         B.createLoadFromVariable(Variable,
+                                                  Condition->getType()));
+}
+
 /// Helper function which create a single entry point block where a divergence
 /// is entered into by multiple successors of a `Conditional`
 static void createHead(BasicBlock *Conditional,
@@ -344,6 +386,7 @@ performMultipleIDS(const ScopeGraphBuilder &SGBuilder,
   // that a superset of the correct final successors are already connected to
   // `Tail`.
   Instruction *ConditionalTerminator = Conditional->getTerminator();
+  assignConditionToVariable(ConditionalTerminator);
   Instruction *TailTerminator = ConditionalTerminator->clone();
 
   // TODO: we shouldn't be losing debug information here!
