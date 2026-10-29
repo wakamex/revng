@@ -1514,10 +1514,23 @@ private:
                                           C.getPointerType(C.getIntegerType(1)),
                                           Operand);
 
-      mlir::Value Index = rc_recur emitExpression(GEPIndex, Loc);
-      Index = extendOrTruncate<SignExtendOp>(Loc,
-                                             Index,
-                                             getObjectSize(Operand));
+      // The GEP index is signed. In C, adding to a pointer an unsigned integer
+      // holding a negative offset overflows the pointer, so the index is a
+      // signed integer.
+      uint64_t IndexSize = getObjectSize(Operand);
+      IntegerType SignedIndexType = C.getIntegerType(IndexSize,
+                                                     IntegerKind::Signed);
+      mlir::Value Index;
+      if (const auto *CI = llvm::dyn_cast<llvm::ConstantInt>(GEPIndex)) {
+        Index = Builder.create<ImmediateOp>(Loc,
+                                            SignedIndexType,
+                                            CI->getValue()
+                                              .sextOrTrunc(IndexSize * 8));
+      } else {
+        Index = rc_recur emitExpression(GEPIndex, Loc);
+        Index = extendOrTruncate<SignExtendOp>(Loc, Index, IndexSize);
+        Index = Builder.create<BitCastOp>(Loc, SignedIndexType, Index);
+      }
 
       rc_return Builder.create<PtrAddOp>(Loc,
                                          Operand.getType(),
