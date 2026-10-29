@@ -59,6 +59,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 41 | A call to an exceptional function, such as the one a trap raises, becomes `revng_abort` instead of a bare `unreachable`, so the check before a trap stays in the C | correctness | enforce-abi (remove-exceptional-functions) | 90 | 95 |
 | 42 | A switch over a code address computed from a segment address, such as a jump through a table of offsets from the table, tests the offset, so it selects the right case wherever the segment is placed | correctness (recompilation) | simplify-switch | 70 | 90 |
 | 43 | Restructuring that tests a condition again first assigns a condition with side effects to a variable, so the C makes a call in a switch condition once | correctness | restructuring (inline-divergent-scopes) | 90 | 90 |
+| 44 | Integer constants are zero-extended into their C type, so a 1-bit `true` is 1, not 0xFF (128-by-64-bit division set eight quotient bits per step) | correctness | Clifter (C emission) | 95 | 98 |
+| 45 | Sign extension of a 1-bit value negates it, so `sbb %rax, %rax` gives -1, not 1 | correctness | Clifter (C emission) | 90 | 98 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -84,6 +86,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 41. [`031f5e13b`](https://github.com/wakamex/revng/commit/031f5e13b37a83d71428556e7fe6a482cc747390): upstream code; the optimizer deleted the trapping path and its condition, so `if (x == 0) ud2;` came out as the other branch alone; test `lift/trap-check-kept.S`
 42. [`eab4e81f2`](https://github.com/wakamex/revng/commit/eab4e81f292cea773e3bbfd3ef5d6709743645d4): an unbounded table index, such as an enum discriminant returned by a call, keeps the switch over addresses; compiled, every dispatch took the default case; test `lift/segment-relative-switch.S`
 43. [`55e557399`](https://github.com/wakamex/revng/commit/55e55739925b9c18fb5e2d2e6630ac9dce91482c): the C of `switch (kind(x))` called `kind` once per copy of the switch; test `llvm-passes/inline-divergent-scopes-call-condition.ll`
+44. [`6a6330bfa`](https://github.com/wakamex/revng/commit/6a6330bfa44e4431f1215e2d91b795341898f035): regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a), the same commit as item 1; Rust's `__udivti3` returned a wrong quotient in 2,496 of 20,000 random calls; one-instruction test `lift/wide-division-quotient-bit.S`
+45. [`82af8b53b`](https://github.com/wakamex/revng/commit/82af8b53bcb2e4947f167451f226fc552895d534): one-instruction test `lift/sign-extended-bit.S`
 
 ## Determinism and termination
 
@@ -152,7 +156,7 @@ The fork's builds also use patches to [LLVM](https://github.com/revng/llvm-proje
 
 ## Suggested order for upstreaming
 
-1. Items 1, 3 and 2, as one PR or three: 1 and 3 fix regressions from upstream's own recent commits, each change has a test that fails before it, and 2 is the most consequential correctness fix here.
+1. Items 1, 44, 45, 3 and 2: 1 and 44 fix the same upstream commit's two regressions in constant import, 3 fixes another recent upstream regression, 45 is the matching sign-extension fix, each change has a test that fails before it, and 2 is the most consequential correctness fix here.
 2. Item 4, then 5 and 6: crashes or wrong output with existing small tests.
 3. Item 35: a small speedup to upstream's own recent EmitFieldAccesses code that cannot change output.
 4. Item 21, determinism, already split out on branch `upstream/deterministic-output`.
