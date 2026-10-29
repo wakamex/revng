@@ -64,6 +64,7 @@ private:
       uint32_t Reasons = JumpTargetReason::getReasons(&BB);
       bool IsSimpleLiteral = hasReason(Reasons,
                                        JumpTargetReason::SimpleLiteral);
+      bool IsGlobalData = hasReason(Reasons, JumpTargetReason::GlobalData);
       bool IsUnusedGlobalData = hasReason(Reasons,
                                           JumpTargetReason::UnusedGlobalData);
       bool IsDirectJump = hasReason(Reasons, JumpTargetReason::DirectJump);
@@ -92,8 +93,12 @@ private:
       // memory that are never written directly to the PC. Also, ignore code for
       // which we already have a direct jump or is part of the CFG of another
       // function. Also, ignore addresses that are return addresses.
+      // A pointer in data to the start of a function in the unwind
+      // information, such as a method in a vtable or a function in a GOT slot,
+      // is a function entry even when code loads it.
       bool Interesting = (IsSimpleLiteral or IsUnusedGlobalData
-                          or (IsMemoryStore and not IsPCStore));
+                          or (IsMemoryStore and not IsPCStore)
+                          or (IsGlobalData and IsUnwindEntry));
       // A pointer to the start of a function in the unwind information is a
       // function entry even when another function's CFG reaches it by falling
       // through, as one does past a call it does not know to be no-return, or
