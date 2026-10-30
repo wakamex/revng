@@ -209,6 +209,31 @@ private:
       elideCoercingContextCasts(Op->getOpOperand(I + 1));
   }
 
+  /// \return whether every value of \p From is a value of \p To.
+  static bool holdsAllValues(IntegerType From, IntegerType To) {
+    if (From.isSigned() == To.isSigned())
+      return To.getSize() >= From.getSize();
+    return To.isSigned() and To.getSize() > From.getSize();
+  }
+
+  /// \return whether converting a value of \p From to \p Operator gives the
+  /// same value as converting it to \p Cast first. An operator converts its
+  /// operands to its own type, so a cast to a type at least as wide changes
+  /// nothing it computes, and neither does a cast that keeps every value.
+  /// Any other cast changes values: casting an unsigned byte to `int8_t`
+  /// before comparing makes 255 compare as -1.
+  static bool isRedundantBefore(mlir::Type From,
+                                mlir::Type Cast,
+                                mlir::Type Operator) {
+    auto FromInt = getUnderlyingIntegerType(From);
+    auto CastInt = getUnderlyingIntegerType(Cast);
+    auto OperatorInt = getUnderlyingIntegerType(Operator);
+    if (not FromInt or not CastInt or not OperatorInt)
+      return false;
+    return CastInt.getSize() >= OperatorInt.getSize()
+           or holdsAllValues(FromInt, CastInt);
+  }
+
   void elideArithmeticCasts(mlir::Operation *Op) {
     llvm::SmallVector<mlir::Type> Types(Op->getOperandTypes());
     auto OperatorType = getArithmeticOperatorType(Op, Types);
@@ -221,6 +246,14 @@ private:
 
       mlir::Type CastOperandType = Cast.getValueType();
       if (not unwrapped_isa<IntegralType>(CastOperandType))
+        continue;
+
+      mlir::Type OperandOperatorType = I != 0 and OperatorType.T2 ?
+                                         OperatorType.T2 :
+                                         OperatorType.T1;
+      if (not isRedundantBefore(CastOperandType,
+                                Cast.getType(),
+                                OperandOperatorType))
         continue;
 
       ScopedExchange Transaction(T, CastOperandType);

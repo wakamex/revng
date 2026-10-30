@@ -470,6 +470,7 @@ set(FILECHECK_TESTS
     lift/segment-base-opaque.S
     lift/segment-relative-switch.S
     lift/sign-extended-bit.S
+    lift/signed-byte-compare.S
     lift/signed-pointer-offset.S
     lift/trap-check-kept.S
     lift/trace-type-shrinking.S
