@@ -1469,8 +1469,15 @@ DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
     for (auto *CSV : CallSites.ArgumentsRegisters)
       Arguments.insert(CSV);
     recordRegisters(Arguments, Prototype.Arguments().batch_insert());
-    recordRegisters(CallSites.ReturnValuesRegisters,
-                    Prototype.ReturnValues().batch_insert());
+
+    // A tail call returns what the caller returns
+    CSVSet ReturnValues = CallSites.ReturnValuesRegisters;
+    for (const auto &Edge : CallerBlock.Successors())
+      if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+        if (Call->IsTailCall())
+          for (auto *CSV : CallerSummary.ABIResults.ReturnValuesRegisters)
+            ReturnValues.insert(CSV);
+    recordRegisters(ReturnValues, Prototype.ReturnValues().batch_insert());
   }
   revng_assert(Found);
 
