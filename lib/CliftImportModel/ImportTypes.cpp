@@ -323,8 +323,9 @@ private:
     AttributeVector<mlir::Type> ArgumentTypes;
     ArgumentTypes.reserve(ArgumentsCount);
 
-    for (const model::NamedTypedRegister &Register : ModelType.Arguments()) {
-      const auto Type = rc_recur fromType(*Register.Type());
+    for (const model::NamedTypedRegister *Register :
+         ModelType.orderedArguments()) {
+      const auto Type = rc_recur fromType(*Register->Type());
       if (not Type)
         rc_return nullptr;
       ArgumentTypes.push_back(Type);

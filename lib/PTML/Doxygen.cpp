@@ -363,7 +363,9 @@ gatherArgumentComments(const model::Binary &Binary,
       }
     }
   } else if (auto *FT = Function.rawPrototype()) {
-    for (const auto &[Index, Argument] : llvm::enumerate(FT->Arguments())) {
+    for (const auto &[Index, Pointer] :
+         llvm::enumerate(FT->orderedArguments())) {
+      const model::NamedTypedRegister &Argument = *Pointer;
       if (!Argument.Comment().empty()) {
         model::Register::Values Register = Argument.Location();
 

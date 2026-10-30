@@ -147,7 +147,9 @@ static bool updateArgumentTypes(model::Binary &Model,
 
   revng_log(Log, "Updating register arguments");
 
-  for (const auto &[ModelArg, LLVMArg] : llvm::zip_first(ModelArgs, LLVMArgs)) {
+  const auto Ordered = ModelPrototype.orderedArguments();
+  for (const auto &[Argument, LLVMArg] : llvm::zip_first(Ordered, LLVMArgs)) {
+    NamedTypedRegister &ModelArg = ModelArgs.at(Argument->Location());
     revng_assert(ModelArg.Type()->isScalar());
 
     const llvm::Value *LLVMVal = toLLVMValue(LLVMArg);

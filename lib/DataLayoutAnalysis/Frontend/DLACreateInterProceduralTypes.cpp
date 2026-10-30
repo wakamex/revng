@@ -125,9 +125,9 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
 
       model::UpcastableType ArgumentModelType;
       if (RFT) {
-        const auto &ModelArgs = RFT->Arguments();
+        const auto ModelArgs = RFT->orderedArguments();
         if (ArgIndex < ModelArgs.size())
-          ArgumentModelType = std::next(ModelArgs.begin(), ArgIndex)->Type();
+          ArgumentModelType = ModelArgs[ArgIndex]->Type();
         else
           ArgumentModelType = RFT->StackArgumentsType();
       } else {
@@ -210,13 +210,17 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
             unsigned FormalIndex = ArgNo;
             if (not SamePrototype) {
               // Stack arguments need a separate offset-based correspondence.
-              if (ArgNo >= CallRaw->Arguments().size())
+              const auto CallArguments = CallRaw->orderedArguments();
+              if (ArgNo >= CallArguments.size())
                 continue;
-              auto &Argument = *std::next(CallRaw->Arguments().begin(), ArgNo);
-              auto It = CalleeRaw->Arguments().find(Argument.Location());
-              if (It == CalleeRaw->Arguments().end())
+              const auto CalleeArguments = CalleeRaw->orderedArguments();
+              auto Location = CallArguments[ArgNo]->Location();
+              auto It = llvm::find_if(CalleeArguments, [&](const auto *A) {
+                return A->Location() == Location;
+              });
+              if (It == CalleeArguments.end())
                 continue;
-              FormalIndex = std::distance(CalleeRaw->Arguments().begin(), It);
+              FormalIndex = std::distance(CalleeArguments.begin(), It);
             }
             revng_assert(FormalIndex < Callee->arg_size());
             // Create the layout for the call arguments

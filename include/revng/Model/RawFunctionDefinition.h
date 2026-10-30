@@ -30,6 +30,15 @@ public:
   }
 
 public:
+  /// The arguments in the order their registers pass arguments under the
+  /// architecture's default ABI: the general purpose argument registers first,
+  /// then the vector ones, then any other register, each group in register
+  /// order. Code that gives arguments positions, such as function signatures,
+  /// calls and parameter lists, uses this order, so that the C of a function
+  /// called through a pointer of the matching C type receives its arguments.
+  llvm::SmallVector<const NamedTypedRegister *, 8> orderedArguments() const;
+
+public:
   /// The helper for stack argument type unwrapping.
   /// Use this when you need to access/modify the existing struct,
   /// and \ref StackArgumentsType() when you need to assign a new one.

@@ -254,8 +254,8 @@ void TypeSystemPrinter::dumpFunctionType(llvm::raw_ostream &Out,
     for (auto &RetTy : RawFunc->ReturnValues())
       ReturnTypes.push_back(RetTy.Type().get());
 
-    for (auto &ArgTy : RawFunc->Arguments())
-      Arguments.push_back(ArgTy.Type().get());
+    for (const model::NamedTypedRegister *ArgTy : RawFunc->orderedArguments())
+      Arguments.push_back(ArgTy->Type().get());
 
     if (not RawFunc->StackArgumentsType().isEmpty())
       Arguments.push_back(RawFunc->StackArgumentsType().get());

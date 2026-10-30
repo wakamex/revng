@@ -99,8 +99,8 @@ std::string functionComment(const ::ptml::MarkupBuilder &B,
       ArgumentNames.emplace_back(NameBuilder.name(*FT, Argument));
 
   } else if (auto *FT = Function.rawPrototype()) {
-    for (const model::NamedTypedRegister &Argument : FT->Arguments())
-      ArgumentNames.emplace_back(NameBuilder.name(*FT, Argument));
+    for (const model::NamedTypedRegister *Argument : FT->orderedArguments())
+      ArgumentNames.emplace_back(NameBuilder.name(*FT, *Argument));
 
     if (const model::StructDefinition *Stack = FT->stackArgumentsType())
       for (const model::StructField &Field : Stack->Fields())

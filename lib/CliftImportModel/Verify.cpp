@@ -391,7 +391,7 @@ private:
                                 "a non-existent register argument. See '"
                              << Handle << "' of '" << Op.getHandle() << "'";
 
-            const auto &Argument = *std::next(RFT->Arguments().begin(), Index);
+            const auto &Argument = *RFT->orderedArguments()[Index];
             auto RegisterName = model::Register::getName(Argument.Location());
 
             llvm::StringRef AttrArgumentName = Identifier.getName();

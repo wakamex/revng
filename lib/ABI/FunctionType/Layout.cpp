@@ -502,11 +502,11 @@ Layout::Layout(const model::CABIFunctionDefinition &Function) {
 
 Layout::Layout(const model::RawFunctionDefinition &Function) {
   // Lay register arguments out.
-  for (const model::NamedTypedRegister &Register : Function.Arguments()) {
-    revng_assert(Register.Type()->isScalar());
+  for (const model::NamedTypedRegister *Register : Function.orderedArguments()) {
+    revng_assert(Register->Type()->isScalar());
 
-    auto &Argument = Arguments.emplace_back(Register.Type().copy());
-    Argument.Registers = { Register.Location() };
+    auto &Argument = Arguments.emplace_back(Register->Type().copy());
+    Argument.Registers = { Register->Location() };
     Argument.Kind = ArgumentKind::Scalar;
   }
 

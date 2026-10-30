@@ -271,9 +271,9 @@ UsedRegisters usedRegisters(const model::CABIFunctionDefinition &Prototype);
 inline UsedRegisters
 usedRegisters(const model::RawFunctionDefinition &Prototype) {
   UsedRegisters Result;
-  for (const model::NamedTypedRegister &Register : Prototype.Arguments())
-    Result.Arguments.emplace_back(Register.Location(),
-                                  *Register.Type()->size());
+  for (const model::NamedTypedRegister *Register : Prototype.orderedArguments())
+    Result.Arguments.emplace_back(Register->Location(),
+                                  *Register->Type()->size());
   for (const model::NamedTypedRegister &Register : Prototype.ReturnValues())
     Result.ReturnValues.emplace_back(Register.Location(),
                                      *Register.Type()->size());

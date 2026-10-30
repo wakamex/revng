@@ -585,7 +585,8 @@ private:
       revng_assert(Op.getArgCount() == ArgumentCount);
 
       auto TL = pipeline::location(rr::TypeDefinition, T->key());
-      for (auto [I, A] : llvm::enumerate(T->Arguments())) {
+      for (auto [I, Argument] : llvm::enumerate(T->orderedArguments())) {
+        const model::NamedTypedRegister &A = *Argument;
         auto AL = TL.extend(rr::RawArgument, A.Location());
         Attrs.setString(I, "clift.handle", AL.toString());
         Attrs.setString(I, "clift.name", NameBuilder.name(*T, A));
