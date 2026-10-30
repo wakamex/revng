@@ -261,6 +261,11 @@ private:
   CallGraph ApproximateCallGraph;
   BasicBlockToNodeMap BasicBlockNodeMap;
 
+  /// The functions whose callers are not all known: those that no direct call
+  /// in the binary reaches, which are called through pointers, and those it
+  /// exports
+  std::set<MetaAddress> UnknownCallers;
+
 public:
   DetectABI(llvm::Module &M,
             RootFunction &Root,
@@ -376,6 +381,7 @@ void DetectABI::computeApproximateCallGraph() {
 
   // Temporary worklist to collect the function entrypoints
   llvm::SmallVector<BasicBlock *, 8> Worklist;
+  std::set<MetaAddress> HasDirectCallers;
 
   // Create an over-approximated call graph
   for (const auto &Function : Binary->Functions()) {
@@ -409,6 +415,7 @@ void DetectABI::computeApproximateCallGraph() {
             };
             if (not any_of(StartNode->successors(), IsCurrentSuccessor))
               StartNode->addSuccessor(It->second);
+            HasDirectCallers.insert(It->second->Address);
           }
         }
         BasicBlock *Next = getFallthrough(Current);
@@ -429,6 +436,11 @@ void DetectABI::computeApproximateCallGraph() {
       }
     }
   }
+
+  for (const auto &Function : Binary->Functions())
+    if (not HasDirectCallers.contains(Function.Entry())
+        or not Function.ExportedNames().empty())
+      UnknownCallers.insert(Function.Entry());
 
   // Create a root entry node for the call-graph, connect all the nodes to it,
   // and perform a post-order traversal. Keep in mind that adding a root node
@@ -1594,6 +1606,8 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   for (auto *CSV : deducedReturnValues(Known.ReturnValuesRegisters))
     if (Known.ReadReturnValuesRegisters.contains(CSV))
       ReadReturnValues.insert(CSV);
+
+  bool HasUnknownCallers = UnknownCallers.contains(EntryAddress);
   ABIResults = analyzeRegisterUsage(OutlinedFunction.Function.get(),
                                     Binary->Architecture(),
                                     Analyzer.preCallHook(),
@@ -1611,6 +1625,53 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // pointer registers.
   suppressCalleeSaved(ABIResults, ActualCalleeSavedRegs);
 
+  // Callers the binary does not show, such as those calling through a vtable,
+  // may read the general purpose registers the ABI returns values in, for
+  // instance the result of a call this function returns without reading it. A
+  // caller the binary shows adds them through its own call site. They are
+  // looked for in a second run, where what callees return counts as written by
+  // this function. A call to an unknown callee takes from it the return values
+  // alive after the call; of what a known callee returns, this function returns
+  // the values that reach its exit, so that no prototype grows down the call
+  // graph. The second run provides return values only.
+  if (HasUnknownCallers and not ABIResults.CallSites.empty()) {
+    auto ABI = abi::Definition::get(Binary->DefaultABI());
+    abi::Definition::RegisterSet Returned;
+    for (auto Register : ABI.GeneralPurposeReturnValueRegisters())
+      Returned.insert(Register);
+    CSVSet ABIReturnValues = csvsOf(Returned);
+    CSVSet Seed = ReadReturnValues;
+    for (auto *CSV : ABIReturnValues)
+      Seed.insert(CSV);
+    RUAResults Seeded = analyzeRegisterUsage(OutlinedFunction.Function.get(),
+                                             Binary->Architecture(),
+                                             Analyzer.preCallHook(),
+                                             Analyzer.postCallHook(),
+                                             Analyzer.retHook(),
+                                             Seed,
+                                             /*CalleeWritesReach=*/true);
+    for (auto &[BlockID, CallSite] : Seeded.CallSites) {
+      if (CallSite.CalleeAddress.isValid()) {
+        const CSVSet &CalleeReturns = Oracle
+                                        .getLocalFunction(CallSite
+                                                            .CalleeAddress)
+                                        .ABIResults.ReturnValuesRegisters;
+        for (auto *CSV : Seeded.ReturnValuesRegisters)
+          if (ABIReturnValues.contains(CSV) and CalleeReturns.contains(CSV)
+              and not ActualCalleeSavedRegs.contains(CSV))
+            ABIResults.ReturnValuesRegisters.insert(CSV);
+        continue;
+      }
+      for (auto *CSV : CallSite.ReturnValuesRegisters) {
+        if (not ABIReturnValues.contains(CSV)
+            or ActualCalleeSavedRegs.contains(CSV))
+          continue;
+        ABIResults.CallSites[BlockID].ReturnValuesRegisters.insert(CSV);
+        ABIResults.ReturnValuesRegisters.insert(CSV);
+      }
+    }
+  }
+
   // A call whose callee is unknown passes on the arguments of this function
   // that still hold the value it received, which only holds before the first
   // call: nothing tells which of them the callee reads. Calls to known callees get their arguments from the callee.
@@ -1619,6 +1680,21 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   CSVSet Arguments = Summary.ABIResults.ArgumentsRegisters;
   for (auto *CSV : ABIResults.ArgumentsRegisters)
     Arguments.insert(CSV);
+
+  // Without its callers to tell which registers they pass, a register a call
+  // to an unknown callee receives unchanged from this function's caller, as a
+  // method called through a vtable receives the caller's arguments, is an
+  // argument of this function too
+  if (HasUnknownCallers) {
+    for (auto &[BlockID, CallSite] : ABIResults.CallSites)
+      if (not CallSite.CalleeAddress.isValid())
+        for (auto *CSV : CallSite.IncomingRegisters)
+          if (Analyzer.abiCSVs().end()
+              != llvm::find(Analyzer.abiCSVs(), CSV))
+            Arguments.insert(CSV);
+    for (auto *CSV : deducedArguments(Arguments))
+      ABIResults.ArgumentsRegisters.insert(CSV);
+  }
   CSVSet ABIArguments = deducedArguments(Arguments);
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)
     if (not CallSite.CalleeAddress.isValid())

@@ -108,11 +108,16 @@ public:
 extern template void RUAResults::dump<Logger>(Logger &, const char *) const;
 
 /// \param ReturnValues the registers the callers of \p F read after it returns
+/// \param CalleeWritesReach whether the values callees return count as writes
+///        of \p F, so that one reaching the exit is a return value of \p F.
+///        The arguments the analysis finds are then not those of \p F: a value
+///        a callee returns and nothing reads would make a later call read it.
 RUAResults analyzeRegisterUsage(llvm::Function *F,
                                 model::Architecture::Values Architecture,
                                 llvm::Function *,
                                 llvm::Function *,
                                 llvm::Function *,
-                                const CSVSet &ReturnValues);
+                                const CSVSet &ReturnValues,
+                                bool CalleeWritesReach = false);
 
 } // namespace efa

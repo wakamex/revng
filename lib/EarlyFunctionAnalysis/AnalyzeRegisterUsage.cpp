@@ -77,7 +77,7 @@ static rua::Function::Node *findUnrechableNode(rua::Function::Node *Start) {
   return nullptr;
 }
 
-static rua::OperationType::Values storeType(Value *V) {
+static rua::OperationType::Values storeType(Value *V, bool CalleeWritesReach) {
   Function *Callee = nullptr;
   if (auto *Call = dyn_cast<CallInst>(V))
     Callee = getCalledFunction(Call);
@@ -87,7 +87,8 @@ static rua::OperationType::Values storeType(Value *V) {
   // call sites, which can create a domino effect.
   if (Callee != nullptr
       and (FunctionTags::ClobbererFunction.isTagOf(Callee)
-           or FunctionTags::WriterFunction.isTagOf(Callee))) {
+           or (FunctionTags::WriterFunction.isTagOf(Callee)
+               and not CalleeWritesReach))) {
     return rua::OperationType::Clobber;
   } else {
     return rua::OperationType::Write;
@@ -99,7 +100,8 @@ fromLLVMFunction(llvm::Function &F,
                  model::Architecture::Values Architecture,
                  Function *PreCallSiteHook,
                  Function *PostCallSiteHook,
-                 Function *RetHook) {
+                 Function *RetHook,
+                 bool CalleeWritesReach) {
   using namespace model;
 
   auto StackPointer = Architecture::getStackPointer(Architecture);
@@ -163,7 +165,7 @@ fromLLVMFunction(llvm::Function &F,
         CreateOperation(rua::OperationType::Read, Load->getPointerOperand());
       } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
         // If writing a register, record it
-        CreateOperation(storeType(Store->getValueOperand()),
+        CreateOperation(storeType(Store->getValueOperand(), CalleeWritesReach),
                         Store->getPointerOperand());
       } else if (Call != nullptr
                  and (isCallTo(Call, PreCallSiteHook)
@@ -275,7 +277,8 @@ RUAResults analyzeRegisterUsage(Function *F,
                                 Function *PreCallSiteHook,
                                 Function *PostCallSiteHook,
                                 Function *RetHook,
-                                const CSVSet &ReturnValues) {
+                                const CSVSet &ReturnValues,
+                                bool CalleeWritesReach) {
   RUAResults FinalResults;
 
   // TODO: can we avoid recreating this each time?
@@ -284,7 +287,8 @@ RUAResults analyzeRegisterUsage(Function *F,
                                    Architecture,
                                    PreCallSiteHook,
                                    PostCallSiteHook,
-                                   RetHook);
+                                   RetHook,
+                                   CalleeWritesReach);
 
   if (Log.isEnabled()) {
     Function.Function.dump(Log);
