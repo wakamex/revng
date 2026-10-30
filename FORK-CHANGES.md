@@ -69,6 +69,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 52 | Raw prototypes take their register arguments in the default ABI's order, so C calling a raw function through a C function pointer passes each argument where the function reads it | correctness | model, enforce-abi, DLA, Clift import | 85 | 90 |
 | 53 | A register a caller writes before a call becomes an argument of a known callee only if the callee reads it or passes it on to an unknown callee, so vector registers left by copies are not arguments of every function called next | correctness | detect-abi | 80 | 85 |
 | 54 | A register compared with itself, as in the all-ones idiom `pcmpeqd %xmm0, %xmm0`, is not read | correctness | detect-abi | 75 | 90 |
+| 55 | Functions with no visible callers forward only general purpose registers to calls through pointers, so they no longer take every vector argument register | correctness | detect-abi | 75 | 85 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -104,6 +105,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 52. [`2c04c4054`](https://github.com/wakamex/revng/commit/2c04c4054307d5c00b0fce4ce844f6b660064756): arguments were sorted by register enumeration order, rcx, rdx and rsi before rdi; in a Rust test library 91 of 107 raw functions had their general purpose arguments out of ABI order, and `fmt::write` calling a formatter through a pointer passed them to the wrong parameters; test `detect-abi/raw-argument-order.S`
 53. [`014276b46`](https://github.com/wakamex/revng/commit/014276b468ea1d1648be1638159c20cb3475f12d): Rust copies 16 bytes through `xmm0` before most calls, so most functions took `zmm0`; in a Rust test library raw prototypes fall from 98 to 61 and those taking `zmm0` from 55 to 39; test `detect-abi/scratch-vector-register.S`
 54. [`d0a73b057`](https://github.com/wakamex/revng/commit/d0a73b057df7492552aa17310d0534a9896d00ff): Rust's UTF-8 character count uses the idiom, so through `Formatter::pad` most of the formatting code took and returned `zmm0`; in a Rust test library raw prototypes fall from 61 to 41 and those taking `zmm0` from 39 to 21; test `detect-abi/self-compare-idiom.S`
+55. [`4703db664`](https://github.com/wakamex/revng/commit/4703db6646f576e7de60a67b84b6a4e11527c74b): narrows item 50; functions inlining Rust's `fmt::write` took the six general purpose argument registers and `zmm0` to `zmm7`; in a Rust test library raw prototypes fall from 41 to 29; test `detect-abi/unknown-callers-vector.S`
 
 ## Determinism and termination
 
