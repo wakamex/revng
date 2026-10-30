@@ -1629,17 +1629,25 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // imported function's prototype tells what it reads and returns: only calls
   // through pointers have unknown callees
   std::set<BasicBlockID> CallsImported;
-  if (HasUnknownCallers)
-    for (const efa::BasicBlock &Block : Summary.CFG)
-      for (const auto &Edge : Block.Successors())
-        if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
-          if (not Call->DynamicFunction().empty())
-            CallsImported.insert(Block.ID());
+  for (const efa::BasicBlock &Block : Summary.CFG)
+    for (const auto &Edge : Block.Successors())
+      if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+        if (not Call->DynamicFunction().empty())
+          CallsImported.insert(Block.ID());
   auto IsUnknownCallee = [&](const BasicBlockID &BlockID,
                              const auto &CallSite) {
     return not CallSite.CalleeAddress.isValid()
            and not CallsImported.contains(BlockID);
   };
+
+  // What this function reads at its entry, and what it passes on unchanged to
+  // unknown callees, which may read it
+  ABIResults.ConsumedRegisters = ABIResults.ArgumentsRegisters;
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites)
+    if (IsUnknownCallee(BlockID, CallSite))
+      for (auto *CSV : CallSite.IncomingRegisters)
+        if (llvm::is_contained(Analyzer.abiCSVs(), CSV))
+          ABIResults.ConsumedRegisters.insert(CSV);
 
   // Callers the binary does not show, such as those calling through a vtable,
   // may read the general purpose registers the ABI returns values in, for
@@ -1752,8 +1760,13 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
       bool Changed = false;
       RUAResults &ToAdjust = Summary->ABIResults;
 
+      // A register written before the call and not read afterwards is an
+      // argument of a known callee only if the callee consumes it: a value
+      // left in a register, as vector registers are left by copies, is not
+      // an argument of every function called next
       for (auto *CSV : CallSite.ArgumentsRegisters)
-        Changed = Changed or ToAdjust.ArgumentsRegisters.insert(CSV).second;
+        if (not Callee.isValid() or ToAdjust.ConsumedRegisters.contains(CSV))
+          Changed = Changed or ToAdjust.ArgumentsRegisters.insert(CSV).second;
 
       for (auto *CSV : CallSite.ReturnValuesRegisters) {
         Changed = Changed or ToAdjust.ReturnValuesRegisters.insert(CSV).second;

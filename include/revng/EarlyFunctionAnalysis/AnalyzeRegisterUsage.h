@@ -72,6 +72,13 @@ public:
   /// The return values of this function that a caller reads after a call to it
   CSVSet ReadReturnValuesRegisters;
 
+  /// The registers whose value at the entry this function reads, itself or
+  /// through its callees, or passes unchanged to a call to an unknown callee.
+  /// A register a caller writes before calling this function and does not
+  /// read afterwards is an argument of this function only if it is one of
+  /// these.
+  CSVSet ConsumedRegisters;
+
   // Per call site analysis
   std::map<BasicBlockID, CallSiteResults> CallSites;
 
@@ -88,6 +95,7 @@ public:
     HandleMap(ArgumentsRegisters, Other.ArgumentsRegisters);
     HandleMap(ReturnValuesRegisters, Other.ReturnValuesRegisters);
     HandleMap(ReadReturnValuesRegisters, Other.ReadReturnValuesRegisters);
+    HandleMap(ConsumedRegisters, Other.ConsumedRegisters);
 
     for (auto &[OtherBlockID, OtherResults] : Other.CallSites) {
       HandleMap(CallSites[OtherBlockID].ArgumentsRegisters,
