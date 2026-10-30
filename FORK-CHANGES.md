@@ -73,6 +73,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 56 | Calls through pointers take no vector register a copy left behind | correctness | detect-abi | 75 | 85 |
 | 57 | A vector register a function leaves written at its return is a return value only if a caller may read it | correctness | detect-abi | 75 | 85 |
 | 58 | An indirect tail call calls its target; the C used to return the function pointer instead | correctness | isolate | 90 | 90 |
+| 59 | A cast that changes the value an operator sees stays explicit, so a signed comparison of an unsigned byte compares it as signed | correctness | Clift (implicit cast elision) | 90 | 95 |
+| 60 | An indirect tail call returns what its caller returns | correctness | detect-abi | 75 | 60 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -112,6 +114,8 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 56. [`2021de036`](https://github.com/wakamex/revng/commit/2021de03670b29f9773decebe0d5980d7f959458): Rust's `Formatter::pad` counts characters with SIMD before calling `write_str` through a vtable, so the formatting code took `zmm0` and `zmm1`; in a Rust test library raw prototypes fall from 29 to 10 and no function takes a vector register; test `detect-abi/indirect-call-vector-scratch.S`
 57. [`75ca5cfd1`](https://github.com/wakamex/revng/commit/75ca5cfd12c3adeade822f45ef6f5f2f6beee95a): Rust ends many functions with 32-byte moves through `xmm0` and `xmm1`, which then returned `zmm0` or `zmm1` next to `rax`; with items 53 to 57, no function of a Rust test library is raw, down from 98; test `detect-abi/unread-vector-return.S`
 58. [`4e2bc548b`](https://github.com/wakamex/revng/commit/4e2bc548b045147b7c712aecd3b6ce1e8959a53e): upstream code; a jump through a register recorded as a tail call got no call, only a jump naming an imported function did; Rust's `Formatter::pad_integral` ends with such a jump to `write_str`, so formatting reported errors; test `lift/indirect-tail-call.S`
+59. [`53e165748`](https://github.com/wakamex/revng/commit/53e1657481a15a3f5410952791200c46cbf6a52f): upstream code; the C printed `(generic8_t) x < (generic8_t) 0`, always false; Rust's `fmt::write` tells template bytes from arguments this way, so it wrote no separators and misapplied formats; test `lift/signed-byte-compare.S`
+60. [`02cdfaec6`](https://github.com/wakamex/revng/commit/02cdfaec6d2e684ebaebc4160f26660d81faebdd): Rust's `Formatter::pad_integral` returned the function pointer it tail-called through; no reduced test yet, as small functions of the same shape get the return values from their callers; evidence is a Rust `write!` with four formatted arguments, which panicked with item 58 alone and produces the original string with items 58 to 60
 
 ## Determinism and termination
 
