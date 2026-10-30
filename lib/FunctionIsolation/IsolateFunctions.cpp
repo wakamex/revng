@@ -231,9 +231,10 @@ public:
                           MetaAddress Block,
                           const efa::CSVSet &ClobberedRegisters,
                           llvm::Value *SymbolNamePointer) final {
+    // A jump the CFG records as a tail call calls its target, named or not;
+    // `handleCall` emits nothing for any other indirect jump, such as a return
     revng_assert(SymbolNamePointer != nullptr);
-    if (not isa<ConstantPointerNull>(SymbolNamePointer))
-      handleCall(Builder, MetaAddress::invalid(), SymbolNamePointer);
+    handleCall(Builder, MetaAddress::invalid(), SymbolNamePointer);
   }
 
 private:

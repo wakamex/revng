@@ -463,6 +463,7 @@ set(FILECHECK_TESTS
     lift/helper-written-csv-passthrough.S
     lift/hoisted-import-call.S
     lift/hoisted-relro-got-call.S
+    lift/indirect-tail-call.S
     lift/jump-table-extent.S
     lift/no-build-paths.S
     lift/relro-got-call.S
