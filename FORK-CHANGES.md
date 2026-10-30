@@ -72,6 +72,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 55 | Functions with no visible callers forward only general purpose registers to calls through pointers, so they no longer take every vector argument register | correctness | detect-abi | 75 | 85 |
 | 56 | Calls through pointers take no vector register a copy left behind | correctness | detect-abi | 75 | 85 |
 | 57 | A vector register a function leaves written at its return is a return value only if a caller may read it | correctness | detect-abi | 75 | 85 |
+| 58 | An indirect tail call calls its target; the C used to return the function pointer instead | correctness | isolate | 90 | 90 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -110,6 +111,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 55. [`4703db664`](https://github.com/wakamex/revng/commit/4703db6646f576e7de60a67b84b6a4e11527c74b): narrows item 50; functions inlining Rust's `fmt::write` took the six general purpose argument registers and `zmm0` to `zmm7`; in a Rust test library raw prototypes fall from 41 to 29; test `detect-abi/unknown-callers-vector.S`
 56. [`2021de036`](https://github.com/wakamex/revng/commit/2021de03670b29f9773decebe0d5980d7f959458): Rust's `Formatter::pad` counts characters with SIMD before calling `write_str` through a vtable, so the formatting code took `zmm0` and `zmm1`; in a Rust test library raw prototypes fall from 29 to 10 and no function takes a vector register; test `detect-abi/indirect-call-vector-scratch.S`
 57. [`75ca5cfd1`](https://github.com/wakamex/revng/commit/75ca5cfd12c3adeade822f45ef6f5f2f6beee95a): Rust ends many functions with 32-byte moves through `xmm0` and `xmm1`, which then returned `zmm0` or `zmm1` next to `rax`; with items 53 to 57, no function of a Rust test library is raw, down from 98; test `detect-abi/unread-vector-return.S`
+58. [`4e2bc548b`](https://github.com/wakamex/revng/commit/4e2bc548b045147b7c712aecd3b6ce1e8959a53e): upstream code; a jump through a register recorded as a tail call got no call, only a jump naming an imported function did; Rust's `Formatter::pad_integral` ends with such a jump to `write_str`, so formatting reported errors; test `lift/indirect-tail-call.S`
 
 ## Determinism and termination
 
