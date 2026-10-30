@@ -442,6 +442,7 @@ set(FILECHECK_TESTS
     detect-abi/scratch-vector-register.S
     detect-abi/self-compare-idiom.S
     detect-abi/trace-progress.S
+    detect-abi/unread-vector-return.S
     detect-abi/trap-fallthrough.S
     detect-abi/unknown-callers.S
     detect-abi/unknown-callers-vector.S

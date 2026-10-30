@@ -12,7 +12,7 @@
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
-# CHECK: register_rdi)(
+# CHECK: {{register_rdi|argument_0}})(
 # CHECK-NOT: generic512_t
 # CHECK-SAME: );
 

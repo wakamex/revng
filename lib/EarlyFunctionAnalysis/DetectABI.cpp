@@ -1126,11 +1126,45 @@ void DetectABI::applyABIDeductions() {
     return;
 
   auto ABI = abi::Definition::get(Binary->DefaultABI());
+
+  // A vector register a function writes and does not read again before
+  // returning is a return value only if a caller may read it: a copy through a
+  // vector register leaves it so in most functions. A caller the binary shows
+  // reads it after its call; callers it does not show may read what any call
+  // through a pointer reads after the call.
+  abi::Definition::RegisterSet VectorReturnValues;
+  for (auto Register : ABI.VectorReturnValueRegisters())
+    VectorReturnValues.insert(Register);
+  CSVSet VectorCSVs = csvsOf(VectorReturnValues);
+  CSVSet ReadAfterUnknownCalls;
+  for (const model::Function &Function : Binary->Functions()) {
+    auto &Summary = Oracle.getLocalFunction(Function.Entry());
+    std::set<BasicBlockID> Known;
+    for (const efa::BasicBlock &Block : Summary.CFG)
+      for (const auto &Edge : Block.Successors())
+        if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+          if (Call->Destination().isValid()
+              or not Call->DynamicFunction().empty())
+            Known.insert(Block.ID());
+    for (const auto &[BlockID, CallSite] : Summary.ABIResults.CallSites)
+      if (not CallSite.CalleeAddress.isValid() and not Known.contains(BlockID))
+        for (auto *CSV : CallSite.ReturnValuesRegisters)
+          ReadAfterUnknownCalls.insert(CSV);
+  }
+
   for (const model::Function &Function : Binary->Functions()) {
     auto &Summary = Oracle.getLocalFunction(Function.Entry());
 
+    bool HasUnknownCallers = UnknownCallers.contains(Function.Entry());
+    const CSVSet &Read = Summary.ABIResults.ReadReturnValuesRegisters;
+    CSVSet Returned;
+    for (auto *CSV : Summary.ABIResults.ReturnValuesRegisters)
+      if (not VectorCSVs.contains(CSV) or Read.contains(CSV)
+          or (HasUnknownCallers and ReadAfterUnknownCalls.contains(CSV)))
+        Returned.insert(CSV);
+
     auto Arguments = registersOf(Summary.ABIResults.ArgumentsRegisters);
-    auto RValues = registersOf(Summary.ABIResults.ReturnValuesRegisters);
+    auto RValues = registersOf(Returned);
 
     if (ABIEnforcement == FullABIEnforcement) {
       Arguments = ABI.enforceArgumentRegisterState(std::move(Arguments));
