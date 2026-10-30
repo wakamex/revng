@@ -1640,14 +1640,28 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
            and not CallsImported.contains(BlockID);
   };
 
-  // What this function reads at its entry, and what it passes on unchanged to
-  // unknown callees, which may read it
-  ABIResults.ConsumedRegisters = ABIResults.ArgumentsRegisters;
+  // The general purpose argument registers this function passes on unchanged
+  // to unknown callees, which may read them. Vector registers are left out: a
+  // function that does not touch them passes all of them on unchanged to every
+  // call, and they hold arguments only of floating point or vector type.
+  abi::Definition::RegisterSet GeneralPurposeArguments;
+  for (auto Register :
+       abi::Definition::get(Binary->DefaultABI())
+         .GeneralPurposeArgumentRegisters())
+    GeneralPurposeArguments.insert(Register);
+  CSVSet ArgumentCSVs = csvsOf(GeneralPurposeArguments);
+  CSVSet PassedToUnknownCallees;
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)
     if (IsUnknownCallee(BlockID, CallSite))
       for (auto *CSV : CallSite.IncomingRegisters)
-        if (llvm::is_contained(Analyzer.abiCSVs(), CSV))
-          ABIResults.ConsumedRegisters.insert(CSV);
+        if (ArgumentCSVs.contains(CSV))
+          PassedToUnknownCallees.insert(CSV);
+
+  // What this function reads at its entry, and what it passes on unchanged to
+  // unknown callees
+  ABIResults.ConsumedRegisters = ABIResults.ArgumentsRegisters;
+  for (auto *CSV : PassedToUnknownCallees)
+    ABIResults.ConsumedRegisters.insert(CSV);
 
   // Callers the binary does not show, such as those calling through a vtable,
   // may read the general purpose registers the ABI returns values in, for
@@ -1712,12 +1726,8 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // method called through a vtable receives the caller's arguments, is an
   // argument of this function too
   if (HasUnknownCallers) {
-    for (auto &[BlockID, CallSite] : ABIResults.CallSites)
-      if (IsUnknownCallee(BlockID, CallSite))
-        for (auto *CSV : CallSite.IncomingRegisters)
-          if (Analyzer.abiCSVs().end()
-              != llvm::find(Analyzer.abiCSVs(), CSV))
-            Arguments.insert(CSV);
+    for (auto *CSV : PassedToUnknownCallees)
+      Arguments.insert(CSV);
     for (auto *CSV : deducedArguments(Arguments))
       ABIResults.ArgumentsRegisters.insert(CSV);
   }
