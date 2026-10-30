@@ -12,6 +12,8 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/ValueHandle.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 #include "revng/EarlyFunctionAnalysis/AnalyzeRegisterUsage.h"
 #include "revng/EarlyFunctionAnalysis/IgnorePreservedBits.h"
@@ -65,10 +67,62 @@ static LoadInst *matchPreservingWrite(StoreInst *Store, const DataLayout &DL) {
   return Load;
 }
 
+/// \return whether \p A and \p B compute the same value: the same instruction
+///         applied to operands that compute the same value, touching no
+///         memory, down to a common value.
+static bool computeTheSame(Value *A, Value *B, unsigned Depth = 4) {
+  if (A == B)
+    return true;
+
+  auto *IA = dyn_cast<Instruction>(A);
+  auto *IB = dyn_cast<Instruction>(B);
+  if (Depth == 0 or IA == nullptr or IB == nullptr
+      or not IA->isSameOperationAs(IB) or IA->mayReadOrWriteMemory()
+      or isa<PHINode>(IA))
+    return false;
+
+  for (auto [OA, OB] : llvm::zip(IA->operands(), IB->operands()))
+    if (not computeTheSame(OA, OB, Depth - 1))
+      return false;
+
+  return true;
+}
+
+/// Replace a comparison of a value with itself by its outcome.
+///
+/// An all-ones idiom such as `pcmpeqd %xmm0, %xmm0` compares each lane of a
+/// register with itself: its result does not depend on the register, but each
+/// lane is extracted twice from the value the register held, which makes the
+/// register look read. Lanes extracted for nothing else are deleted.
+static bool foldSelfComparisons(Function &F) {
+  SmallVector<ICmpInst *, 8> Comparisons;
+  for (Instruction &I : instructions(F))
+    if (auto *Compare = dyn_cast<ICmpInst>(&I))
+      if (computeTheSame(Compare->getOperand(0), Compare->getOperand(1)))
+        Comparisons.push_back(Compare);
+
+  for (ICmpInst *Compare : Comparisons) {
+    bool Outcome = ICmpInst::isTrueWhenEqual(Compare->getPredicate());
+    WeakTrackingVH LHS = Compare->getOperand(0);
+    WeakTrackingVH RHS = Compare->getOperand(1);
+    Compare->replaceAllUsesWith(ConstantInt::getBool(Compare->getType(),
+                                                     Outcome));
+    Compare->eraseFromParent();
+    if (LHS)
+      RecursivelyDeleteTriviallyDeadInstructions(LHS);
+    if (RHS)
+      RecursivelyDeleteTriviallyDeadInstructions(RHS);
+  }
+
+  return not Comparisons.empty();
+}
+
 llvm::PreservedAnalyses
 IgnorePreservedBitsPass::run(llvm::Function &F,
                              llvm::FunctionAnalysisManager &) {
   const DataLayout &DL = F.getParent()->getDataLayout();
+
+  bool Changed = foldSelfComparisons(F);
 
   SmallVector<LoadInst *, 8> Reads;
   for (Instruction &I : instructions(F))
@@ -88,6 +142,9 @@ IgnorePreservedBitsPass::run(llvm::Function &F,
   revng_log(Log,
             "Ignored " << Reads.size() << " read(s) in " << F.getName().str());
 
-  // Only metadata was added, so nothing an analysis computed is stale.
+  // Otherwise only metadata was added, so nothing an analysis computed is
+  // stale.
+  if (Changed)
+    return PreservedAnalyses::none();
   return PreservedAnalyses::all();
 }
