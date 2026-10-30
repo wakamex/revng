@@ -13,8 +13,13 @@
 # `twice` and returns its result without reading it: `forward` returns what
 # `twice` returns.
 #
+# `release` is exported too and calls the imported `free` through its GOT
+# slot. An imported function's prototype tells what it reads, so the call is
+# not one to an unknown callee and `release` does not take every register its
+# caller may have set.
+#
 # RUN: clang --target=x86_64-unknown-linux-gnu -c -fPIC %s -o %t.o
-# RUN: ld.lld -shared -s --build-id=none -z relro %t.o -o %t
+# RUN: ld.lld -shared -s --build-id=none -z relro --no-relax %t.o -o %t
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
@@ -24,6 +29,10 @@
 #
 # CHECK: generic64_t forward(generic64_t argument_0) {
 # CHECK-NEXT: return function_0x{{[0-9a-f]+}}_Code_x86_64(argument_0);
+#
+# CHECK: release(
+# CHECK-NOT: argument_2
+# CHECK-SAME: {
 
 .text
 .type method, @function
@@ -68,3 +77,18 @@ twice:
   ret
   .cfi_endproc
 .size twice, .-twice
+
+.text
+.type free, @function
+.globl release
+.type release, @function
+release:
+  .cfi_startproc
+  push %rax
+  .cfi_def_cfa_offset 16
+  call *free@GOTPCREL(%rip)
+  pop %rcx
+  .cfi_def_cfa_offset 8
+  ret
+  .cfi_endproc
+.size release, .-release

@@ -1625,6 +1625,22 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // pointer registers.
   suppressCalleeSaved(ABIResults, ActualCalleeSavedRegs);
 
+  // A call to an imported function has no callee address either, but the
+  // imported function's prototype tells what it reads and returns: only calls
+  // through pointers have unknown callees
+  std::set<BasicBlockID> CallsImported;
+  if (HasUnknownCallers)
+    for (const efa::BasicBlock &Block : Summary.CFG)
+      for (const auto &Edge : Block.Successors())
+        if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+          if (not Call->DynamicFunction().empty())
+            CallsImported.insert(Block.ID());
+  auto IsUnknownCallee = [&](const BasicBlockID &BlockID,
+                             const auto &CallSite) {
+    return not CallSite.CalleeAddress.isValid()
+           and not CallsImported.contains(BlockID);
+  };
+
   // Callers the binary does not show, such as those calling through a vtable,
   // may read the general purpose registers the ABI returns values in, for
   // instance the result of a call this function returns without reading it. A
@@ -1662,6 +1678,8 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
             ABIResults.ReturnValuesRegisters.insert(CSV);
         continue;
       }
+      if (not IsUnknownCallee(BlockID, CallSite))
+        continue;
       for (auto *CSV : CallSite.ReturnValuesRegisters) {
         if (not ABIReturnValues.contains(CSV)
             or ActualCalleeSavedRegs.contains(CSV))
@@ -1687,7 +1705,7 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // argument of this function too
   if (HasUnknownCallers) {
     for (auto &[BlockID, CallSite] : ABIResults.CallSites)
-      if (not CallSite.CalleeAddress.isValid())
+      if (IsUnknownCallee(BlockID, CallSite))
         for (auto *CSV : CallSite.IncomingRegisters)
           if (Analyzer.abiCSVs().end()
               != llvm::find(Analyzer.abiCSVs(), CSV))
