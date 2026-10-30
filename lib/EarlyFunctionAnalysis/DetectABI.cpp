@@ -1650,6 +1650,20 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
          .GeneralPurposeArgumentRegisters())
     GeneralPurposeArguments.insert(Register);
   CSVSet ArgumentCSVs = csvsOf(GeneralPurposeArguments);
+
+  // A call to an unknown callee takes the registers written before it and not
+  // read again, which is all that tells what it reads. For vector registers
+  // that is no evidence: a copy through one leaves it so before most calls.
+  abi::Definition::RegisterSet VectorArguments;
+  for (auto Register : abi::Definition::get(Binary->DefaultABI())
+                         .VectorArgumentRegisters())
+    VectorArguments.insert(Register);
+  CSVSet VectorCSVs = csvsOf(VectorArguments);
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites)
+    if (IsUnknownCallee(BlockID, CallSite))
+      for (auto *CSV : VectorCSVs)
+        CallSite.ArgumentsRegisters.erase(CSV);
+
   CSVSet PassedToUnknownCallees;
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)
     if (IsUnknownCallee(BlockID, CallSite))

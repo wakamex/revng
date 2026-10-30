@@ -436,6 +436,7 @@ set(FILECHECK_TESTS
     clift/types/union-with-large-tree.mlir
     clift/types/union-with-pointer-recursion.mlir
     detect-abi/indirect-call-site-prototype.S
+    detect-abi/indirect-call-vector-scratch.S
     detect-abi/overlapping-indirect-branch.S
     detect-abi/raw-argument-order.S
     detect-abi/scratch-vector-register.S
