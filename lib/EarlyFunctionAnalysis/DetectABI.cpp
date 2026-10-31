@@ -766,7 +766,8 @@ void DetectABI::preliminaryFunctionAnalysis() {
     for (efa::BasicBlock &Block : CFG) {
       for (auto &Edge : Block.Successors()) {
         if (auto *Call = dyn_cast<CallEdge>(Edge.get())) {
-          if (Call->isIndirect()) {
+          // A call to a dynamic function has the dynamic function's prototype
+          if (Call->isIndirect() and Call->DynamicFunction().empty()) {
             revng_log(Log,
                       "Registering " << Function.Entry().toString() << " "
                                      << Block.ID().toString());
@@ -1010,12 +1011,27 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
     }
   }
 
+  // The dynamic function each call calls. A call through a register loaded
+  // from a dynamic function's slot earlier names no symbol in the IR, but its
+  // call edge does.
+  std::map<BasicBlockID, StringRef> DynamicCallees;
+  for (const efa::BasicBlock &Block :
+       Oracle.getLocalFunction(Function.Entry()).CFG)
+    for (const auto &Edge : Block.Successors())
+      if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+        if (not Call->DynamicFunction().empty())
+          DynamicCallees[Block.ID()] = Call->DynamicFunction();
+
   revng::IRBuilder Builder(M.getContext());
   for (auto &[Call, IsPreHook] : Hooks) {
     auto CallerBlock = BasicBlockID::fromValue(Call->getArgOperand(0));
     auto CalleeAddress = MetaAddress::fromValue(Call->getArgOperand(1));
     auto ExtractString = extractFromConstantStringPtr;
     StringRef CalleeSymbol = ExtractString(Call->getArgOperand(2));
+    if (CalleeSymbol.empty())
+      if (auto It = DynamicCallees.find(CallerBlock);
+          It != DynamicCallees.end())
+        CalleeSymbol = It->second;
     auto &&[Summary, _] = Oracle.getCallSite(Function.Entry(),
                                              CallerBlock,
                                              CalleeAddress,

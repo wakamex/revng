@@ -15,8 +15,9 @@
 #
 # `release` is exported too and calls the imported `free` through its GOT
 # slot. An imported function's prototype tells what it reads, so the call is
-# not one to an unknown callee and `release` does not take every register its
-# caller may have set.
+# not one to an unknown callee: `release` passes `free` what `free`'s
+# prototype reads, here rev.ng's default prototype, which reads every general
+# purpose argument register, and its first argument reaches `free` first.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -c -fPIC %s -o %t.o
 # RUN: ld.lld -shared -s --build-id=none -z relro --no-relax %t.o -o %t
@@ -30,9 +31,8 @@
 # CHECK: generic64_t forward(generic64_t argument_0) {
 # CHECK-NEXT: return function_0x{{[0-9a-f]+}}_Code_x86_64(argument_0);
 #
-# CHECK: release(
-# CHECK-NOT: argument_2
-# CHECK-SAME: {
+# CHECK: release(generic64_t argument_0
+# CHECK-NEXT: free(argument_0
 
 .text
 .type method, @function
