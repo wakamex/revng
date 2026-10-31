@@ -215,6 +215,9 @@ static uint64_t abiState(const efa::RUAResults &Results) {
   llvm::hash_code Hash = llvm::hash_combine(Results.CallSites.size());
   hashCSVs(Hash, Results.ArgumentsRegisters);
   hashCSVs(Hash, Results.ReturnValuesRegisters);
+  hashCSVs(Hash, Results.ReadReturnValuesRegisters);
+  hashCSVs(Hash, Results.ConsumedRegisters);
+  hashCSVs(Hash, Results.ProducedRegisters);
   for (const auto &[Block, CallSite] : Results.CallSites) {
     // Indirect call sites have no callee address
     const MetaAddress &Callee = CallSite.CalleeAddress;
@@ -1734,6 +1737,39 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   for (auto *CSV : PassedToUnknownCallees)
     ABIResults.ConsumedRegisters.insert(CSV);
 
+  // What this function may return: what it writes and does not read again
+  // before returning, what its local callees may return, what its imported
+  // callees return, and, for an unknown callee, any general purpose return
+  // value register
+  std::map<BasicBlockID, StringRef> DynamicCallees;
+  for (const efa::BasicBlock &Block : Summary.CFG)
+    for (const auto &Edge : Block.Successors())
+      if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+        if (not Call->DynamicFunction().empty())
+          DynamicCallees[Block.ID()] = Call->DynamicFunction();
+  abi::Definition::RegisterSet GeneralPurposeReturns;
+  for (auto Register : abi::Definition::get(Binary->DefaultABI())
+                         .GeneralPurposeReturnValueRegisters())
+    GeneralPurposeReturns.insert(Register);
+  ABIResults.ProducedRegisters = ABIResults.ReturnValuesRegisters;
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites) {
+    const CSVSet *CalleeReturns = nullptr;
+    CSVSet Unknown;
+    if (CallSite.CalleeAddress.isValid()) {
+      CalleeReturns = &Oracle.getLocalFunction(CallSite.CalleeAddress)
+                         .ABIResults.ProducedRegisters;
+    } else if (auto It = DynamicCallees.find(BlockID);
+               It != DynamicCallees.end()) {
+      CalleeReturns = &Oracle.getDynamicFunction(It->second)
+                         .ABIResults.ReturnValuesRegisters;
+    } else {
+      Unknown = csvsOf(GeneralPurposeReturns);
+      CalleeReturns = &Unknown;
+    }
+    for (auto *CSV : *CalleeReturns)
+      ABIResults.ProducedRegisters.insert(CSV);
+  }
+
   // Callers the binary does not show, such as those calling through a vtable,
   // may read the general purpose registers the ABI returns values in, for
   // instance the result of a call this function returns without reading it. A
@@ -1849,9 +1885,18 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
         if (not Callee.isValid() or ToAdjust.ConsumedRegisters.contains(CSV))
           Changed = Changed or ToAdjust.ArgumentsRegisters.insert(CSV).second;
 
+      // A register read after the call is a return value of a known callee
+      // only if the callee may return a value in it: a register the caller
+      // returns, left written by an earlier instruction, is not a return
+      // value of every function the caller calls last. That the caller reads
+      // it is recorded either way: once the callee returns it, the call writes
+      // it and the caller no longer shows it read after the call.
       for (auto *CSV : CallSite.ReturnValuesRegisters) {
-        Changed = Changed or ToAdjust.ReturnValuesRegisters.insert(CSV).second;
         if (ToAdjust.ReadReturnValuesRegisters.insert(CSV).second)
+          Changed = true;
+        if (Callee.isValid() and not ToAdjust.ProducedRegisters.contains(CSV))
+          continue;
+        if (ToAdjust.ReturnValuesRegisters.insert(CSV).second)
           Changed = true;
       }
 

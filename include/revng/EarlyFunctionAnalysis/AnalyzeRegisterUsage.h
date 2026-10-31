@@ -79,6 +79,12 @@ public:
   /// these.
   CSVSet ConsumedRegisters;
 
+  /// The registers this function may return a value in: those it writes and
+  /// does not read again before returning, and those its callees return. A
+  /// register a caller reads after calling this function is a return value of
+  /// this function only if it is one of these.
+  CSVSet ProducedRegisters;
+
   // Per call site analysis
   std::map<BasicBlockID, CallSiteResults> CallSites;
 
@@ -96,6 +102,7 @@ public:
     HandleMap(ReturnValuesRegisters, Other.ReturnValuesRegisters);
     HandleMap(ReadReturnValuesRegisters, Other.ReadReturnValuesRegisters);
     HandleMap(ConsumedRegisters, Other.ConsumedRegisters);
+    HandleMap(ProducedRegisters, Other.ProducedRegisters);
 
     for (auto &[OtherBlockID, OtherResults] : Other.CallSites) {
       HandleMap(CallSites[OtherBlockID].ArgumentsRegisters,
