@@ -3,6 +3,8 @@
 //
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
 #include <deque>
 #include <functional>
 #include <iterator>
@@ -33,6 +35,18 @@
 static Logger Log{ "sort-accesses-hierarchically" };
 // Check every answer of the field range index against a scan of the fields
 static Logger FieldRangeCheckLog{ "dla-check-field-ranges" };
+// Counts of what the step does, its progress every 30 seconds and the parents
+// that take more than a second, to find what grows with the size of the input
+static Logger StatsLog{ "dla-arrange-stats" };
+
+/// \return the resident set size of this process in MiB, or 0
+static uint64_t residentMiB() {
+  std::ifstream Statm("/proc/self/statm");
+  uint64_t Size = 0, Resident = 0;
+  if (not(Statm >> Size >> Resident))
+    return 0;
+  return Resident * 4096 / (1024 * 1024);
+}
 
 namespace dla {
 
@@ -876,6 +890,42 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
     if (Pending.count(Node) == 0)
       Ready.push({ Position.lookup(Node), Node });
 
+  struct {
+    uint64_t Parents = 0;
+    uint64_t Children = 0;
+    uint64_t MaxChildren = 0;
+    uint64_t MaxChildrenNode = 0;
+    uint64_t Comparisons = 0;
+    uint64_t Found = 0;
+    uint64_t Added = 0;
+    uint64_t Erased = 0;
+    uint64_t SkippedLoops = 0;
+    uint64_t MaxExpanded = 0;
+    // How many containing edges one edge is copied into, at most
+    uint64_t MaxCopies = 0;
+    uint64_t MaxCopiesNode = 0;
+  } Stats;
+  using Clock = std::chrono::steady_clock;
+  const auto StepStart = Clock::now();
+  auto LastReport = StepStart;
+  auto Seconds = [](Clock::duration D) {
+    return std::chrono::duration<double>(D).count();
+  };
+  auto Report = [&](const char *What) {
+    StatsLog << What << " after " << Seconds(Clock::now() - StepStart)
+             << " s: parents " << Stats.Parents << " of " << Position.size()
+             << ", ready " << Ready.size() << ", children " << Stats.Children
+             << " (max " << Stats.MaxChildren << " at node "
+             << Stats.MaxChildrenNode << "), comparisons " << Stats.Comparisons
+             << ", found " << Stats.Found << ", edges added " << Stats.Added
+             << ", erased " << Stats.Erased << ", skipped loops "
+             << Stats.SkippedLoops << ", largest push list "
+             << Stats.MaxExpanded << ", most copies of one edge "
+             << Stats.MaxCopies << " (at node " << Stats.MaxCopiesNode
+             << "), nodes " << TS.getNumLayouts()
+             << ", resident " << residentMiB() << " MiB" << DoLog;
+  };
+
   while (not Ready.empty()) {
     LayoutTypeSystemNode *Parent = Ready.top().second;
     Ready.pop();
@@ -884,6 +934,9 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
     if (not Pending.isPending(Parent))
       continue;
 
+    const auto ParentStart = Clock::now();
+    const auto ParentStats = Stats;
+    uint64_t ParentChildren = 0;
     {
       revng_log(Log, "Analyzing parent: " << Parent->ID);
       LoggerIndent Indent{ Log };
@@ -977,6 +1030,12 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
            ++AIt) {
         if (isInstanceEdge(*AIt))
           ChildrenHierarchy[AIt] = &Lists.emplace_back();
+      }
+      ParentChildren = ChildrenHierarchy.size();
+      Stats.Children += ParentChildren;
+      if (ParentChildren > Stats.MaxChildren) {
+        Stats.MaxChildren = ParentChildren;
+        Stats.MaxChildrenNode = Parent->ID;
       }
 
       // canPushThrough finds nothing for two edges whose fields share no
@@ -1073,12 +1132,14 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                     "with BEdge: " << BEdgeIt->first->ID
                                    << " label: " << BEdgeIt->second);
 
+          ++Stats.Comparisons;
           auto MaybePushThrough = canPushThrough(Parent,
                                                  AEdgeIt,
                                                  BEdgeIt,
                                                  FieldRanges);
           if (not MaybePushThrough.has_value())
             continue;
+          ++Stats.Found;
 
           auto &[ToPush, Through, OEAfterPush] = MaybePushThrough.value();
           revng_assert(ToPush == AEdgeIt or ToPush == BEdgeIt);
@@ -1126,11 +1187,14 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
       }
 
       llvm::SmallSet<NeighborIterator, 4> EdgesToErase;
+      llvm::DenseMap<LayoutTypeSystemNode::Link, uint64_t> Copies;
       {
         revng_log(Log, "Collect EdgesToErase");
         LoggerIndent IndentCollect{ Log };
         for (auto &[EdgeToPushThrough, ToPush] : ChildrenHierarchy) {
           llvm::SmallVector<NeighborIterator> EdgesToPush = ToPush->expand();
+          Stats.MaxExpanded = std::max<uint64_t>(Stats.MaxExpanded,
+                                                 EdgesToPush.size());
 
           if (EdgesToPush.empty())
             continue;
@@ -1166,6 +1230,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
                         "skip: " << ToPushThrough->ID << " -> "
                                  << ToPushDown->ID
                                  << " would close an instance loop");
+              ++Stats.SkippedLoops;
               continue;
             }
 
@@ -1180,6 +1245,14 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
             Pending.beforeLink(ToPushThrough, ToPushDown);
             FieldRanges.invalidate(ToPushThrough);
             TS.addInstanceLink(ToPushThrough, ToPushDown, std::move(FinalOE));
+            ++Stats.Added;
+            if (StatsLog.isEnabled()) {
+              uint64_t N = ++Copies[*PushedEdgeIt];
+              if (N > Stats.MaxCopies) {
+                Stats.MaxCopies = N;
+                Stats.MaxCopiesNode = Parent->ID;
+              }
+            }
           }
         }
       }
@@ -1196,6 +1269,7 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
           FieldRanges.invalidate(Parent);
           TS.eraseEdge(Parent, ToErase);
           Pending.afterUnlink(Parent, Child);
+          ++Stats.Erased;
         }
       }
 
@@ -1205,8 +1279,26 @@ bool ArrangeAccessesHierarchically::runOnTypeSystem(LayoutTypeSystem &TS) {
     Pending.analyzed(Parent);
     for (LayoutTypeSystemNode *Node : Pending.takeReady())
       Ready.push({ Position.lookup(Node), Node });
+
+    ++Stats.Parents;
+    if (StatsLog.isEnabled()) {
+      const auto Now = Clock::now();
+      if (Seconds(Now - ParentStart) > 1.0)
+        StatsLog << "slow parent " << Parent->ID << ": "
+                 << Seconds(Now - ParentStart) << " s, children "
+                 << ParentChildren << ", comparisons "
+                 << Stats.Comparisons - ParentStats.Comparisons
+                 << ", edges added " << Stats.Added - ParentStats.Added
+                 << ", erased " << Stats.Erased - ParentStats.Erased << DoLog;
+      if (Seconds(Now - LastReport) > 30.0) {
+        LastReport = Now;
+        Report("progress");
+      }
+    }
   }
   revng_assert(Pending.empty());
+  if (StatsLog.isEnabled())
+    Report("done");
 
   if (VerifyLog.isEnabled())
     revng_assert(TS.verifyDAG());
