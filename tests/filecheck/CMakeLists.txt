@@ -441,6 +441,7 @@ set(FILECHECK_TESTS
     detect-abi/raw-argument-order.S
     detect-abi/scratch-vector-register.S
     detect-abi/self-compare-idiom.S
+    detect-abi/stack-pointer-phi.S
     detect-abi/trace-progress.S
     detect-abi/unproduced-return.S
     detect-abi/unread-vector-return.S

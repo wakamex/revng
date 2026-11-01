@@ -55,6 +55,48 @@ void SDSAPI::run(Function &F, FunctionAnalysisManager &FAM) {
   decorateStackAccesses();
 }
 
+/// \return the constant \p V adds to \p StackPointer, through additions of
+///         constants and through PHIs whose incoming values all add the same
+///         constant, if it is one
+static std::optional<int64_t> stackPointerOffset(Value *V,
+                                                 Value *StackPointer,
+                                                 SmallPtrSetImpl<PHINode *>
+                                                   &Visiting) {
+  using namespace PatternMatch;
+  if (StackPointer != nullptr and V == StackPointer)
+    return 0;
+
+  Value *LHS = nullptr;
+  ConstantInt *Offset = nullptr;
+  if (match(V, m_c_Add(m_Value(LHS), m_ConstantInt(Offset)))) {
+    auto Base = stackPointerOffset(LHS, StackPointer, Visiting);
+    if (not Base)
+      return std::nullopt;
+    return *Base + Offset->getSExtValue();
+  }
+
+  auto *Phi = dyn_cast<PHINode>(V);
+  if (Phi == nullptr or not Visiting.insert(Phi).second)
+    return std::nullopt;
+  std::optional<int64_t> Result;
+  for (Value *Incoming : Phi->incoming_values()) {
+    auto IncomingOffset = stackPointerOffset(Incoming, StackPointer, Visiting);
+    if (not IncomingOffset or (Result and *Result != *IncomingOffset)) {
+      Result = std::nullopt;
+      break;
+    }
+    Result = IncomingOffset;
+  }
+  Visiting.erase(Phi);
+  return Result;
+}
+
+static std::optional<int64_t> stackPointerOffset(Value *V,
+                                                 Value *StackPointer) {
+  SmallPtrSet<PHINode *, 4> Visiting;
+  return stackPointerOffset(V, StackPointer, Visiting);
+}
+
 void SDSAPI::segregateAccesses(Function &F) {
   using namespace PatternMatch;
 
@@ -108,9 +150,7 @@ void SDSAPI::segregateAccesses(Function &F) {
 
       if (Pointer != nullptr) {
         Value *LoadPtr = nullptr;
-        Value *LHS = nullptr;
         Value *BitCast = nullptr;
-        ConstantInt *Offset = nullptr;
         Builder.SetInsertPoint(&I);
 
         // Do we have a inttoptr to a load i64, i64* LoadPtr as pointer operand
@@ -127,13 +167,15 @@ void SDSAPI::segregateAccesses(Function &F) {
           I.setOperand(isa<LoadInst>(&I) ? 0 : 1, BitCast);
 
           DirectStackAccesses.emplace_back(&I);
-        } else if (match(Pointer, m_c_Add(m_Value(LHS), m_ConstantInt(Offset)))
-                   && LHS == LoadSP) {
-          // Do we have a inttoptr whose pointer operand is an instruction `add
-          // i64 LHS, X` with X negative constant and LHS the stack pointer? If
-          // so, canonicalize the i2p + add into a gep whose value is bitcasted
-          // to the original type of SP.
-          auto *GEP = Builder.CreateGEP(Builder.getInt8Ty(), SPI8Ptr, Offset);
+        } else if (auto SPOffset = stackPointerOffset(Pointer, LoadSP)) {
+          // Do we have a inttoptr whose pointer operand is the stack pointer
+          // plus a constant, possibly through PHIs whose incoming values all
+          // add the same constant, as where two paths that pushed the same
+          // amount meet? If so, canonicalize the i2p into a gep whose value is
+          // bitcasted to the original type of SP.
+          auto *GEP = Builder.CreateGEP(Builder.getInt8Ty(),
+                                        SPI8Ptr,
+                                        Builder.getInt64(*SPOffset));
 
           Type *DestTy = nullptr;
           if (isa<LoadInst>(&I))
