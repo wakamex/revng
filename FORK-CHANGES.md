@@ -82,6 +82,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 66 | The rewrite moving a unary operator inside a cast keeps the operator, so `~(T) x` no longer prints as `(T) x` | correctness | Clift (expression post-processing) | 95 | 95 |
 | 67 | Merging an if nested in another if's else joins the conditions with `\|\|`, so `!p \|\| p->x < q` no longer prints as `!p && p->x < q` | correctness | Clift (statement rewrites) | 95 | 90 |
 | 68 | An equality comparison of a code address computed from a segment address with an original address compares segment offsets | correctness | lift (SimplifySwitch) | 90 | 90 |
+| 69 | A select between values that cannot be pointers is not taken as a GEP base, so a table index is not added to a null pointer | correctness | ArithmeticToGEP | 85 | 90 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers
@@ -130,6 +131,7 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 66. [`d16ccfbd2`](https://github.com/wakamex/revng/commit/d16ccfbd2af6f7c6ed428ade999e8324f169e106): upstream code from [`01291cceb`](https://github.com/revng/revng/commit/01291cceb); also drops unary minus; Rust's float rounding indexes its digits as `len + ~i`, so `{:.3}` never rounded up; test `clift/expression-rewrites/unary-cast-elimination.mlir`
 67. [`7920565f2`](https://github.com/wakamex/revng/commit/7920565f22eb87fe15f5eea9e216dbd12b7ac693): upstream code from [`0f0448351`](https://github.com/revng/revng/commit/0f0448351); the C dereferenced a pointer only when it was null; Rust's stable quicksort tests its ancestor pivot this way, so sorts of 33 or more elements came out wrong; tests `lift/null-check-or.S` and the corrected `clift/statement-rewrites/if-and-combining-with-else-2.mlir` and `-3.mlir`
 68. [`2c014711f`](https://github.com/wakamex/revng/commit/2c014711f89a81e94470e4672b4a9348b78c6aea): extends item 42 to the comparison a two-target table becomes; Rust's BTreeMap range search took the wrong branch for most lower bounds; test `lift/segment-relative-compare.S`
+69. [`2d96e2622`](https://github.com/wakamex/revng/commit/2d96e26224e891fbb819c937496111e3f2680c50): upstream code from [`cb5702dc0`](https://github.com/revng/revng/commit/cb5702dc0); the C computed `(cond ? (generic8_t *) 12 : NULL) + address`, undefined when the index is 0, and clang at -O2 then folded the dispatch to one target; test in `llvm-passes/arithmetic-to-gep.ll`; the same index typed as a pointer through a loop PHI remains
 
 ## Determinism and termination
 
