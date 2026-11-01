@@ -169,6 +169,7 @@ set(FILECHECK_TESTS
     clift/expression-rewrites/pointer-arithmetic-add-mul-imm.mlir
     clift/expression-rewrites/read-type-punned.mlir
     clift/expression-rewrites/ternary-inversion.mlir
+    clift/expression-rewrites/unary-cast-elimination.mlir
     clift/expression-rewrites/xor-all-ones.mlir
     clift/expressions/addressof-immediate.mlir
     clift/expressions/addressof-indirection.mlir

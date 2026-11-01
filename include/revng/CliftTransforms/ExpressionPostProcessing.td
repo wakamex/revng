@@ -22,7 +22,7 @@ def NegativeImmediatePattern
 
 class UnaryCastElimination<Op operation>
   : Pat<(operation (Clift_BitCastOp $arg)),
-        (Clift_BitCastOp $arg),
+        (Clift_BitCastOp (operation $arg)),
         [(Clift_AnyIntegerType $arg)]>;
 
 class BinaryCastElimination<Op operation>
