@@ -7,15 +7,20 @@
 # original address, which holds only where the segment sits at its original
 # address. The C compares the entry with that target's offset from the table
 # instead. Rust's BTreeMap range search dispatches on its search bound this
-# way, and its C found the wrong leaf for most lower bounds.
+# way, and its C found the wrong leaf for most lower bounds. The index is an
+# integer offset added to the table's address: taking it as the pointer
+# added the address to a null pointer when the index was 0, which compilers
+# may assume does not happen.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -c -fPIE %s -o %t.o
 # RUN: ld.lld -pie -s --build-id=none -e entry %t.o -o %t
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
+# CHECK-NOT: (generic8_t *) 12UL
 # CHECK: return *(generic32_t *) {{.+}} == 4196U ? argument_0 + 1UL : argument_0 << 1UL;
 # CHECK-NOT: 4199025UL
+# CHECK-NOT: (generic8_t *) 12UL
 
 .text
 .globl entry

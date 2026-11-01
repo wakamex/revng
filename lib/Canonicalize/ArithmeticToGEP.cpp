@@ -663,11 +663,9 @@ private:
           rc_return true;
       rc_return false;
 
+    // The condition is never a pointer, so only the selected values count.
     case llvm::Instruction::Select:
-      if (U.getOperandNo() == 0)
-        rc_return false;
-
-      // If any of the other operands cannot be a pointer we consider it
+      // If any of the selected values cannot be a pointer we consider it
       // evidence strong enough to say that this cannot be an operand
       for (llvm::Use &Incoming : llvm::drop_begin(I->operands()))
         if (rc_recur cannotBePointer(Incoming))

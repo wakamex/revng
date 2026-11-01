@@ -682,3 +682,21 @@ define ptr @nonzero_then_zero_offset (ptr %arg) {
 !2102 = !{ !1, !4 }
 ; 9-args: pointer return, no pointer operand
 !2202 = !{ !1, !5 }
+
+; A select between two constants, the first operand of an add whose other
+; operand may be a pointer, is the offset, not the base: the GEP's base is the
+; other operand. The select used to be taken as the base because it was the
+; add's first operand, which made a jump table's index a pointer and its
+; address the offset, and the C added an integer to a null pointer.
+;
+; CHECK-LABEL: define i32 @select_of_constants_offset
+; CHECK: [[BASE:%[a-zA-Z0-9_]+]] = inttoptr i64 %base to ptr
+; CHECK: getelementptr i8, ptr [[BASE]], i64 %s
+; CHECK-NOT: select i1 %c, ptr
+define i32 @select_of_constants_offset(i1 %c, i64 %base) {
+  %s = select i1 %c, i64 12, i64 0
+  %a = add i64 %s, %base
+  %p = inttoptr i64 %a to ptr
+  %v = load i32, ptr %p
+  ret i32 %v
+}
