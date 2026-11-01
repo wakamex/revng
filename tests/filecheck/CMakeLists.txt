@@ -474,6 +474,7 @@ set(FILECHECK_TESTS
     lift/no-build-paths.S
     lift/relro-got-call.S
     lift/segment-base-opaque.S
+    lift/segment-relative-compare.S
     lift/segment-relative-switch.S
     lift/sign-extended-bit.S
     lift/signed-byte-compare.S

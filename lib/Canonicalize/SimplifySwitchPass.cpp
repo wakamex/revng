@@ -245,6 +245,37 @@ static bool rebaseOnSegment(SwitchInst *Switch) {
   return true;
 }
 
+/// An equality comparison of a code address computed from a segment's address
+/// with a constant original address, as a switch with one case becomes,
+/// compares the offset from the segment with the constant's offset instead.
+static bool rebaseOnSegment(ICmpInst *Compare) {
+  if (not Compare->isEquality())
+    return false;
+
+  for (unsigned I = 0; I < 2; ++I) {
+    auto *Constant = dyn_cast<ConstantInt>(Compare->getOperand(1 - I));
+    if (Constant == nullptr)
+      continue;
+    CallInst *Base = getSegmentBase(Compare->getOperand(I));
+    if (Base == nullptr)
+      continue;
+
+    // Only constants that may be addresses in the segment are rebased, not a
+    // null pointer or a value below the segment
+    Function *Getter = getCalledFunction(Base);
+    uint64_t Start = extractSegmentKeyFromMetadata(*Getter).address();
+    if (Constant->getValue().ult(Start))
+      continue;
+    revng::IRBuilder B(Compare);
+    Compare->setOperand(I, offsetFrom(Compare->getOperand(I), Base, B));
+    APInt Offset = Constant->getValue() - Start;
+    Compare->setOperand(1 - I, ConstantInt::get(Constant->getContext(), Offset));
+    return true;
+  }
+
+  return false;
+}
+
 namespace revng::pypeline::piperuns {
 
 struct SimplifySwitchPass : public llvm::ModulePass {
@@ -277,6 +308,11 @@ public:
     bool Result = false;
     for (BasicBlock &BB : Function) {
       for (Instruction &I : make_early_inc_range(BB)) {
+        if (auto *Compare = dyn_cast<ICmpInst>(&I)) {
+          Result |= rebaseOnSegment(Compare);
+          continue;
+        }
+
         SwitchInst *Switch = dyn_cast<SwitchInst>(&I);
         if (not Switch)
           continue;
