@@ -445,6 +445,7 @@ set(FILECHECK_TESTS
     detect-abi/unproduced-return.S
     detect-abi/unread-vector-return.S
     detect-abi/trap-fallthrough.S
+    detect-abi/unknown-callee-return.S
     detect-abi/unknown-callers.S
     detect-abi/unknown-callers-vector.S
     detect-abi/unwind-entry-pointer.S

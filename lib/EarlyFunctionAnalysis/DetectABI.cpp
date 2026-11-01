@@ -1724,6 +1724,23 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
       for (auto *CSV : VectorCSVs)
         CallSite.ArgumentsRegisters.erase(CSV);
 
+  // Nothing but the ABI tells what an unknown callee returns: a register read
+  // after the call that the ABI does not return values in holds what it held
+  // before the call, or nothing the callee gave it
+  abi::Definition::RegisterSet ABIReturnRegisters;
+  for (auto Register : abi::Definition::get(Binary->DefaultABI())
+                         .GeneralPurposeReturnValueRegisters())
+    ABIReturnRegisters.insert(Register);
+  for (auto Register : abi::Definition::get(Binary->DefaultABI())
+                         .VectorReturnValueRegisters())
+    ABIReturnRegisters.insert(Register);
+  CSVSet ABIReturnCSVs = csvsOf(ABIReturnRegisters);
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites)
+    if (IsUnknownCallee(BlockID, CallSite))
+      std::erase_if(CallSite.ReturnValuesRegisters, [&](auto *CSV) {
+        return not ABIReturnCSVs.contains(CSV);
+      });
+
   CSVSet PassedToUnknownCallees;
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)
     if (IsUnknownCallee(BlockID, CallSite))
