@@ -1,0 +1,6 @@
+out-*/
+*.so
+extra-helpers-*.o
+compare-*.json
+__pycache__/
+out-*.log
