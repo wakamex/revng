@@ -23,7 +23,7 @@ module attributes {clift.module} {
       %2 = clift.test %1 : !int32_t
       // CHECK: %3 = clift.imm 2 : !int32_t
       // CHECK: %4 = clift.test %3 : !int32_t
-      // CHECK: %5 = clift.and %2, %4
+      // CHECK: %5 = clift.or %2, %4
       // CHECK: clift.yield %5 : !clift.bool
       clift.yield %2 : !clift.bool
     // CHECK: } then {

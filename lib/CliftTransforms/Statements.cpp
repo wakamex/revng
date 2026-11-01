@@ -142,9 +142,13 @@ struct IfAndCombiningPattern : mlir::OpRewritePattern<IfOp> {
     bool IsOuterElse = &OuterBranch1 == &OuterIf.getElse();
     bool IsInnerElse = &InnerBranch1 == &InnerIf.getElse();
 
-    // If the and-then region is the inner else, and the nesting region of the
-    // outer branch is not, or vice versa, the inner if condition is inverted.
-    // This results in `C1 && !C2`, as opposed to `C1 && C2`.
+    // The and-then region runs when the outer condition selects the nesting
+    // region and the inner condition selects the and-then region. When the
+    // nesting region is the outer then, the composed condition is `C1 && C2`,
+    // with C2 inverted if the and-then region is the inner else. When it is
+    // the outer else, the and-then region becomes the composed else, so the
+    // composed condition is the negation of `!C1 && C2`, which is `C1 || !C2`,
+    // with C2 inverted unless the and-then region is the inner else.
     if (IsOuterElse ^ IsInnerElse) {
       invertBooleanExpression(Rewriter,
                               InnerIf.getLoc(),
@@ -152,11 +156,13 @@ struct IfAndCombiningPattern : mlir::OpRewritePattern<IfOp> {
     }
 
     auto Merge = [&](mlir::Value Inner, mlir::Value Outer) -> mlir::Value {
+      if (IsOuterElse)
+        return Rewriter.create<LogicalOrOp>(InnerIf.getLoc(), Outer, Inner);
       return Rewriter.create<LogicalAndOp>(InnerIf.getLoc(), Outer, Inner);
     };
 
     // Merge the two if conditions by joining the expressions together using a
-    // logical and expression.
+    // logical and, or a logical or when the nesting region is the outer else.
     mergeExpressionInto(Rewriter,
                         InnerIf.getCondition(),
                         OuterIf.getCondition(),

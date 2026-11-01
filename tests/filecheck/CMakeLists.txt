@@ -469,6 +469,7 @@ set(FILECHECK_TESTS
     lift/hoisted-relro-got-call.S
     lift/import-tail-call.S
     lift/indirect-tail-call.S
+    lift/null-check-or.S
     lift/jump-table-extent.S
     lift/no-build-paths.S
     lift/relro-got-call.S
