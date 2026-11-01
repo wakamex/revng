@@ -700,3 +700,23 @@ define i32 @select_of_constants_offset(i1 %c, i64 %base) {
   %v = load i32, ptr %p
   ret i32 %v
 }
+
+; The address of a global, and a constant computed from it, may be a pointer:
+; a global variable is itself a constant. An offset loaded from a local slot,
+; added to a table's address computed from a global, is the offset, and the
+; table's address may be the base, so neither operand is taken as the base
+; and the add stays integer arithmetic. Every such address used to count as a
+; constant that cannot be a pointer, so the loaded offset became the base, and
+; the C added the table's address to it as to a pointer.
+;
+; CHECK-LABEL: define i32 @global_address_base
+; CHECK: %a = add i64 %offset, add (i64 ptrtoint (ptr @table to i64), i64 4)
+; CHECK-NOT: inttoptr i64 %offset
+@table = global [16 x i8] zeroinitializer
+define i32 @global_address_base(ptr %slot) {
+  %offset = load i64, ptr %slot
+  %a = add i64 %offset, add (i64 ptrtoint (ptr @table to i64), i64 4)
+  %p = inttoptr i64 %a to ptr
+  %v = load i32, ptr %p
+  ret i32 %v
+}

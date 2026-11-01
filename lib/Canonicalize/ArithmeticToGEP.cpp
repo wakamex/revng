@@ -622,6 +622,33 @@ private:
     }
   }
 
+  /// \return whether \p V is the address of a global, or computed from one
+  ///         through constant expressions, casts and additions
+  static bool mayBeGlobalAddress(const llvm::Value *V) {
+    if (isa<llvm::GlobalValue>(V))
+      return true;
+    if (auto *Expression = dyn_cast<llvm::ConstantExpr>(V)) {
+      for (const llvm::Use &Operand : Expression->operands())
+        if (mayBeGlobalAddress(Operand.get()))
+          return true;
+      return false;
+    }
+    if (auto *I = dyn_cast<llvm::Instruction>(V)) {
+      switch (I->getOpcode()) {
+      case llvm::Instruction::PtrToInt:
+      case llvm::Instruction::IntToPtr:
+      case llvm::Instruction::BitCast:
+        return mayBeGlobalAddress(I->getOperand(0));
+      case llvm::Instruction::Add:
+        return mayBeGlobalAddress(I->getOperand(0))
+               or mayBeGlobalAddress(I->getOperand(1));
+      default:
+        return false;
+      }
+    }
+    return false;
+  }
+
   bool hasAmbiguousPointerOperands(llvm::User *I) const {
     return cast<llvm::Instruction>(I)->getOpcode() == llvm::Instruction::Add;
   }
@@ -751,6 +778,12 @@ private:
     for (llvm::Use &Operand : User->operands()) {
       if (&Operand == &U)
         continue;
+      // An address computed from a global's, such as a table in a segment,
+      // counts as a constant that cannot be a pointer, but it may well be
+      // the base: taking U as the base instead could make an offset the
+      // pointer, so leave the operands undecided.
+      if (mayBeGlobalAddress(Operand.get()))
+        return false;
       // If we find even one for which we aren't sure that it's definitely not a
       // pointer we return false because if it was a pointer then User would
       // have 2 pointer operands, which means that we failed disambiguating.
