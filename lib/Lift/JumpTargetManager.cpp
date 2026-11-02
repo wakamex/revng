@@ -919,13 +919,6 @@ void JumpTargetManager::registerCodePointer(MetaAddress Value,
   }
 
   BasicBlock *Result = registerJT(Value, JumpTargetReason::GlobalData);
-
-  // A pointer to the start of a function in the unwind information is a
-  // function entry, even where it lies after another function's code that
-  // the analysis can reach by falling through
-  if (Result != nullptr and unwindRanges().isFunctionEntry(Value))
-    registerJT(Value, JumpTargetReason::UnwindEntry);
-
   if (Result != nullptr)
     UnusedCodePointers.emplace(Location, Value);
 }
@@ -1284,6 +1277,17 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
             "Registering bb." << nameForAddress(PC) << " for "
                               << JumpTargetReason::getName(Reason));
   LoggerIndent Indent(RegisterJTLog);
+
+  // The start of a function in the unwind information is a function entry
+  // however it is reached: through a pointer in data, a call, or a direct
+  // jump, as a tail call that may be the only way to it
+  if (Reason != JumpTargetReason::UnwindEntry
+      and unwindRanges().isFunctionEntry(PC)) {
+    BasicBlock *Result = registerJT(PC, JumpTargetReason::UnwindEntry);
+    if (auto It = JumpTargets.find(PC); It != JumpTargets.end())
+      It->second.setReason(Reason);
+    return Result;
+  }
 
   // Do we already have a BasicBlock for this PC?
   BlockMap::iterator TargetIt = JumpTargets.find(PC);
