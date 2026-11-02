@@ -3781,7 +3781,9 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
       auto &&[CalleePrototype, CalleeType] = Model->makeRawFunctionDefinition();
       CalleePrototype.Architecture() = Model->Architecture();
       CalleePrototype.FinalStackOffset() = 8;
-      CalleePrototype.addArgument(model::Register::rcx_x86_64, Generic.copy());
+      // In ABI order the caller takes (rdi, rdx) and the callee
+      // (rdi, rsi, rdx): rdx sits at different positions in the two
+      CalleePrototype.addArgument(model::Register::rsi_x86_64, Generic.copy());
       CalleePrototype.addArgument(model::Register::rdx_x86_64, Generic.copy());
       CalleePrototype.addArgument(model::Register::rdi_x86_64, Generic.copy());
       CalleePrototype.addReturnValue(model::Register::rax_x86_64,
@@ -3798,10 +3800,10 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
       OtherModule.setDataLayout("e-p:64:64");
       Module.setDataLayout("e-p:64:64");
       auto *Integer = llvm::Type::getInt64Ty(Context);
-      auto *FirstInteger = NarrowArgument ? llvm::Type::getInt32Ty(Context) :
-                                            Integer;
+      auto *RDXInteger = NarrowArgument ? llvm::Type::getInt32Ty(Context) :
+                                          Integer;
       auto *CallerLLVMType = llvm::FunctionType::get(Integer,
-                                                     { FirstInteger, Integer },
+                                                     { Integer, RDXInteger },
                                                      false);
       auto *CalleeLLVMType = llvm::FunctionType::get(Integer,
                                                      { Integer,
@@ -3880,16 +3882,16 @@ BOOST_AUTO_TEST_CASE(DirectCallMapsDifferentRawPrototypesByRegister) {
         revng_abort();
       };
       bool Connected = Mode == 0 or Mode == 1 or Mode == 7;
-      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
-                                     Node(Callee->getArg(1)))
-                  == (not NarrowArgument and Connected ? 1 : 0));
       BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
                                      Node(Callee->getArg(2)))
-                  == (Connected ? 1 : 0));
+                  == (not NarrowArgument and Connected ? 1 : 0));
       BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
                                      Node(Callee->getArg(0)))
-                  == 0);
+                  == (Connected ? 1 : 0));
       BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(1)),
+                                     Node(Callee->getArg(1)))
+                  == 0);
+      BOOST_CHECK(countInstanceEdges(Node(Caller->getArg(0)),
                                      Node(Callee->getArg(1)))
                   == 0);
     }

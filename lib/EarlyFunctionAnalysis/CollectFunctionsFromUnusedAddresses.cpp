@@ -95,10 +95,12 @@ private:
       // function. Also, ignore addresses that are return addresses.
       // A pointer in data to the start of a function in the unwind
       // information, such as a method in a vtable or a function in a GOT slot,
-      // is a function entry even when code loads it.
+      // is a function entry even when code loads it, and so is a direct jump to
+      // such a start: a tail call, which may be the only way the function is
+      // reached.
       bool Interesting = (IsSimpleLiteral or IsUnusedGlobalData
                           or (IsMemoryStore and not IsPCStore)
-                          or (IsGlobalData and IsUnwindEntry));
+                          or ((IsGlobalData or IsDirectJump) and IsUnwindEntry));
       // A pointer to the start of a function in the unwind information is a
       // function entry even when another function's CFG reaches it by falling
       // through, as one does past a call it does not know to be no-return, or
