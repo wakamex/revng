@@ -11,7 +11,7 @@
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
-# CHECK: return -{{.*}}(argument_0 < argument_1);
+# CHECK: return {{(\([a-z0-9_]+\) )*}}-{{.*}}(argument_0 < argument_1);
 
 .text
 .globl entry

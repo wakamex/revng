@@ -2,11 +2,11 @@
 ; This file is distributed under the MIT License. See LICENSE.md for details.
 ;
 
-; Type shrinking must rewrite instructions in program order. It used to follow
-; the order of a map keyed by instruction address, so the order of the new
-; instructions, and of the uses of the shared operands, depended on where the
-; allocator had placed the original ones. Run the pass under an allocator that
-; hands out decreasing addresses and require the same output.
+; Type shrinking must rewrite instructions in program order. If it followed
+; the order of a container keyed by instruction address, the order of the new
+; instructions, and of the uses of the shared operands, would depend on where
+; the allocator had placed the original ones. Run the pass under an allocator
+; that hands out decreasing addresses and require the same output.
 ;
 ; RUN: clang -shared -fPIC -O2 %S/../Inputs/descending-malloc.c -o %t.so
 ; RUN: %root/bin/revng opt -S -preserve-ll-uselistorder -type-shrinking %s -o %t.normal.ll
@@ -15,8 +15,18 @@
 ; RUN: FileCheck %s < %t.normal.ll
 
 ; CHECK-LABEL: define i64 @f
-; CHECK: %s1 = add i64 %[[Y1:[0-9]+]], %[[Y2:[0-9]+]]
-; CHECK: %s2 = add i64 %[[Y3:[0-9]+]], %[[Y4:[0-9]+]]
+; CHECK: %[[X1:[0-9]+]] = add i8
+; CHECK-NEXT: %[[Y1:[0-9]+]] = and i8 %[[X1]], -1
+; CHECK: %[[X2:[0-9]+]] = add i8
+; CHECK-NEXT: %[[Y2:[0-9]+]] = and i8 %[[X2]], -1
+; CHECK: %[[X3:[0-9]+]] = add i8
+; CHECK-NEXT: %[[Y3:[0-9]+]] = and i8 %[[X3]], -1
+; CHECK: %[[X4:[0-9]+]] = add i8
+; CHECK-NEXT: %[[Y4:[0-9]+]] = and i8 %[[X4]], -1
+; CHECK: zext i8 %[[Y1]] to i16
+; CHECK-NEXT: zext i8 %[[Y2]] to i16
+; CHECK: zext i8 %[[Y3]] to i16
+; CHECK-NEXT: zext i8 %[[Y4]] to i16
 ; CHECK-NOT: uselistorder
 
 define i64 @f(i64 %a, i64 %b) {

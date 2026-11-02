@@ -11,7 +11,7 @@ declare i32 @kind()
 !1 = !{!"marker", !"goto-block"}
 
 ; The switch in block_c is copied into block_c_ids, which tests its condition
-; again. The condition calls @kind, so it is assigned to a variable first and
+; again to reach block_d. The condition calls @kind, so it is assigned to a variable first and
 ; both switches test the value read from it: the C calls @kind once.
 
 define void @g(i1 noundef %a) {
@@ -25,10 +25,14 @@ block_c:
   switch i32 %c, label %block_b [
     i32 0, label %block_e
     i32 1, label %block_f
+    i32 2, label %block_d
   ]
 
 block_b:
   ret void
+
+block_d:
+  br label %block_b
 
 block_e:
   ret void
