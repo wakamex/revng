@@ -144,8 +144,15 @@ public:
     Tokens.emitMacro(FullIdentifier);
   }
 
+  static llvm::StringRef stripDialectName(llvm::StringRef OperationName) {
+    return OperationName.split('.').second;
+  }
+
   static llvm::StringRef getIntrinsicIdentifier(mlir::Operation *Op) {
-    return Op->getName().stripDialect();
+    if (mlir::isa<BoolExtendOp>(Op))
+      return stripDialectName(ZeroExtendOp::getOperationName());
+
+    return stripDialectName(Op->getName().getStringRef());
   }
 
   RecursiveCoroutine<void> emitIntrinsicImmediateExpression(ImmediateOp E) {
@@ -169,6 +176,11 @@ public:
   }
 
   RecursiveCoroutine<void> emitIntrinsicCastExpression(CastOpInterface E) {
+    revng_assert((mlir::isa<BoolExtendOp,
+                            ZeroExtendOp,
+                            SignExtendOp,
+                            TruncateOp>(E)));
+
     emitIntrinsicMacro(getIntrinsicIdentifier(E));
     Tokens.emitOperator(CTE::Operator::LeftParenthesis);
 
@@ -205,8 +217,41 @@ public:
     if (auto E = mlir::dyn_cast<ImmediateOp>(Op))
       return emitIntrinsicImmediateExpression(E);
 
-    if (auto E = mlir::dyn_cast<CastOpInterface>(Op))
-      return emitIntrinsicCastExpression(E);
+    if (auto E = mlir::dyn_cast<CastOpInterface>(Op)) {
+      if (not mlir::isa<TestOp>(Op))
+        return emitIntrinsicCastExpression(E);
+    }
+
+    revng_assert((mlir::isa<TestOp,
+                            NegOp,
+                            AddOp,
+                            SubOp,
+                            MulOp,
+                            SDivOp,
+                            UDivOp,
+                            SRemOp,
+                            URemOp,
+                            ShlOp,
+                            ShrOp,
+                            SarOp,
+                            BitwiseNotOp,
+                            BitwiseAndOp,
+                            BitwiseOrOp,
+                            BitwiseXorOp,
+                            IncrementOp,
+                            DecrementOp,
+                            PostIncrementOp,
+                            PostDecrementOp,
+                            CmpEqOp,
+                            CmpNeOp,
+                            SCmpLtOp,
+                            UCmpLtOp,
+                            SCmpGtOp,
+                            UCmpGtOp,
+                            SCmpLeOp,
+                            UCmpLeOp,
+                            SCmpGeOp,
+                            UCmpGeOp>(Op)));
 
     return emitUsualIntrinsicExpression(Op);
   }
@@ -406,7 +451,7 @@ public:
     // Parenthesizing a nested unary postfix expression is not necessary.
     CurrentPrecedence = decrementPrecedence(OperatorPrecedence::UnaryPostfix);
 
-    rc_recur emitExpression(E.getFunction());
+    rc_recur emitExpression(E.getCallee());
 
     // The precedence here must be comma, because an argument list cannot
     // contain an unparenthesized comma expression. It would be parsed as two
@@ -938,7 +983,7 @@ public:
     DeclaratorInfo Declarator{
       .Identifier = Var.getName(),
       .Location = Var.getHandle(),
-      .CAttributes = getDeclarationOpCAttributes(Var),
+      .CAttributeList = getDeclarationOpCAttributes(Var),
       .Kind = CTE::EntityKind::LocalVariable,
     };
 
@@ -1104,7 +1149,7 @@ public:
       if (not mayElideBraces(If.getThen()))
         return false;
 
-      if (If.getElse().empty())
+      if (isEmptyRegionOrBlock(If.getElse()))
         return true;
 
       auto ElseIf = getOnlyOp<IfOp>(If.getElse());
@@ -1131,7 +1176,7 @@ public:
 
       rc_recur emitImplicitBlockStatement(S.getThen(), EmitBlocks);
 
-      if (S.getElse().empty())
+      if (isEmptyRegionOrBlock(S.getElse()))
         break;
 
       if (EmitBlocks)
@@ -1226,13 +1271,18 @@ public:
       Tokens.emitNewline();
 
       CaseValueEmitter CVE(*this, S.getConditionType(), getConstantRadix(S));
-      for (unsigned I = 0, Count = S.getNumCases(); I < Count; ++I) {
-        Tokens.emitKeyword(CTE::Keyword::Case);
-        Tokens.emitSpace();
+      for (unsigned I = 0, Count = S.getCaseRegionCount(); I < Count; ++I) {
+        for (auto [J, CaseValue] : llvm::enumerate(S.getCaseValues(I))) {
+          if (J != 0)
+            Tokens.emitNewline();
 
-        CVE.emit(S.getCaseValue(I));
+          Tokens.emitKeyword(CTE::Keyword::Case);
+          Tokens.emitSpace();
 
-        Tokens.emitPunctuator(CTE::Punctuator::Colon);
+          CVE.emit(CaseValue);
+          Tokens.emitPunctuator(CTE::Punctuator::Colon);
+        }
+
         rc_recur emitCaseRegion(S.getCaseRegion(I));
       }
 

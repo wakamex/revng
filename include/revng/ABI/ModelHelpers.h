@@ -53,7 +53,6 @@ getPointerSizedInteger(llvm::LLVMContext &C,
 }
 
 /// \note This is the final prototype, after segregate-stack-access
-template<bool LegacyLocalVariables>
 inline llvm::FunctionType &
 layoutToLLVMFunctionType(llvm::LLVMContext &Context,
                          model::Architecture::Values Architecture,
@@ -95,23 +94,17 @@ layoutToLLVMFunctionType(llvm::LLVMContext &Context,
     break;
 
   case ReturnMethod::ModelAggregate: {
-    auto TargetPointerSizedInteger = getPointerSizedInteger(Context,
-                                                            Architecture);
-    if constexpr (LegacyLocalVariables) {
-      ReturnType = TargetPointerSizedInteger;
-    } else {
-      const model::Type &ReturnAggregate = Layout.returnValueAggregateType();
-      size_t ReturnSize = *ReturnAggregate.size();
-      auto *Int8 = llvm::IntegerType::getInt8Ty(Context);
-      ReturnType = llvm::ArrayType::get(Int8, ReturnSize);
-    }
+    const model::Type &ReturnAggregate = Layout.returnValueAggregateType();
+    size_t ReturnSize = *ReturnAggregate.size();
+    auto *Int8 = llvm::IntegerType::getInt8Ty(Context);
+    ReturnType = llvm::ArrayType::get(Int8, ReturnSize);
   } break;
 
   case ReturnMethod::Scalar: {
     // We either have a return value that fits in a single register, or it's
     // CABIFunctionDefinition returning stuff through registers
     unsigned Bits = 0;
-    for (const auto &ReturnValue : Layout.ReturnValues)
+    for (const Layout::ReturnValue &ReturnValue : Layout.ReturnValues)
       Bits += ReturnValue.Type->size().value() * 8;
     ReturnType = IntegerType::getIntNTy(Context, Bits);
   } break;
@@ -120,16 +113,7 @@ layoutToLLVMFunctionType(llvm::LLVMContext &Context,
     // We have a RawFunctionDefinition returning things over multiple
     // registers
     revng_assert(Layout.returnValueRegisterCount() > 1);
-    // Type each register by the portion its value occupies, as EnforceABI
-    // does, so that a narrower value in a multi-CSV register gets the same
-    // type in both
-    llvm::SmallVector<model::Register::Portion> Portions;
-    for (const auto &ReturnValue : Layout.ReturnValues) {
-      revng_assert(ReturnValue.Registers.size() == 1);
-      Portions.emplace_back(ReturnValue.Registers[0],
-                            *ReturnValue.Type->size());
-    }
-    auto Types = toLLVMTypes(Context, Portions);
+    auto Types = toLLVMTypes(Context, Layout.returnValueRegisters());
     ReturnType = StructType::get(Context, Types, true);
   } break;
 

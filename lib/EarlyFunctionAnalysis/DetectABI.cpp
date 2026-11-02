@@ -423,8 +423,8 @@ void DetectABI::findSlotCallees() {
     for (const model::Segment &Segment : Binary->Segments())
       for (const model::Relocation &Relocation : Segment.Relocations())
         if (Relocation.Address().address() == Address
-            and model::RelocationType::getSize(Relocation.Type())
-                  == PointerSize)
+            and Relocation.Type() == model::RelocationType::Absolute
+            and Relocation.Size() == PointerSize)
           return FunctionAt(Segment.StartAddress() + Relocation.Addend());
     return MetaAddress::invalid();
   };
@@ -1266,7 +1266,7 @@ void DetectABI::applyABIDeductions() {
   // reads it after its call; callers it does not show may read what any call
   // through a pointer reads after the call.
   abi::Definition::RegisterSet VectorReturnValues;
-  for (auto Register : ABI.VectorReturnValueRegisters())
+  for (auto Register : ABI.FloatReturnValueRegisters())
     VectorReturnValues.insert(Register);
   CSVSet VectorCSVs = csvsOf(VectorReturnValues);
   CSVSet ReadAfterUnknownCalls;
@@ -1475,6 +1475,28 @@ void DetectABI::propagatePrototypes() {
   }
 }
 
+/// Check if any of the CSVs holding \p Portions is in \p WrittenRegisters
+static bool isAnyWritten(llvm::Module &M,
+                         const CSVSet &WrittenRegisters,
+                         llvm::ArrayRef<model::Register::Portion> Portions) {
+  for (const model::Register::Portion &Portion : Portions) {
+    uint64_t PortionEnd = Portion.StartOffset + Portion.Size;
+    for (const model::Register::CSV &CSV :
+         model::Register::getCSVs(Portion.Register)) {
+      // Ignore the CSVs outside of the portion
+      if (CSV.StartOffset >= PortionEnd
+          or CSV.StartOffset + CSV.Size <= Portion.StartOffset)
+        continue;
+
+      auto *Variable = M.getGlobalVariable(CSV.Name, true);
+      if (Variable != nullptr and WrittenRegisters.contains(Variable))
+        return true;
+    }
+  }
+
+  return false;
+}
+
 // TODO: is this still necessary after the new EFA?
 void DetectABI::propagatePrototypesInFunction(model::Function &Function) {
   const MetaAddress &Entry = Function.Entry();
@@ -1526,14 +1548,12 @@ void DetectABI::propagatePrototypesInFunction(model::Function &Function) {
     const bool WritesSP = WrittenRegisters.contains(StackPointer);
 
     using std::ranges::count_if;
-    auto IsWrittenByCaller = [this, &WrittenRegisters](auto &Argument) {
-      auto *CSV = M.getGlobalVariable(model::Register::getName(Argument));
-      return WrittenRegisters.count(CSV);
-    };
     const auto &Arguments = CalleeLayout.argumentRegisters();
-    bool WritesCalleeArgs = any_of(Arguments, IsWrittenByCaller);
+    bool WritesCalleeArgs = isAnyWritten(M, WrittenRegisters, Arguments);
     const auto &ReturnValues = CalleeLayout.returnValueRegisters();
-    bool WritesCalleeReturnValues = any_of(ReturnValues, IsWrittenByCaller);
+    bool WritesCalleeReturnValues = isAnyWritten(M,
+                                                 WrittenRegisters,
+                                                 ReturnValues);
 
     bool WritesToMemory = count_if(*BB, isWritingToMemory) > 0;
     bool WritesOnlyRegisters = WritesToMemory == 0;
@@ -1845,7 +1865,7 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // that is no evidence: a copy through one leaves it so before most calls.
   abi::Definition::RegisterSet VectorArguments;
   for (auto Register : abi::Definition::get(Binary->DefaultABI())
-                         .VectorArgumentRegisters())
+                         .FloatArgumentRegisters())
     VectorArguments.insert(Register);
   CSVSet VectorCSVs = csvsOf(VectorArguments);
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)
@@ -1861,7 +1881,7 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                          .GeneralPurposeReturnValueRegisters())
     ABIReturnRegisters.insert(Register);
   for (auto Register : abi::Definition::get(Binary->DefaultABI())
-                         .VectorReturnValueRegisters())
+                         .FloatReturnValueRegisters())
     ABIReturnRegisters.insert(Register);
   CSVSet ABIReturnCSVs = csvsOf(ABIReturnRegisters);
   for (auto &[BlockID, CallSite] : ABIResults.CallSites)

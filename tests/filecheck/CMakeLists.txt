@@ -18,7 +18,9 @@ function(add_filecheck_test PATH)
 endfunction()
 
 set(FILECHECK_TESTS
+    clift/attributes/c-attribute-list.mlir
     clift/attributes/data-model.mlir
+    clift/attributes/switch.mlir
     clift/backend-transforms/immediate-radix-switch.mlir
     clift/backend-transforms/immediate-radix.mlir
     clift/backend/access.mlir
@@ -124,6 +126,7 @@ set(FILECHECK_TESTS
     clift/emit-field-accesses/array-struct-stride-mul.mlir
     clift/emit-field-accesses/array-struct-stride-shl.mlir
     clift/emit-field-accesses/common-strides-selection.mlir
+    clift/emit-field-accesses/inherited-const.mlir
     clift/emit-field-accesses/negative-stride-and-offset-no-rewrite.mlir
     clift/emit-field-accesses/struct-array-field-no-traverse.mlir
     clift/emit-field-accesses/struct-array-field-target.mlir
@@ -147,6 +150,11 @@ set(FILECHECK_TESTS
     clift/emit-field-accesses/struct-typedef-field-target.mlir
     clift/emit-field-accesses/struct-union-access.mlir
     clift/emit-field-accesses/union-array-stride-selection.mlir
+    clift/emit-header/array-of-pointer-to-typedef.mlir
+    clift/emit-header/array-of-typedef-chain.mlir
+    clift/emit-header/array-typedef-of-array-typedef.mlir
+    clift/emit-header/array-typedef-of-typedef.mlir
+    clift/emit-header/struct-with-array-of-typedef.mlir
     clift/expression-rewrites/addressof.mlir
     clift/expression-rewrites/assign-type-punned-discarded.mlir
     clift/expression-rewrites/assign-type-punned-read.mlir
@@ -202,11 +210,16 @@ set(FILECHECK_TESTS
     clift/expressions/decay-array.mlir
     clift/expressions/decay-function.mlir
     clift/expressions/decay-int.mlir
+    clift/expressions/direct-access-strips-qualifiers.mlir
     clift/expressions/extend-i32-to-i32.mlir
     clift/expressions/extend.mlir
+    clift/expressions/immediate.mlir
+    clift/expressions/immediate-out-of-range-max.mlir
+    clift/expressions/immediate-out-of-range-min.mlir
     clift/expressions/increment-const-local-variable.mlir
     clift/expressions/increment-immediate.mlir
     clift/expressions/increment-local-variable.mlir
+    clift/expressions/indirect-access-strips-qualifiers.mlir
     clift/expressions/object-access-of-wrong-type.mlir
     clift/expressions/object-access-out-of-range.mlir
     clift/expressions/pointer-add-of-two-pointers.mlir
@@ -229,6 +242,13 @@ set(FILECHECK_TESTS
     clift/expressions/truncate.mlir
     clift/expressions/use-global-variable.mlir
     clift/expressions/use-nonexistent-global-variable.mlir
+    clift/implicit-cast-elision/add.mlir
+    clift/implicit-cast-elision/assign.mlir
+    clift/implicit-cast-elision/if.mlir
+    clift/implicit-cast-elision/call.mlir
+    clift/implicit-cast-elision/neg.mlir
+    clift/implicit-cast-elision/not.mlir
+    clift/implicit-cast-elision/shl.mlir
     clift/model-import/ArrayType.yml
     clift/model-import/CABIFunctionType1.yml
     clift/model-import/CABIFunctionType2.yml
@@ -285,14 +305,18 @@ set(FILECHECK_TESTS
     clift/model-verify/raw-function-arguments/stack-with-arguments.mlir
     clift/model-verify/raw-function-arguments/stackless-stack.mlir
     clift/model-verify/raw-function-arguments/valid.mlir
+    clift/model-verify/stack-frame-variable/multiple.mlir
+    clift/model-verify/stack-frame-variable/valid.mlir
     clift/model-verify/type-attributes/argumentless-abi.mlir
     clift/model-verify/type-attributes/cft-with-raw-abi.mlir
     clift/model-verify/type-attributes/code-with-arguments.mlir
     clift/model-verify/type-attributes/double-abi.mlir
     clift/model-verify/type-attributes/double-code.mlir
     clift/model-verify/type-attributes/extra-code.mlir
+    clift/model-verify/type-attributes/extra-singleton.mlir
     clift/model-verify/type-attributes/missing-abi.mlir
     clift/model-verify/type-attributes/missing-code.mlir
+    clift/model-verify/type-attributes/missing-singleton.mlir
     clift/model-verify/type-attributes/multi-argument-abi.mlir
     clift/model-verify/type-attributes/non-identifier-abi.mlir
     clift/model-verify/type-attributes/rft-with-c-abi.mlir
@@ -300,8 +324,6 @@ set(FILECHECK_TESTS
     clift/model-verify/unknown-attributes/function-argument.mlir
     clift/model-verify/unknown-attributes/function-type.mlir
     clift/model-verify/unknown-attributes/function.mlir
-    clift/model-verify/unknown-attributes/non-c-argument.mlir
-    clift/model-verify/unknown-attributes/non-c-function.mlir
     clift/model-verify/unknown-attributes/struct.mlir
     clift/model-verify/unknown-attributes/valid.mlir
     clift/name-import/function-body/comments.mlir
@@ -314,9 +336,13 @@ set(FILECHECK_TESTS
     clift/name-import/header/known-primitive-aliases.mlir
     clift/name-import/header/struct.mlir
     clift/name-import/header/union.mlir
+    clift/operations/break-continue-no-label-valid.mlir
+    clift/operations/break-to-no-label-in-switch.mlir
+    clift/operations/break-to-no-label-outside-loop.mlir
     clift/operations/break-to-targets-continue-label.mlir
     clift/operations/break-to-targets-non-loop-label.mlir
     clift/operations/break-to-targets-non-nesting-loop-label.mlir
+    clift/operations/continue-to-no-label-outside-loop.mlir
     clift/operations/continue-to-targets-break-label.mlir
     clift/operations/continue-to-targets-non-loop-label.mlir
     clift/operations/continue-to-targets-non-nesting-loop-label.mlir
@@ -331,6 +357,11 @@ set(FILECHECK_TESTS
     clift/operations/goto-targets-nesting-loop-continue-label.mlir
     clift/operations/goto.mlir
     clift/operations/if-without-condition.mlir
+    clift/operations/indirection-result-adds-const.mlir
+    clift/operations/indirection-result-drops-const.mlir
+    clift/operations/indirection-result-type-mismatch.mlir
+    clift/operations/indirection-result-unwraps-pointee-typedef.mlir
+    clift/operations/indirection-valid.mlir
     clift/operations/label-without-assignment.mlir
     clift/operations/local-variable-self-assignment.mlir
     clift/operations/local-variable-with-mistyped-initializer.mlir
@@ -346,6 +377,13 @@ set(FILECHECK_TESTS
     clift/operations/return-with-valid-type.mlir
     clift/operations/return-with-void.mlir
     clift/operations/return-without-value.mlir
+    clift/operations/subscript-index-not-integer.mlir
+    clift/operations/subscript-pointer-not-a-pointer.mlir
+    clift/operations/subscript-pointer-to-function.mlir
+    clift/operations/subscript-result-adds-const.mlir
+    clift/operations/subscript-result-drops-const.mlir
+    clift/operations/subscript-result-type-mismatch.mlir
+    clift/operations/subscript-valid.mlir
     clift/operations/switch-with-cases.mlir
     clift/operations/switch-with-duplicate-cases.mlir
     clift/operations/switch-with-float-condition.mlir
@@ -354,25 +392,19 @@ set(FILECHECK_TESTS
     clift/operations/switch-with-pointer-condition.mlir
     clift/operations/switch-without-condition.mlir
     clift/operations/while-without-condition.mlir
-    clift/passes/implicit-cast-elision-add.mlir
-    clift/passes/implicit-cast-elision-assign.mlir
-    clift/passes/implicit-cast-elision-if.mlir
-    clift/passes/implicit-cast-elision-call.mlir
-    clift/passes/implicit-cast-elision-neg.mlir
-    clift/passes/implicit-cast-elision-not.mlir
-    clift/passes/implicit-cast-elision-shl.mlir
     clift/reformat/normalization.mlir
     clift/reformat/tag-preservation.mlir
     clift/serialization/const.mlir
     clift/statement-rewrites/branch-equalization.mlir
     clift/statement-rewrites/do-while-conversion-iterative.mlir
     clift/statement-rewrites/do-while-conversion-with-empty-else.mlir
-    clift/statement-rewrites/do-while-conversion-with-hoisted-else.mlir
-    clift/statement-rewrites/do-while-conversion-with-hoisted-then.mlir
+    clift/statement-rewrites/do-while-conversion-with-empty-then.mlir
     clift/statement-rewrites/if-and-combining-with-else-1.mlir
     clift/statement-rewrites/if-and-combining-with-else-2.mlir
     clift/statement-rewrites/if-and-combining-with-else-3.mlir
     clift/statement-rewrites/if-and-combining-without-else.mlir
+    clift/statement-rewrites/jump-duplication-if.mlir
+    clift/statement-rewrites/jump-duplication-switch.mlir
     clift/statement-rewrites/label-merging-assign-assign.mlir
     clift/statement-rewrites/label-merging-break-assign.mlir
     clift/statement-rewrites/label-merging-continue-assign.mlir
@@ -386,28 +418,10 @@ set(FILECHECK_TESTS
     clift/statement-rewrites/loop-detection-consecutive.mlir
     clift/statement-rewrites/loop-detection-nested.mlir
     clift/statement-rewrites/loop-detection-overlapping.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-both-fallthrough.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto-else-shorter.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto-trailing-label.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto-trailing-statement.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-both-goto.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-else-goto.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-empty-else.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-empty-then-block.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-empty-then.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-if-precedence-break.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-if-precedence-continue.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-if-precedence-return.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-all-nofallthrough.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-case.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-default.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-no-default.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-precedence-break.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-precedence-continue.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-precedence-return.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-trailing-statement.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-switch-two-fallthrough.mlir
-    clift/statement-rewrites/terminal-branch-complement-hoisting-then-goto.mlir
+    clift/statement-rewrites/loop-detection-unreachable-body-end.mlir
+    clift/statement-rewrites/promote-break-continue-nested-loop.mlir
+    clift/statement-rewrites/promote-break-continue-switch.mlir
+    clift/statement-rewrites/promote-break-continue.mlir
     clift/statement-rewrites/trivial-jump-elimination.mlir
     clift/statement-rewrites/trivial-return-elimination-double.mlir
     clift/statement-rewrites/trivial-return-elimination-early.mlir
@@ -415,6 +429,17 @@ set(FILECHECK_TESTS
     clift/statement-rewrites/trivial-return-elimination.mlir
     clift/statement-rewrites/variable-initializer-hoisting-with-self-assignment.mlir
     clift/statement-rewrites/variable-initializer-hoisting.mlir
+    clift/statement-rewrites/while-conversion-with-empty-else.mlir
+    clift/statement-rewrites/while-conversion-with-empty-then.mlir
+    clift/statement-rewrites/while-conversion-with-hoisted-else.mlir
+    clift/statement-rewrites/while-conversion-with-hoisted-then.mlir
+    clift/terminal-branch-hoisting/hoist-infinite-loop-else-over-jumping-then.mlir
+    clift/terminal-branch-hoisting/hoist-large-else-over-small-then.mlir
+    clift/terminal-branch-hoisting/hoist-large-then-over-small-else.mlir
+    clift/terminal-branch-hoisting/hoist-loop-breaking-case-over-larger-default.mlir
+    clift/terminal-branch-hoisting/hoist-noreturn-else-over-jumping-then.mlir
+    clift/terminal-branch-hoisting/skip-hoist-of-breaking-loop-else.mlir
+    clift/terminal-branch-hoisting/skip-hoist-over-unreachable-statement.mlir
     clift/type-refinement/backward-add-refinement.mlir
     clift/type-refinement/backward-neg-refinement.mlir
     clift/type-refinement/backward-ternary-refinement.mlir
@@ -484,9 +509,12 @@ set(FILECHECK_TESTS
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S
     lift/wide-division-quotient-bit.S
+    clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
+    clift/unique-fallthrough-branch-hoisting/hoist-then.mlir
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll
+    llvm-passes/early-type-shrinking.ll
     llvm-passes/enforce-single-exit.ll
     llvm-passes/example.ll
     llvm-passes/exit-ssa-live-incoming.ll
@@ -507,10 +535,15 @@ set(FILECHECK_TESTS
     llvm-passes/scope-graph-dumper.ll
     llvm-passes/select-scope.ll
     llvm-passes/slim-down-helpers-module-constants.ll
+    llvm-passes/simplify-comparisons.ll
     llvm-passes/split-exponential-dataflow.ll
     llvm-passes/split-struct-phis.ll
     llvm-passes/switch-to-statements.ll
     llvm-passes/type-shrinking-order.ll
+    llvm-passes/type-shrinking-flags.ll
+    llvm-passes/type-shrinking-ranges.ll
+    llvm-passes/type-shrinking-widths.ll
+    llvm-passes/type-shrinking.ll
     model/drop-types/ArrayPropagation.yml
     model/drop-types/DropStructField.yml
     model/drop-types/DropViaPointer.yml

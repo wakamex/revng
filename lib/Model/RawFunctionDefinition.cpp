@@ -18,7 +18,7 @@ model::RawFunctionDefinition::orderedArguments() const {
     for (model::Register::Values Register :
          ABI.GeneralPurposeArgumentRegisters())
       Rank.emplace(Register, Rank.size());
-    for (model::Register::Values Register : ABI.VectorArgumentRegisters())
+    for (model::Register::Values Register : ABI.FloatArgumentRegisters())
       Rank.emplace(Register, Rank.size());
   }
 

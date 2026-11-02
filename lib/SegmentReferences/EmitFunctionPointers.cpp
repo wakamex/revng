@@ -110,9 +110,9 @@ private:
                                 const model::Function &ModelFunction) const {
     auto *Prototype = Binary.prototypeOrDefault(ModelFunction.prototype());
     auto TheLayout = abi::FunctionType::Layout::make(notNull(Prototype));
-    return layoutToLLVMFunctionType<false>(M.getContext(),
-                                           Binary.Architecture(),
-                                           TheLayout);
+    return layoutToLLVMFunctionType(M.getContext(),
+                                    Binary.Architecture(),
+                                    TheLayout);
   }
 
   llvm::Function &getOrCreateFunctionFor(llvm::Module &M,

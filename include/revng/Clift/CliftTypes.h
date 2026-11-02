@@ -227,10 +227,6 @@ bool isScalarType(mlir::Type Type);
 /// Qualifiers are ignored.
 bool isCallableType(mlir::Type Type);
 
-/// If the type, after unwrapping typedefs, is a function type or a pointer to a
-/// function type, returns that function type.
-FunctionType getFunctionOrFunctionPointerFunctionType(mlir::Type Type);
-
 /// While an instance is alive, bytecode written on this thread stores each
 /// class type whose handle \p Omit accepts as its handle alone, without its
 /// definition. Reading such a type gives the class type of that handle in the

@@ -78,7 +78,7 @@ ValueDistributor::distribute(uint64_t Size,
     bool MultiAligned = (Size >= PointerSize && Alignment > PointerSize)
                         || (Size > PointerSize
                             && ABI.BigArgumentsUsePointersToCopy());
-    bool LastRegisterUsed = ConsideredRegisterCounter == OccupiedRegisterCount;
+    bool LastRegisterUsed = ConsideredRegisterCounter == Registers.size();
     bool FirstRegisterOdd = (OccupiedRegisterCount & 1) != 0;
     if (MultiAligned && !LastRegisterUsed && FirstRegisterOdd) {
       LoggerIndent Indentation(Log);
@@ -91,15 +91,18 @@ ValueDistributor::distribute(uint64_t Size,
         // Omit marking the very last register as padding since the argument
         // is going to end up on the stack anyway.
       } else {
+        revng_assert(OccupiedRegisterCount < Registers.size());
+
         // Add an extra "padding" argument to represent this.
         DistributedValue &Padding = Result.emplace_back();
         Padding.Registers = { Registers[OccupiedRegisterCount++] };
         Padding.Size = PointerSize;
         Padding.RepresentsPadding = true;
+
+        // The padding register does not count towards the limit
+        ++LastRegister;
       }
 
-      revng_assert(SizeCounter >= PointerSize);
-      SizeCounter -= PointerSize;
       if (ConsideredRegisterCounter < LastRegister)
         ++ConsideredRegisterCounter;
     }
@@ -111,6 +114,7 @@ ValueDistributor::distribute(uint64_t Size,
   bool AllowSplitting = CanUseRegisters
                         && !ForbidSplittingBetweenRegistersAndStack
                         && ABI.ArgumentsCanBeSplitBetweenRegistersAndStack();
+  revng_assert(ConsideredRegisterCounter <= Registers.size());
   bool AllTheRegistersAreInUse = ConsideredRegisterCounter == LastRegister;
   if (SizeCounter >= Size && CanUseRegisters) {
     // This a register-only argument, add the registers.
@@ -202,20 +206,21 @@ ArgumentDistributor::nonPositionBased(bool IsScalar,
   uint64_t *RegisterCounter = nullptr;
   std::span<const model::Register::Values> RegisterList;
   if (IsFloat && !ABI.FloatsUseGPRs()) {
-    RegisterList = ABI.VectorArgumentRegisters();
-    RegisterCounter = &UsedVectorRegisterCount;
+    RegisterList = ABI.FloatArgumentRegisters();
+    RegisterCounter = &UsedFloatRegisterCount;
 
     if (RegisterList.size() > *RegisterCounter) {
       // The conventional non-position based approach is not applicable for
-      // vector registers since it's rare for multiple registers to be used
+      // float registers since it's rare for multiple registers to be used
       // to pass a single argument.
       //
-      // For now, provide at most a single vector register for such a value,
+      // For now, provide at most a single float register for such a value,
       // if there's a free one.
       //
-      // TODO: find reproducers and handle the cases where multiple vector
+      // TODO: find reproducers and handle the cases where multiple float
       //       registers are used together.
       DistributedValue Result;
+      Result.Size = Size;
       Result.Registers.emplace_back(RegisterList[(*RegisterCounter)++]);
       // Record the value's size; without it the portion is zero-sized and
       // downstream typing builds a zero-width integer.
@@ -228,7 +233,7 @@ ArgumentDistributor::nonPositionBased(bool IsScalar,
       RegisterLimit = 0;
     }
 
-    // Explicitly disallow splitting vector arguments across the registers
+    // Explicitly disallow splitting float arguments across the registers
     // and the stack.
     ForbidSplitting = true;
   } else {
@@ -272,7 +277,12 @@ ArgumentDistributor::nonPositionBased(bool IsScalar,
     if (Current == Next)
       return true; // No registers were used for this argument.
 
-    if (Next >= Current && Next <= Current + RegisterLimit)
+    uint64_t PaddingByteCount = 0;
+    for (auto &Distributed : Result)
+      if (Distributed.RepresentsPadding)
+        PaddingByteCount += Distributed.Registers.size();
+
+    if (Next >= Current && Next - PaddingByteCount <= Current + RegisterLimit)
       return true; // It's within the expected boundaries.
 
     if (Next == RegisterList.size()) {
@@ -298,14 +308,14 @@ DistributedValues ArgumentDistributor::positionBased(bool IsFloat,
     Result.Size = ABI.getPointerSize();
     Result.UsesPointerToCopy = true;
 
-    // Pointers never use vector registers.
+    // Pointers never use float registers.
     IsFloat = false;
   }
 
   bool UseVR = ABI.FloatsUseGPRs() ? false : IsFloat;
-  const auto &UsedRegisters = UseVR ? ABI.VectorArgumentRegisters() :
+  const auto &UsedRegisters = UseVR ? ABI.FloatArgumentRegisters() :
                                       ABI.GeneralPurposeArgumentRegisters();
-  uint64_t &UsedRegisterCount = UseVR ? UsedVectorRegisterCount :
+  uint64_t &UsedRegisterCount = UseVR ? UsedFloatRegisterCount :
                                         UsedGeneralPurposeRegisterCount;
 
   uint64_t CurrentArgumentIndex = nextPositionBasedIndex();
@@ -342,7 +352,7 @@ DistributedValue ReturnValueDistributor::returnValue(const model::Type &Type) {
   uint64_t Limit = 0;
   std::span<const model::Register::Values> RegisterList;
   if (Type.isFloatPrimitive() and not ABI.FloatsUseGPRs()) {
-    RegisterList = ABI.VectorReturnValueRegisters();
+    RegisterList = ABI.FloatReturnValueRegisters();
 
     // For now replace unsupported floating point return values with `void`
     // The main offenders are the values returned in `st0`.

@@ -140,9 +140,11 @@ static void createLoop(FunctionOp Function,
 
     // The last looping-goto has been erased and is no longer needed:
     Gotos = Gotos.drop_back(1);
-  } else {
-    // If the last looping-goto is conditional, a break must be inserted at the
-    // end of the loop body.
+  } else if (isIndirectlyFallthrough(Loop.getBody())) {
+    // If the last looping-goto is conditional, a break is needed at the end of
+    // the loop body, to turn falling out of the body into a loop exit. Not so
+    // if the end of the body cannot be reached: such a break is unreachable,
+    // and no later pass removes it.
 
     mlir::Value BreakLabel = createLabel(Builder, Function, LoopLoc);
     Loop.setBreakLabel(BreakLabel);
@@ -170,7 +172,8 @@ static void createLoop(FunctionOp Function,
   // loop, any gotos targeting that label from within the loop are converted
   // into break-to operations targeting the loop's break-label.
   if (auto BreakAssignment = getNextOp<AssignLabelOp>(Loop)) {
-    for (mlir::Operation *User : BreakAssignment.getLabel().getUsers()) {
+    auto &&Users = BreakAssignment.getLabel().getUsers();
+    for (mlir::Operation *User : llvm::make_early_inc_range(Users)) {
       auto Goto = mlir::dyn_cast<GotoOp>(User);
       if (not Goto)
         continue;
@@ -197,7 +200,8 @@ static void createLoop(FunctionOp Function,
   // convert gotos targeting this label into continue-to operations here would
   // result in verification failures later after label merging.
   if (auto ContinueAssignment = getLastOp<AssignLabelOp>(Loop.getBody())) {
-    for (mlir::Operation *User : ContinueAssignment.getLabel().getUsers()) {
+    auto &&Users = ContinueAssignment.getLabel().getUsers();
+    for (mlir::Operation *User : llvm::make_early_inc_range(Users)) {
       auto Goto = mlir::dyn_cast<GotoOp>(User);
       if (not Goto)
         continue;

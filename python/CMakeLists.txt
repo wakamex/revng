@@ -221,7 +221,10 @@ set(PYTHON_MODEL_MIGRATIONS_FILES
     revng/model/migrations/versions/v8.py
     revng/model/migrations/versions/v9.py
     revng/model/migrations/versions/v10.py
-    revng/model/migrations/versions/v11.py)
+    revng/model/migrations/versions/v11.py
+    revng/model/migrations/versions/v12.py
+    revng/model/migrations/versions/v13.py
+    revng/model/migrations/versions/v14.py)
 python_module(TARGET_NAME python-model-migrations WHEEL revng MODULE_FILES
               ${PYTHON_MODEL_MIGRATIONS_FILES})
 
@@ -341,9 +344,12 @@ set(REVNG_CLI_COMMANDS_MODULE_FILES
     revng/internal/cli/_commands/llm_rename/prompt.tpl
     revng/internal/cli/_commands/hard_purge.py
     revng/internal/cli/_commands/process_docs_yaml/__init__.py
+    revng/internal/cli/_commands/project_agent/__init__.py
+    revng/internal/cli/_commands/project_agent/prompt.tpl
     revng/internal/cli/_commands/tar_to_yaml.py
     revng/internal/cli/_commands/test_docs/__init__.py
     revng/internal/cli/_commands/test_docs/doctest_runner.py
+    revng/internal/cli/_commands/daemon_manager.py
     revng/internal/cli/_commands/groups.py
     revng/internal/cli/_commands/merge-irs.py
     revng/internal/cli/_commands/model_compare.py

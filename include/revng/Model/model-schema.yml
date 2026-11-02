@@ -2,7 +2,7 @@
 # This file is distributed under the MIT License. See LICENSE.md for details.
 #
 
-version: 11
+version: 14
 root_type: Binary
 
 definitions:
@@ -73,6 +73,14 @@ definitions:
         sequence:
           type: SortedVector
           elementType: BinaryIdentifier
+
+      - name: AddressSpaces
+        doc: |-
+          Properties of the address spaces in use, see `AddressSpace`.
+          An address space without an entry here has the default properties.
+        sequence:
+          type: SortedVector
+          elementType: AddressSpace
 
       - name: Segments
         doc: |-
@@ -415,11 +423,29 @@ definitions:
         doc: The size, in bytes, of the `struct`.
         type: uint64_t
 
+      - name: IsSingleton
+        doc: |-
+          A "singleton" `struct` is a `struct` that can only be used as a field
+          of another singleton `struct` or as the type of a segment or a stack
+          frame. It cannot be instantiated anywhere else.
+
+          The main use case is making the hierarchy of `struct`s composing
+          segments and sections (or similar concepts) in the type of a
+          `Segment`.
+
+          This also introduces an informal definition of "global variable",
+          i.e., a field in the innermost singleton `struct` representing the
+          type of segment.
+        type: bool
+
       - name: CanContainCode
         doc: |-
           When this field is set to `true` *and* this `struct` is reachable for
           a segment's root type without traversing pointers, arrays or other
           qualifiers, the padding of the struct is treated as if it contains code.
+
+          A model with `CanContainCode` set to `true` and `IsSingleton` set to
+          `false` is invalid.
         type: bool
 
       - name: Fields
@@ -550,14 +576,11 @@ definitions:
           { 1, 2, 4, 8, 16 }
           ```
 
-          Note that *only* floating point primitives (and `Generic` primitives,
-          whose kind is not known, so they are assumed to be floating point
-          compatible) can also have additional sizes:
+          Floating point primitives are further restricted to just C's
+          `float` and `double`:
           ```
-          { 10, 12 }
+          { 4, 8 }
           ```
-
-          Note that 1-byte floating point primitives are not allowed.
 
           Note that `Void` *must* have size of 0.
         type: uint64_t
@@ -584,7 +607,7 @@ definitions:
           kinds, except for `Void`.
 
           Written in C as `generic8_t`, `generic16_t`, `generic32_t`,
-          `generic64_t`, `generic80_t`, `generic96_t`, `generic128_t`.
+          `generic64_t`, `generic128_t`, `generic256_t`, `generic512_t`.
 
       - name: PointerOrNumber
         doc: |-
@@ -619,9 +642,7 @@ definitions:
         doc: |-
           A IEEE 754 floating point number.
 
-          Written in C as `float16_t`, `float32_t`, `float64_t`, `float80_t`,
-          `float96_t`, `float128_t` -- so C's `float` is `float32_t` and
-          `double` is `float64_t`. There is no `float8_t`.
+          Written in C as `float32_t` (for `float`) and `float64_t` (for `double`).
 
   - name: PointerType
     inherits: Type
@@ -710,6 +731,31 @@ definitions:
           In case of Windows binaries, use UNIX paths relative to C:\ (e.g., use
           /Windows for C:\Windows).
         type: string
+
+  - name: AddressSpace
+    type: struct
+
+    doc: |-
+      Properties of an address space, i.e., the `AddressSpace` component of a
+      `MetaAddress`.
+
+    key:
+      - Index
+
+    fields:
+      - name: Index
+        doc: The address space these properties apply to.
+        type: uint64_t
+
+      - name: IsPositionIndependent
+        doc: |-
+          Whether the content of the segments in this address space can be
+          loaded at an arbitrary address.
+          If `true`, every absolute pointer they contain is described by a
+          `Relocation`, so analyses do not look for pointers in their raw
+          content.
+        type: bool
+        default: true
 
   - name: Segment
     type: struct
@@ -1040,10 +1086,12 @@ definitions:
         type: MetaAddress
 
       - name: Type
-        doc: |-
-          How to write the address of the object (e.g., 32-bit vs 64-bit
-          integer).
+        doc: How to write the address of the object (e.g., absolute or relative).
         type: RelocationType
+
+      - name: Size
+        doc: Size, in bytes, of the integer written by the relocation.
+        type: uint64_t
 
       - name: Addend
         doc: Fixed offset to add when writing the address of the object.
@@ -1057,41 +1105,13 @@ definitions:
       address.
 
     members:
-      - name: WriteAbsoluteAddress32
-        doc: Write the absolute address of the object as a 32-bit integer.
+      - name: Absolute
+        doc: Write the absolute address of the object.
 
-      - name: WriteAbsoluteAddress64
-        doc: Write the absolute address of the object as a 64-bit integer.
-
-      - name: AddAbsoluteAddress32
+      - name: PCRelative
         doc: |-
-          Add to the 32-bit integer present at the target location the absolute
-          address of the object.
-
-      - name: AddAbsoluteAddress64
-        doc: |-
-          Add to the 64-bit integer present at the target location the absolute
-          address of the object.
-
-      - name: WriteRelativeAddress32
-        doc: |-
-          Write the address of the object as a 32-bit integer, expressed as a
-          relative from the target of the relocation.
-
-      - name: WriteRelativeAddress64
-        doc: |-
-          Write the address of the object as a 64-bit integer, expressed as a
-          relative from the target of the relocation.
-
-      - name: AddRelativeAddress32
-        doc: |-
-          Add to the 32-bit integer present at the target location the address of
-          the object, expressed as a relative from the target of the relocation.
-
-      - name: AddRelativeAddress64
-        doc: |-
-          Add to the 64-bit integer present at the target location the address of
-          the object, expressed as a relative from the target of the relocation.
+          Write the address of the object minus the address the relocation is
+          applied to (`Address`).
 
   - name: CallSitePrototype
     type: struct
@@ -1815,7 +1835,7 @@ definitions:
                      This part
           ```
         type: bool
-        default: false
+        default: true
 
       - name: UseX86ATTSyntax
         doc: |-

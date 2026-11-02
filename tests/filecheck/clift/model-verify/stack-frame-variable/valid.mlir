@@ -2,12 +2,15 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-// RUN: %root/bin/revng pipe verify-against-model %S/model.yml %s /dev/null
+// RUN: %root/bin/revng pipeline run-pipe verify-against-model %S/model.yml <(%pipe_input %s) /dev/null
 
 !void = !clift.void
 !frame = !clift.struct<"/type-definition/0-StructDefinition" as "frame" : size(8) {}>
 !f = !clift.func<"/type-definition/1-CABIFunctionDefinition" as "f" : !void()
-  [#clift.c_attribute<"_ABI" : "/macro/_ABI" [#clift.identifier<"SystemV_x86_64">]>]>
+  #clift.c_attribute_list<
+    <"_ABI" : "/macro/_ABI" [#clift.identifier<"SystemV_x86_64">]>
+  >
+>
 
 module attributes { clift.module, clift.types = [ !frame, !f ] } {
 

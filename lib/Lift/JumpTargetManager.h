@@ -592,8 +592,11 @@ private:
 
   void prepareDispatcher();
 
-  /// Register \p Value, a candidate code pointer stored at \p Location
-  void registerCodePointer(MetaAddress Value, MetaAddress Location);
+  /// Register as jump targets the code pointers described by relocations
+  void findRelocatedCodePointers();
+
+  /// Register \p PC, stored at \p Location, as a jump target
+  void registerCodePointer(MetaAddress Location, MetaAddress PC);
 
   template<typename value_type, unsigned endian>
   void findCodePointers(MetaAddress StartVirtualAddress,
@@ -629,7 +632,8 @@ private:
 
   unsigned NewBranches = 0;
 
-  /// Code pointers found in global data, by the address they are stored at
+  /// Code pointers found in global data and never loaded, indexed by the
+  /// address where they are stored
   std::map<MetaAddress, MetaAddress> UnusedCodePointers;
   interval_set ReadIntervalSet;
 

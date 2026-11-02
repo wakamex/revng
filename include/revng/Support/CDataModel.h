@@ -21,6 +21,11 @@ enum class CStandardType : uint8_t {
 
   Float,
   Double,
+
+  // Because we do not have support for any floating point types except for 4-
+  // and 8-byte ones, this is equivalent to `Double`.
+  //
+  // Note that this will likely change in the future.
   LongDouble,
 
   Count
@@ -159,8 +164,10 @@ public:
   [[nodiscard]] friend size_t hash_value(const CDataModel &DM) {
     size_t HashCode = llvm::hash_code(DM.PointerSize);
 
-    for (int I = 0; I < static_cast<int>(CStandardType::Count); ++I)
-      HashCode = llvm::hash_combine(llvm::hash_code(DM.StandardTypeSize[I]));
+    for (int I = 0; I < static_cast<int>(CStandardType::Count); ++I) {
+      HashCode = llvm::hash_combine(HashCode,
+                                    llvm::hash_code(DM.StandardTypeSize[I]));
+    }
 
     return HashCode;
   }

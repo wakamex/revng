@@ -20,15 +20,16 @@ collectReadOnlyFunctionPointers(const model::Binary &Model,
   std::map<MetaAddress, std::vector<uint64_t>> RelocationSizes;
   for (const auto &Segment : Model.Segments())
     for (const auto &Relocation : Segment.Relocations())
-      RelocationSizes[Relocation.Address()].push_back(Relocation.size());
+      RelocationSizes[Relocation.Address()].push_back(Relocation.Size());
   for (const auto &Function : Model.ImportedDynamicFunctions())
     for (const auto &Relocation : Function.Relocations())
-      RelocationSizes[Relocation.Address()].push_back(Relocation.size());
+      RelocationSizes[Relocation.Address()].push_back(Relocation.Size());
 
   for (const auto &Segment : Model.Segments()) {
     for (const auto &Relocation : Segment.Relocations()) {
       MetaAddress Address = Relocation.Address();
-      if (Relocation.Type() != model::RelocationType::AddAbsoluteAddress64)
+      if (Relocation.Type() != model::RelocationType::Absolute
+          or Relocation.Size() != 8)
         continue;
       auto End = OverflowSafeInt<uint64_t>(Address.address()) + 8;
       if (not End)

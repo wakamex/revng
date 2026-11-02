@@ -514,6 +514,10 @@ static mlir::Type getOperationType(ImmediateOp Immediate) {
   return Immediate.getType();
 }
 
+static mlir::Type getOperationType(BoolExtendOp Extend) {
+  return Extend.getType();
+}
+
 static mlir::Type getOperationType(mlir::Operation *Op) {
   return Op->getOperand(0).getType();
 }
@@ -592,7 +596,6 @@ mlir::LogicalResult clift::legalizeForC(clift::FunctionOp Function) {
     Set.add<ResizePtrDiffPattern>(Context, DataModel);
     Set.add<PointerResizePattern<IndirectionOp>>(Context, DataModel);
     Set.add<PointerResizePattern<SubscriptOp>>(Context, DataModel);
-    Set.add<PointerResizePattern<DirectAccessOp>>(Context, DataModel);
     Set.add<PointerResizePattern<IndirectAccessOp>>(Context, DataModel);
     Set.add<PointerResizePattern<CallOp>>(Context, DataModel);
     Set.add<ResizeAddressofPattern>(Context, DataModel);
@@ -686,12 +689,12 @@ mlir::LogicalResult clift::legalizeForC(clift::FunctionOp Function) {
     Set.add<IntrinsicPattern<DecrementOp>>(Context, DataModel);
     Set.add<IntrinsicPattern<PostIncrementOp>>(Context, DataModel);
 
+    Set.add<IntrinsicPattern<TestOp>>(Context, DataModel);
+    Set.add<IntrinsicPattern<BoolExtendOp>>(Context, DataModel);
+
     Set.add<IntrinsicCastPattern<ZeroExtendOp>>(Context, DataModel);
     Set.add<IntrinsicCastPattern<SignExtendOp>>(Context, DataModel);
     Set.add<IntrinsicCastPattern<TruncateOp>>(Context, DataModel);
-
-    // TODO: Boolean tests should be represented by an expression operation, and
-    //       that operation should then be marked as intrinsic as needed.
 
     auto Patterns = mlir::FrozenRewritePatternSet(std::move(Set));
     if (mlir::applyPatternsAndFoldGreedily(Function, Patterns).failed())

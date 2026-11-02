@@ -1045,8 +1045,8 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
     for (const model::Segment &Segment : Binary->Segments()) {
       for (const model::Relocation &Relocation : Segment.Relocations()) {
         if (Relocation.Address().address() != Address
-            or model::RelocationType::getSize(Relocation.Type())
-                 != PointerSize)
+            or Relocation.Type() != model::RelocationType::Absolute
+            or Relocation.Size() != PointerSize)
           continue;
         MetaAddress Target = (Segment.StartAddress() + Relocation.Addend())
                                .toPC(Binary->Architecture());
@@ -1064,8 +1064,8 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
          Binary->ImportedDynamicFunctions())
       for (const model::Relocation &Relocation : Function.Relocations())
         if (Relocation.Address().address() == Address
-            and model::RelocationType::getSize(Relocation.Type())
-                  == PointerSize
+            and Relocation.Type() == model::RelocationType::Absolute
+            and Relocation.Size() == PointerSize
             and Relocation.Addend() == 0)
           return Function.Name();
     return {};

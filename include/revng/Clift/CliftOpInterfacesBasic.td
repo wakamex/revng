@@ -41,21 +41,24 @@ def Clift_StatementOpInterface : Clift_OpInterface<"StatementOpInterface"> {
 
   let methods = [
     InterfaceMethod<
-      /*desc=*/"Classifies how the operation is indirectly non-fallthrough, as "
-               "opposed to being directly marked with the NoFallthrough trait. "
-               "For example, an if-else operation whose branches both end in "
-               "non-fallthrough operations is indirectly non-fallthrough, with "
-               "the kind those branches agree on (or Mixed if they disagree).",
-      "clift::NoFallthroughKind", "isIndirectlyNoFallthrough", (ins),
+      /*desc=*/"Returns true if the operation is indirectly non-fallthrough."
+               "This is as opposed to being directly marked with the "
+               "NoFallthrough trait. For example, an if-else operation whose "
+               "both branches end in non-fallthrough operations is considered "
+               "indirectly non-fallthrough.",
+      "bool", "isIndirectlyNoFallthrough", (ins),
       /*methodBody=*/[{}],
       /*defaultImplementation=*/ [{
-        // Only operations that do not carry the NoFallthrough trait reach this
-        // default: the region classifier maps trait-carrying terminators to
-        // their kind before ever querying the operation. Loops are the notable
-        // case; we conservatively treat them as falling through, since we do
-        // not analyse whether a loop always terminates through its body or may
-        // run forever.
-        return clift::NoFallthroughKind::FallsThrough;
+        return ConcreteOp::template hasTrait<clift::NoFallthrough>();
+      }]
+    >,
+    InterfaceMethod<
+      /*desc=*/"Returns true if the region represents a statement-scoped "
+               "local variable declaration.",
+      "bool", "isDeclaratorRegion", (ins "mlir::Region &":$Region),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/ [{
+        return false;
       }]
     >,
     InterfaceMethod<
@@ -151,15 +154,15 @@ def Clift_StatementRegionOpInterface
       /*methodBody=*/[{}],
       /*defaultImplementation=*/ [{}]
     >,
-    InterfaceMethod<
-      /*desc=*/"Returns the statement regions of this operation.",
-      "clift::StatementRegionRange", "getStatementRegions", (ins),
-      /*methodBody=*/[{}],
-      /*defaultImplementation=*/ [{
-        return StatementRegionRange($_op, 0, $_op.getStatementRegionCount());
-      }]
-    >,
   ];
+
+  let extraSharedClassDeclaration = [{
+    [[nodiscard]] StatementRegionRange getStatementRegions() {
+      return StatementRegionRange($_op,
+                                  0,
+                                  $_op.getStatementRegionCount());
+    }
+  }];
 }
 
 def Clift_ExpressionRegionOpInterface
@@ -184,15 +187,15 @@ def Clift_ExpressionRegionOpInterface
       /*methodBody=*/[{}],
       /*defaultImplementation=*/ [{}]
     >,
-    InterfaceMethod<
-      /*desc=*/"Returns the expression regions of this operation.",
-      "clift::ExpressionRegionRange", "getExpressionRegions", (ins),
-      /*methodBody=*/[{}],
-      /*defaultImplementation=*/ [{
-        return ExpressionRegionRange($_op, 0, $_op.getExpressionRegionCount());
-      }]
-    >,
   ];
+
+  let extraSharedClassDeclaration = [{
+    [[nodiscard]] ExpressionRegionRange getExpressionRegions() {
+      return ExpressionRegionRange($_op,
+                                   0,
+                                   $_op.getExpressionRegionCount());
+    }
+  }];
 }
 
 #endif

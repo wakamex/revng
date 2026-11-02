@@ -907,16 +907,13 @@ private:
     auto NameAttr = makeNameAttr<clift::FunctionType>(Context, Handle);
     auto CommentAttr = makeCommentAttr<clift::FunctionType>(Context, Handle);
 
-    // TODO: should we add something explicitly identifying this as a helper?
-    llvm::ArrayRef<clift::CAttributeAttr> Attributes = {};
-
     auto FunctionType = clift::FunctionType::get(Context,
                                                  Handle,
                                                  NameAttr,
                                                  CommentAttr,
                                                  ReturnType,
                                                  ParameterTypes,
-                                                 Attributes);
+                                                 /*AttributeList=*/{});
 
     return emitHelperCall(Loc,
                           C.getHelperFunction(HelperName, FunctionType),
@@ -1390,29 +1387,27 @@ private:
       auto CallType = C.importType<clift::FunctionType>(*ModelCallType);
 
       revng_log(ExpressionLog, "Callee subexpression:");
-      mlir::Value Function = (LoggerIndent(ExpressionLog),
-                              rc_recur emitExpression(I->getCalledOperand(),
-                                                      Loc));
+      mlir::Value Callee = (LoggerIndent(ExpressionLog),
+                            rc_recur emitExpression(I->getCalledOperand(),
+                                                    Loc));
 
-      clift::FunctionType
-        FunctionType = getFunctionOrFunctionPointerFunctionType(Function
-                                                                  .getType());
+      auto FuncType = clift::unwrapped_dyn_cast<FunctionType>(Callee.getType());
+
+      if (auto P = clift::unwrapped_dyn_cast<PointerType>(Callee.getType()))
+        FuncType = clift::unwrapped_dyn_cast<FunctionType>(P.getPointeeType());
 
       // If the call type does not match the function type of the callee,
       // the callee must first be converted to a pointer to the appropriate
       // function type:
-      if (CallType != FunctionType) {
-        // If the callee is a function and not a pointer to function, it must
-        // be decayed to a pointer before applying the type conversion:
-        if (mlir::isa<clift::FunctionType>(Function.getType())) {
-          Function = Builder.create<DecayOp>(Loc,
-                                             C.getPointerType(FunctionType),
-                                             Function);
-        }
+      if (FuncType != CallType) {
+        // If the callee is a function, it must be decayed to a pointer before
+        // applying the type conversion:
+        if (clift::unwrapped_isa<FunctionType>(Callee.getType()))
+          Callee = Builder.create<DecayOp>(Loc,
+                                           C.getPointerType(Callee.getType()),
+                                           Callee);
 
-        Function = emitImplicitBitcast(Loc,
-                                       Function,
-                                       C.getPointerType(CallType));
+        Callee = emitImplicitBitcast(Loc, Callee, C.getPointerType(CallType));
       }
 
       llvm::ArrayRef LayoutArguments = getLayoutArguments(Layout);
@@ -1448,7 +1443,7 @@ private:
       revng_log(ExpressionLog, "CallOp");
       mlir::Value Result = Builder.create<CallOp>(Loc,
                                                   CallType.getReturnType(),
-                                                  Function,
+                                                  Callee,
                                                   Arguments);
 
       if (Layout.returnMethod() == abi::FunctionType::ReturnMethod::Scalar) {
@@ -1860,13 +1855,41 @@ private:
          rc_recur emitScope(Branch->getSuccessor(1), InnerPostDom));
       }
     } else if (auto *Switch = llvm::dyn_cast<llvm::SwitchInst>(Terminal)) {
-      llvm::SmallVector<uint64_t> CaseValues;
-      CaseValues.reserve(Switch->getNumCases());
+      // Mapping from each successor to a set of associated case values.
+      llvm::DenseMap<const llvm::BasicBlock *, llvm::SmallVector<uint64_t, 1>>
+        CaseValuesBySuccessor;
 
-      for (auto CH : Switch->cases())
-        CaseValues.push_back(CH.getCaseValue()->getZExtValue());
+      for (auto CH : Switch->cases()) {
+        CaseValuesBySuccessor.try_emplace(CH.getCaseSuccessor())
+          .first->second.push_back(CH.getCaseValue()->getZExtValue());
+      }
 
-      auto Op = Builder.create<SwitchOp>(TerminalLoc, CaseValues);
+      // Sort the case values associated with each successor:
+      for (auto &[Successor, Cases] : CaseValuesBySuccessor)
+        std::ranges::sort(Cases);
+
+      // List of successors and their associated case values:
+      llvm::SmallVector<std::pair<const llvm::BasicBlock *, //
+                                  llvm::ArrayRef<uint64_t>>>
+        Successors;
+
+      for (auto const &[Successor, Cases] : CaseValuesBySuccessor)
+        Successors.emplace_back(Successor, Cases);
+
+      // Sort the list of successors by their lowest case values:
+      std::ranges::sort(Successors, std::less(), [](auto const &Pair) {
+        return Pair.second.front();
+      });
+
+      llvm::SmallVector<SwitchCase> Cases;
+      for (auto [I, Pair] : llvm::enumerate(Successors)) {
+        for (uint64_t CaseValue : Pair.second)
+          Cases.emplace_back(I, CaseValue);
+      }
+
+      auto Op = Builder.create<SwitchOp>(TerminalLoc,
+                                         SwitchCaseArrayAttr::get(C.Context,
+                                                                  Cases));
 
       emitExpressionTree(Op.getCondition(),
                          Switch->getCondition(),
@@ -1874,12 +1897,13 @@ private:
 
       mlir::OpBuilder::InsertionGuard Guard(Builder);
 
-      // Emit case blocks:
-      for (auto [I, CH] : llvm::enumerate(Switch->cases())) {
-        const llvm::BasicBlock *Succ = CH.getCaseSuccessor();
+      // Emit case regions:
+      for (auto [I, SuccessorWithCaseValues] : llvm::enumerate(Successors)) {
+        const auto &[Succ, CaseValues] = SuccessorWithCaseValues;
 
-        revng_assert(Op.getCaseRegion(I).empty());
-        Builder.setInsertionPointToEnd(&Op.getCaseRegion(I).emplaceBlock());
+        mlir::Region &R = Op.getCaseRegion(I);
+        revng_assert(R.empty());
+        Builder.setInsertionPointToEnd(&R.emplaceBlock());
 
         LoggerIndent Indent(BasicBlockLog);
         if (hasBeenEmitted(Succ)) {
@@ -1887,12 +1911,13 @@ private:
                     "Implicit goto: '" << Succ->getName() << "'");
           emitGoto(TerminalLoc, Succ);
         } else {
-          revng_log(BasicBlockLog, "Via SwitchInst[" << CaseValues[I] << "]:");
+          revng_log(BasicBlockLog,
+                    "Via SwitchInst[" << CaseValues.front() << "]:");
           rc_recur emitScope(Succ, InnerPostDom);
         }
       }
 
-      // Emit default block:
+      // Emit default region:
       if (const llvm::BasicBlock *Succ = Switch->getDefaultDest();
           Succ != nullptr and isScopeGraphEdge(BB, Succ)) {
 

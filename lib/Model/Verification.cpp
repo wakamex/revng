@@ -2,7 +2,9 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <limits>
 #include <tuple>
+#include <utility>
 
 #include "llvm/ADT/SmallSet.h"
 
@@ -35,6 +37,10 @@ bool Relocation::verify(VerifyHelper &VH) const {
 
   if (not model::RelocationType::isValid(Type()))
     return VH.fail("Every relocation must have a valid type.", *this);
+
+  if (Size() != 1 and Size() != 2 and Size() != 4 and Size() != 8)
+    return VH.fail("Every relocation must have a size of 1, 2, 4 or 8 bytes.",
+                   *this);
 
   return true;
 }
@@ -86,6 +92,13 @@ bool Segment::verify(VerifyHelper &VH) const {
       return VH.fail("Segment's `Type()` does not verify.", *this);
 
     const model::StructDefinition &Struct = *type();
+
+    // A segment has its own singleton struct.
+    if (not Struct.IsSingleton()) {
+      return VH.fail("The struct describing a segment must be a singleton.",
+                     *this);
+    }
+
     if (VirtualSize() != Struct.Size()) {
       return VH.fail(Twine("Segment's virtual size is not equal to the size of "
                            "its type.\n`VirtualSize`: ")
@@ -122,6 +135,18 @@ bool BinaryIdentifier::verify(VerifyHelper &VH) const {
     return VH.fail("Hash has invalid format. A series of 64 lowercase hex "
                    "digits representing SHA256 is expected.",
                    Hash());
+
+  return true;
+}
+
+bool AddressSpace::verify(VerifyHelper &VH) const {
+  auto Guard = VH.suspendTracking(*this);
+
+  using AddressSpaceIndex = decltype(std::declval<MetaAddress>()
+                                       .addressSpace());
+  if (Index() > std::numeric_limits<AddressSpaceIndex>::max())
+    return VH.fail("Index exceeds the range of MetaAddress::addressSpace()",
+                   *this);
 
   return true;
 }
@@ -330,14 +355,11 @@ bool DynamicFunction::verify(VerifyHelper &VH) const {
 // Types
 //
 
-static constexpr std::array ValidNumericPrimitives{ 1, 2, 4, 8, 16, 32, 64 };
-static constexpr std::array ValidFloatPrimitives{ 2, 4, 8, 10, 12, 16 };
-// NOTE: We are supporting floats that are 10 bytes long, since we found such
-//       cases in some PDB files by using VS on Windows platforms. The source
-//       code of those cases could be written in some language other than
-//       C/C++ (probably Swift). We faced some struct fields by using this
-//       (10b long float) type, so by ignoring it we would not have accurate
-//       layout for the structs.
+static constexpr std::array<uint64_t, 7> ValidNumericPrimitives{ 1,  2,  4, 8,
+                                                                 16, 32, 64 };
+
+// Only C's `float` and `double` are supported as of now.
+static constexpr std::array<uint64_t, 2> ValidFloatPrimitives{ 4, 8 };
 
 uint64_t
 model::PrimitiveType::maximumValidSize(model::PrimitiveKind::Values Kind) {
@@ -355,11 +377,16 @@ model::PrimitiveType::maximumValidSize(model::PrimitiveKind::Values Kind) {
     return ValidFloatPrimitives.back();
 
   case PrimitiveKind::Generic:
-    return std::max(ValidNumericPrimitives.back(), ValidFloatPrimitives.back());
+    return std::max({ ValidNumericPrimitives.back(),
+                      ValidFloatPrimitives.back() });
 
   default:
     revng_abort("Unsupported primitive kind");
   }
+}
+
+std::span<const uint64_t> model::PrimitiveType::validSizes() {
+  return { ValidNumericPrimitives.begin(), ValidNumericPrimitives.end() };
 }
 
 bool model::PrimitiveType::isSizeValid(PrimitiveKind::Values Kind,
@@ -546,6 +573,10 @@ static RecursiveCoroutine<bool> verifyImpl(VerifyHelper &VH,
 
   if (T.Size() == 0)
     rc_return VH.fail("Struct size must be greater than zero.", T);
+
+  // Only singleton structs can contain code in their padding.
+  if (T.CanContainCode() and not T.IsSingleton())
+    rc_return VH.fail("A struct that can contain code must be a singleton.", T);
 
   auto FieldIt = T.Fields().begin();
   auto FieldEnd = T.Fields().end();
@@ -848,6 +879,62 @@ bool Binary::verifyTypeDefinitions(VerifyHelper &VH) const {
 }
 
 //
+// Singleton structs
+//
+
+/// Return the definition if it is a singleton struct.
+static const model::StructDefinition *
+getAsSingleton(const model::TypeDefinition &Definition) {
+  const auto *Struct = llvm::dyn_cast<model::StructDefinition>(&Definition);
+  if (Struct == nullptr or not Struct->IsSingleton())
+    return nullptr;
+
+  return Struct;
+}
+
+/// Singleton fields must refer directly to their definition.
+static bool verifySingletonUse(VerifyHelper &VH,
+                               const model::Type &Type,
+                               bool InASingleton) {
+  const model::DefinedType *Defined = Type.skipToDefinedType();
+  if (Defined != nullptr and getAsSingleton(Defined->unwrap()) != nullptr) {
+    if (not InASingleton)
+      return VH.fail("Singleton struct " + Defined->Definition().toString()
+                     + " may only be a field of another singleton.");
+
+    if (Defined != &Type)
+      return VH.fail("Singleton struct " + Defined->Definition().toString()
+                     + " cannot be used through a pointer or an array.");
+  }
+
+  return true;
+}
+
+static bool verifySingletonUses(VerifyHelper &VH, const model::Binary &Binary) {
+  auto Guard = VH.suspendTracking(Binary);
+
+  // Checking every definition also rejects typedefs of singletons, so no
+  // alias traversal is needed. Only singleton structs may contain them.
+  for (const model::UpcastableTypeDefinition &Definition :
+       Binary.TypeDefinitions()) {
+    bool InASingleton = getAsSingleton(*Definition) != nullptr;
+    for (const model::Type *Edge : Definition->edges())
+      if (not verifySingletonUse(VH, *Edge, InASingleton))
+        return false;
+  }
+
+  // Segments and stack frames already require structs. Prototypes require
+  // function types, whose arguments and returns are checked above.
+  for (const model::Function &Function : Binary.Functions())
+    for (const model::LocalVariable &Variable : Function.LocalVariables())
+      if (not Variable.Type().isEmpty()
+          and not verifySingletonUse(VH, *Variable.Type(), false))
+        return false;
+
+  return true;
+}
+
+//
 // Configuration
 //
 
@@ -954,6 +1041,11 @@ bool Binary::verify(VerifyHelper &VH) const {
       return VH.fail();
   }
 
+  // Verify AddressSpaces
+  for (const model::AddressSpace &AddressSpace : AddressSpaces())
+    if (not AddressSpace.verify(VH))
+      return VH.fail();
+
   // Verify EntryPoint
   if (EntryPoint().isValid()) {
     if (not EntryPoint().isCode())
@@ -1047,6 +1139,9 @@ bool Binary::verify(VerifyHelper &VH) const {
   if (not Configuration().verify(VH) or not verifyTypeDefinitions(VH))
     return false;
 
+  if (not verifySingletonUses(VH, *this))
+    return VH.fail();
+
   // And, finally, ensure there are no colliding names.
   llvm::Expected Namespaces = collectNamespaces(*this);
   if (not Namespaces)
@@ -1076,6 +1171,14 @@ bool Segment::verify(bool Assert) const {
   return verify(VH);
 }
 bool Segment::verify() const {
+  return verify(false);
+}
+
+bool AddressSpace::verify(bool Assert) const {
+  VerifyHelper VH(Assert);
+  return verify(VH);
+}
+bool AddressSpace::verify() const {
   return verify(false);
 }
 

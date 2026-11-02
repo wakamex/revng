@@ -4,6 +4,7 @@
 
 #include <unordered_set>
 
+#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/EquivalenceClasses.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/STLExtras.h"
@@ -45,6 +46,26 @@ static LTSN *getPointee(LTSN *Pointer) {
   return Pointer->successors().begin()->first;
 }
 
+/// \return the number of pointer edges on the chain that starts at \p N
+///
+/// A node with no outgoing pointer edge has length 0. A well formed pointer
+/// has a single successor, so the chain it starts is unique, and pointer edges
+/// form a DAG, so walking it terminates.
+static unsigned pointerChainLength(const LTSN *N) {
+  unsigned Length = 0;
+  while (hasOutgoingPointerEdge(N)) {
+    revng_assert(N->successors().size() == 1);
+    N = (*N->successors().begin()).first;
+    ++Length;
+  }
+  return Length;
+}
+
+/// \return the length of the chain of pointer edges below the pointee of \p P
+static unsigned pointeeChainLength(LTSN *P) {
+  return pointerChainLength(getPointee(P));
+}
+
 bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
   bool Changed = false;
 
@@ -83,6 +104,13 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
     using NodeByID = LayoutTypeSystem::NodeComparison;
     llvm::EquivalenceClasses<LTSN *, NodeByID> PointersToMerge;
 
+    // The pointers that could be merged, by the tag of the instance edge that
+    // reaches them and by the length of the chain of pointer edges below their
+    // pointee. A class of a single pointer is not in `PointersToMerge`, which
+    // only holds what has been unioned, so they are collected here too.
+    std::map<const TypeLinkTag *, std::map<unsigned, llvm::SmallVector<LTSN *>>>
+      CandidatesByTag;
+
     auto ChildEnd = Node->successors().end();
     for (auto AChildIt = Node->successors().begin(); AChildIt != ChildEnd;
          ++AChildIt) {
@@ -95,6 +123,9 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
       if (not hasOutgoingPointerEdge(APointer))
         continue;
       revng_assert(isWellFormedPointer(APointer));
+
+      const unsigned ALength = pointeeChainLength(APointer);
+      CandidatesByTag[ATag][ALength].push_back(APointer);
 
       for (auto BChildIt = std::next(AChildIt); BChildIt != ChildEnd;
            ++BChildIt) {
@@ -121,7 +152,68 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
                      std::to_string(APointer->ID).c_str());
         revng_assert(BPointer->successors().size() == 1,
                      std::to_string(BPointer->ID).c_str());
+        // Only put in the same class pointers whose pointees have chains of
+        // pointer edges of the same length. Reaching one pointee from another
+        // takes at least one pointer edge, which makes the chain of the one
+        // that reaches strictly longer, so a class of equal lengths can be
+        // merged without ever closing a loop of pointer edges. Equality is
+        // transitive, so the classes stay uniform however they are built up.
+        if (ALength != pointeeChainLength(BPointer)) {
+          revng_log(Log, "pointee chains have different lengths: not merging");
+          continue;
+        }
+
         PointersToMerge.unionSets(APointer, BPointer);
+      }
+    }
+
+    // Phase 1 only put in one class pointers whose pointees have chains of
+    // equal length, so merging a class never closes a loop of pointer edges.
+    // The pointees of the class of length 0 are not pointers, so they reach
+    // nothing, and merging them into a deeper class of the same tag is safe
+    // unless that class reaches them. Join the shallowest one that does not.
+    for (auto &[Tag, ByLength] : CandidatesByTag) {
+      auto ZeroIt = ByLength.find(0);
+      if (ZeroIt == ByLength.end() or ByLength.size() < 2)
+        continue;
+
+      const llvm::SmallVector<LTSN *> &Zero = ZeroIt->second;
+
+      // Everything that reaches a pointee of the class of length 0, walked
+      // once, against the pointer edges.
+      using CPointerT = EdgeFilteredGraph<const LTSN *, isPointerEdge>;
+      llvm::df_iterator_default_set<const LTSN *> Reaching;
+      for (LTSN *Pointer : Zero) {
+        const LTSN *Pointee = getPointee(Pointer);
+        for (const LTSN *Upstream :
+             llvm::inverse_depth_first_ext(CPointerT(Pointee), Reaching))
+          revng_log(Log,
+                    "reaches a pointee of the class of length 0: "
+                      << Upstream->ID);
+      }
+
+      // The map is sorted, so the shallowest classes come first.
+      for (auto &[Length, Pointers] : ByLength) {
+        if (Length == 0)
+          continue;
+
+        const auto ReachesZeroClass = [&Reaching](LTSN *Pointer) {
+          return Reaching.contains(getPointee(Pointer));
+        };
+        if (llvm::any_of(Pointers, ReachesZeroClass)) {
+          revng_log(Log,
+                    "the class of length " << Length
+                                           << " reaches the pointees of the "
+                                              "class of length 0");
+          continue;
+        }
+
+        revng_log(Log,
+                  "merging the class of length 0 into the one of length "
+                    << Length);
+        for (LTSN *ZeroPointer : Zero)
+          PointersToMerge.unionSets(ZeroPointer, Pointers.front());
+        break;
       }
     }
 
@@ -263,7 +355,7 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
 
         llvm::SmallVector<LTSN *> Scalars = UniquedScalars.takeVector();
         llvm::SmallVector<LTSN *> Aggregates = UniquedAggregates.takeVector();
-        llvm::SmallVector<LTSN *> FromModel = UniquedAggregates.takeVector();
+        llvm::SmallVector<LTSN *> FromModel = UniquedFromModel.takeVector();
 
         const auto Ordering = [](const LTSN *LHS, const LTSN *RHS) {
           auto LSize = LHS->Size;
@@ -296,9 +388,11 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
 
           revng_log(Log, "MergedScalar: " << MergedScalar->ID);
 
-          // Check if we merged more than one scalar that also was a pointer.
-          // In that case we have to create a new union of their pointees,
-          // enqueue it for further analysis
+          // A node with an outgoing pointer edge is a pointer, so it is
+          // pointer sized and that edge is the only one it has. Merging can
+          // break both of those: more than one of the merged scalars can be a
+          // pointer, and a pointer can be merged into a scalar larger than
+          // itself, since what survives a merge is the largest of the nodes.
           llvm::SmallVector<LTSN::NeighborIterator> PointerEdges;
           {
             LTSN::NeighborIterator ChildIt = MergedScalar->successors().begin();
@@ -306,14 +400,22 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
             for (; ChildIt != ChildEnd; ++ChildIt)
               if (isPointerEdge(*ChildIt))
                 PointerEdges.push_back(ChildIt);
-
-            revng_assert(PointerEdges.empty()
-                         or MergedScalar->Size == PointerSize);
           }
 
-          if (PointerEdges.size() > 1) {
+          // Whatever carries a pointer edge is at least as large as a pointer,
+          // and the merged scalar is at least as large as any of them.
+          revng_assert(PointerEdges.empty()
+                       or MergedScalar->Size >= PointerSize);
+
+          // Give each pointer edge a pointer sized node of its own, reachable
+          // from the merged scalar at offset 0, unless the merged scalar is a
+          // well formed pointer already, which is the case when it is pointer
+          // sized and there is a single edge to hold.
+          bool IsWellFormed = PointerEdges.size() == 1
+                              and MergedScalar->Size == PointerSize;
+          if (not PointerEdges.empty() and not IsWellFormed) {
             revng_log(Log,
-                      "Merged scalar is a union of pointers: "
+                      "Merged scalar cannot hold its pointer edges: "
                         << MergedScalar->ID);
             for (LTSN::NeighborIterator &PointerEdgeIt : PointerEdges) {
               LTSN *NewPointer = TS.createArtificialLayoutType();

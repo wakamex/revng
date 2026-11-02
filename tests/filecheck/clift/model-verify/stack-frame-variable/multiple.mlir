@@ -2,12 +2,15 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
-// RUN: not %root/bin/revng pipe verify-against-model %S/model.yml %s /dev/null 2>&1 | FileCheck %s
+// RUN: not --crash %root/bin/revng pipeline run-pipe verify-against-model %S/model.yml <(%pipe_input %s) /dev/null -- --debug-log=model-verify 2>&1 | FileCheck %s
 
 !void = !clift.void
 !frame = !clift.struct<"/type-definition/0-StructDefinition" as "frame" : size(8) {}>
 !f = !clift.func<"/type-definition/1-CABIFunctionDefinition" as "f" : !void()
-  [#clift.c_attribute<"_ABI" : "/macro/_ABI" [#clift.identifier<"SystemV_x86_64">]>]>
+  #clift.c_attribute_list<
+    <"_ABI" : "/macro/_ABI" [#clift.identifier<"SystemV_x86_64">]>
+  >
+>
 
 // CHECK: More than one `stack_frame` local declared in '/function/0x1000:Code_x86_64'
 

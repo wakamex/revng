@@ -77,6 +77,11 @@ public:
     return AttrLists[Index].get(Name);
   }
 
+  template<typename AttrT>
+  AttrT getOfType(unsigned Index, llvm::StringRef Name) const {
+    return mlir::dyn_cast_or_null<AttrT>(get(Index, Name));
+  }
+
   void set(unsigned Index, llvm::StringRef Name, mlir::Attribute Attr) {
     AttrLists[Index].set(Name, Attr);
   }
@@ -600,10 +605,11 @@ private:
 
         clift::CAttributeListBuilder Attributes{
           Op.getContext(),
-          Attrs.get(I, "clift.c_attributes"),
+          Attrs.getOfType<clift::CAttributeListAttr>(I,
+                                                     "clift.c_attribute_list"),
         };
         Attributes.setOrUpdate<"_REG">(RegisterName, RegisterLocation);
-        Attrs.set(I, "clift.c_attributes", Attributes.get());
+        Attrs.set(I, "clift.c_attribute_list", Attributes.getAttributeList());
       }
 
       if (HasStackArgument) {
@@ -617,10 +623,11 @@ private:
 
         clift::CAttributeListBuilder Attributes{
           Op.getContext(),
-          Attrs.get(I, "clift.c_attributes"),
+          Attrs.getOfType<clift::CAttributeListAttr>(I,
+                                                     "clift.c_attribute_list"),
         };
         Attributes.setOrUpdate<"_STACK">();
-        Attrs.set(I, "clift.c_attributes", Attributes.get());
+        Attrs.set(I, "clift.c_attribute_list", Attributes.getAttributeList());
       }
 
       ReturnValueComment = T->ReturnValueComment();

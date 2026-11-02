@@ -192,7 +192,7 @@ public:
                               Definition.Size,
                               Definition.IsOpaque,
                               Allocator.copyInto(Definition.Fields),
-                              Allocator.copyInto(Definition.CAttributes));
+                              Definition.CAttributeList);
 
     return mlir::success();
   }
@@ -477,6 +477,17 @@ void CAttributeAttr::print(mlir::AsmPrinter &Printer) const {
   Printer << '>';
 }
 
+//===------------------------- CAttributeListAttr -------------------------===//
+
+mlir::LogicalResult
+CAttributeListAttr::verify(EmitErrorType EmitError,
+                           llvm::ArrayRef<CAttributeAttr> Attributes) {
+  if (Attributes.empty())
+    return EmitError() << "A C attribute list requires at least one attribute.";
+
+  return mlir::success();
+}
+
 //===------------------------------ FieldAttr -----------------------------===//
 
 mlir::LogicalResult FieldAttr::verify(EmitErrorType EmitError,
@@ -734,14 +745,13 @@ mlir::LogicalResult StructAttr::verify(EmitErrorType EmitError,
   return mlir::success();
 }
 
-mlir::LogicalResult
-StructAttr::verify(EmitErrorType EmitError,
-                   llvm::StringRef Handle,
-                   MutableStringAttr Name,
-                   MutableStringAttr Comment,
-                   uint64_t Size,
-                   llvm::ArrayRef<FieldAttr> Fields,
-                   llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+mlir::LogicalResult StructAttr::verify(EmitErrorType EmitError,
+                                       llvm::StringRef Handle,
+                                       MutableStringAttr Name,
+                                       MutableStringAttr Comment,
+                                       uint64_t Size,
+                                       llvm::ArrayRef<FieldAttr> Fields,
+                                       CAttributeListAttr AttributeList) {
   return mlir::success();
 }
 
@@ -820,28 +830,27 @@ StructAttr StructAttr::get(mlir::MLIRContext *Context,
                            uint64_t Size,
                            bool IsOpaque,
                            llvm::ArrayRef<FieldAttr> Fields,
-                           llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+                           CAttributeListAttr AttributeList) {
   return get(Context,
              Handle,
              ClassDefinition{
-               Name, Comment, Size, IsOpaque, Fields, Attributes });
+               Name, Comment, Size, IsOpaque, Fields, AttributeList });
 }
 
-StructAttr
-StructAttr::getChecked(EmitErrorType EmitError,
-                       mlir::MLIRContext *Context,
-                       llvm::StringRef Handle,
-                       MutableStringAttr Name,
-                       MutableStringAttr Comment,
-                       uint64_t Size,
-                       bool IsOpaque,
-                       llvm::ArrayRef<FieldAttr> Fields,
-                       llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+StructAttr StructAttr::getChecked(EmitErrorType EmitError,
+                                  mlir::MLIRContext *Context,
+                                  llvm::StringRef Handle,
+                                  MutableStringAttr Name,
+                                  MutableStringAttr Comment,
+                                  uint64_t Size,
+                                  bool IsOpaque,
+                                  llvm::ArrayRef<FieldAttr> Fields,
+                                  CAttributeListAttr AttributeList) {
   return getChecked(EmitError,
                     Context,
                     Handle,
                     ClassDefinition{
-                      Name, Comment, Size, IsOpaque, Fields, Attributes });
+                      Name, Comment, Size, IsOpaque, Fields, AttributeList });
 }
 
 //===------------------------------ UnionAttr -----------------------------===//
@@ -864,13 +873,12 @@ mlir::LogicalResult UnionAttr::verify(EmitErrorType EmitError,
   return mlir::success();
 }
 
-mlir::LogicalResult
-UnionAttr::verify(EmitErrorType EmitError,
-                  llvm::StringRef Handle,
-                  MutableStringAttr Name,
-                  MutableStringAttr Comment,
-                  llvm::ArrayRef<FieldAttr> Fields,
-                  llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+mlir::LogicalResult UnionAttr::verify(EmitErrorType EmitError,
+                                      llvm::StringRef Handle,
+                                      MutableStringAttr Name,
+                                      MutableStringAttr Comment,
+                                      llvm::ArrayRef<FieldAttr> Fields,
+                                      CAttributeListAttr AttributeList) {
   return mlir::success();
 }
 
@@ -941,7 +949,7 @@ UnionAttr UnionAttr::get(mlir::MLIRContext *Context,
                          MutableStringAttr Name,
                          MutableStringAttr Comment,
                          llvm::ArrayRef<FieldAttr> Fields,
-                         llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+                         CAttributeListAttr AttributeList) {
   return get(Context,
              Handle,
              ClassDefinition{ Name,
@@ -949,17 +957,16 @@ UnionAttr UnionAttr::get(mlir::MLIRContext *Context,
                               /*Size=*/0,
                               /*IsOpaque=*/false,
                               Fields,
-                              Attributes });
+                              AttributeList });
 }
 
-UnionAttr
-UnionAttr::getChecked(EmitErrorType EmitError,
-                      mlir::MLIRContext *Context,
-                      llvm::StringRef Handle,
-                      MutableStringAttr Name,
-                      MutableStringAttr Comment,
-                      llvm::ArrayRef<FieldAttr> Fields,
-                      llvm::ArrayRef<clift::CAttributeAttr> Attributes) {
+UnionAttr UnionAttr::getChecked(EmitErrorType EmitError,
+                                mlir::MLIRContext *Context,
+                                llvm::StringRef Handle,
+                                MutableStringAttr Name,
+                                MutableStringAttr Comment,
+                                llvm::ArrayRef<FieldAttr> Fields,
+                                CAttributeListAttr AttributeList) {
   return getChecked(EmitError,
                     Context,
                     Handle,
@@ -968,7 +975,7 @@ UnionAttr::getChecked(EmitErrorType EmitError,
                                      /*Size=*/0,
                                      /*IsOpaque=*/false,
                                      Fields,
-                                     Attributes });
+                                     AttributeList });
 }
 
 uint64_t UnionAttr::getSize() const {
@@ -1015,6 +1022,108 @@ mlir::LogicalResult clift::CAttributeAttr::verify(EmitErrorType EmitError,
   return mlir::success();
 }
 
+//===------------------------ SwitchCaseArrayAttr ------------------------===//
+
+mlir::LogicalResult
+SwitchCaseArrayAttr::verify(EmitErrorType EmitError,
+                            llvm::ArrayRef<SwitchCase> Cases) {
+  llvm::SmallSet<uint64_t, 16> Set;
+  unsigned PrevIndex = -1;
+
+  for (const auto &[Index, Value] : Cases) {
+    if (Index != PrevIndex and Index != PrevIndex + 1)
+      return EmitError() << "case region indices must be ordered and with no "
+                            "gaps; "
+                         << Index << " does not follow " << PrevIndex;
+
+    if (not Set.insert(Value).second) {
+      return EmitError() << "case values must be unique; " << Value
+                         << " appeared twice";
+    }
+
+    PrevIndex = Index;
+  }
+
+  return mlir::success();
+}
+
+mlir::Attribute SwitchCaseArrayAttr::parse(mlir::AsmParser &Parser,
+                                           mlir::Type) {
+  mlir::SMLoc Loc = Parser.getCurrentLocation();
+
+  llvm::SmallVector<SwitchCase> Cases;
+
+  unsigned NextRegion = 0;
+  auto ParseRegionCases = [&]() -> mlir::LogicalResult {
+    unsigned Region = NextRegion++;
+    auto ParseCase = [&]() -> mlir::LogicalResult {
+      uint64_t Value;
+      if (Parser.parseInteger(Value).failed())
+        return mlir::failure();
+
+      Cases.emplace_back(Region, Value);
+      return mlir::success();
+    };
+
+    if (Parser.parseOptionalLParen().succeeded()) {
+      if (Parser.parseCommaSeparatedList(ParseCase).failed())
+        return mlir::failure();
+
+      if (Parser.parseRParen().failed())
+        return mlir::failure();
+    } else {
+      if (ParseCase().failed())
+        return mlir::failure();
+    }
+
+    return mlir::success();
+  };
+
+  if (Parser
+        .parseCommaSeparatedList(mlir::AsmParser::Delimiter::LessGreater,
+                                 ParseRegionCases,
+                                 " in switch case list")
+        .failed())
+    return {};
+
+  return SwitchCaseArrayAttr::get(Parser.getContext(), Cases);
+}
+
+void SwitchCaseArrayAttr::print(mlir::AsmPrinter &Printer) const {
+  Printer << '<';
+
+  auto Cases = getCases();
+  auto Begin = Cases.begin();
+  auto End = Cases.end();
+  auto RegionBegin = Begin;
+
+  // TODO: Use std::views::chunk_by once it is available.
+  while (RegionBegin != End) {
+    if (RegionBegin != Begin)
+      Printer << ", ";
+
+    auto RegionEnd = std::next(RegionBegin);
+    while (RegionEnd != End and RegionEnd->Region == RegionBegin->Region)
+      ++RegionEnd;
+
+    if (RegionEnd - RegionBegin > 1)
+      Printer << '(';
+
+    for (auto I = RegionBegin; I != RegionEnd; ++I) {
+      if (I != RegionBegin)
+        Printer << ", ";
+      Printer << I->Value;
+    }
+
+    if (RegionEnd - RegionBegin > 1)
+      Printer << ')';
+
+    RegionBegin = RegionEnd;
+  }
+
+  Printer << '>';
+}
+
 //===---------------------------- CliftDialect ----------------------------===//
 
 void CliftDialect::registerAttributes() {
@@ -1028,11 +1137,15 @@ void CliftDialect::registerAttributes() {
 /// Parse an attribute registered to this dialect
 mlir::Attribute CliftDialect::parseAttribute(mlir::DialectAsmParser &Parser,
                                              mlir::Type Type) const {
+  const llvm::SMLoc AttrLoc = Parser.getCurrentLocation();
+
   llvm::StringRef Mnemonic;
   if (mlir::Attribute Attr;
       generatedAttributeParser(Parser, &Mnemonic, Type, Attr).has_value())
     return Attr;
 
+  Parser.emitError(AttrLoc) << "unknown attribute `" << Mnemonic
+                            << "` in dialect `" << getNamespace() << "`";
   return {};
 }
 

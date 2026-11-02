@@ -196,7 +196,7 @@ private:
                                         CommentAttr,
                                         ReturnType,
                                         llvm::ArrayRef(ArgumentTypes),
-                                        Attributes.getRaw());
+                                        Attributes.getAttributeList());
   }
 
   RecursiveCoroutine<clift::DefinedType>
@@ -284,14 +284,13 @@ private:
     auto Handle = Location.transmute(revng::ranks::ArtificialStruct).toString();
     auto NameAttr = makeNameAttr<clift::StructAttr>(Handle);
     auto CommentAttr = makeCommentAttr<clift::StructAttr>(Handle);
-    llvm::ArrayRef<clift::CAttributeAttr> CAttributes = {};
     auto Attr = make<clift::StructAttr>(llvm::StringRef(Handle),
                                         NameAttr,
                                         CommentAttr,
                                         Offset,
                                         /*IsOpaque=*/false,
                                         llvm::ArrayRef(Fields),
-                                        CAttributes);
+                                        clift::CAttributeListAttr{});
 
     if (not Attr)
       rc_return nullptr;
@@ -372,7 +371,7 @@ private:
                                         CommentAttr,
                                         mlir::Type(ReturnType),
                                         llvm::ArrayRef(ArgumentTypes),
-                                        Attributes.getRaw());
+                                        Attributes.getAttributeList());
   }
 
   RecursiveCoroutine<clift::DefinedType>
@@ -422,6 +421,9 @@ private:
 
     clift::CAttributeListBuilder Attributes(Context);
 
+    if (ModelType.IsSingleton())
+      Attributes.setOrUpdate<"_SINGLETON">();
+
     if (ModelType.CanContainCode())
       Attributes.setOrUpdate<"_CAN_CONTAIN_CODE">();
 
@@ -434,7 +436,7 @@ private:
                                         ModelType.Size(),
                                         /*IsOpaque=*/false,
                                         llvm::ArrayRef(Fields),
-                                        Attributes.getRaw());
+                                        Attributes.getAttributeListOrNull());
 
     if (not Attr)
       rc_return nullptr;
@@ -523,12 +525,11 @@ private:
     auto Handle = Location.toString();
     auto NameAttr = makeNameAttr<clift::UnionAttr>(Handle);
     auto CommentAttr = makeCommentAttr<clift::UnionAttr>(Handle);
-    llvm::ArrayRef<clift::CAttributeAttr> CAttributes = {};
     auto Attr = make<clift::UnionAttr>(llvm::StringRef(Handle),
                                        NameAttr,
                                        CommentAttr,
                                        llvm::ArrayRef(Fields),
-                                       CAttributes);
+                                       clift::CAttributeListAttr{});
 
     rc_return clift::UnionType::get(Attr);
   }
@@ -786,7 +787,7 @@ clift::importFunctionDeclaration(mlir::ModuleOp Module,
     }
   }
 
-  Result->setAttr("clift.c_attributes",
+  Result->setAttr("clift.c_attribute_list",
                   mlir::ArrayAttr::get(Module.getContext(), {}));
 
   return Result;
@@ -918,15 +919,14 @@ clift::StructType clift::makeOpaqueStruct(mlir::MLIRContext *Context,
 
   auto NameAttr = makeNameAttr<StructAttr>(Context, Handle);
   auto CommentAttr = makeCommentAttr<StructAttr>(Context, Handle);
-  auto Attrs = llvm::ArrayRef<clift::CAttributeAttr>{};
   auto Def = clift::StructAttr::get(Context,
                                     Handle,
                                     NameAttr,
                                     CommentAttr,
                                     ByteSize,
                                     /*IsOpaque=*/true,
-                                    {},
-                                    Attrs);
+                                    /*Fields=*/{},
+                                    /*AttributeList=*/{});
 
   // TODO: this discards the prefix configuration option.
   //       We should fix this after the configuration is separate from the
