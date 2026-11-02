@@ -827,29 +827,90 @@ static bool isNoReturn(const model::Binary &Binary,
   return false;
 }
 
-/// The address \p V loads from, if it is a load from a constant address: an
-/// integer, or the start of a segment, from its getter, plus an integer
-static std::optional<uint64_t> constantLoadAddress(llvm::Value *V) {
+/// The constant \p Address is, if it is one: an integer, or the start of a
+/// segment, from its getter, plus an integer
+static std::optional<uint64_t> constantAddress(llvm::Value *Address) {
   using namespace llvm;
   using namespace PatternMatch;
-  Value *Address = nullptr;
-  if (not match(V, m_Load(m_IntToPtr(m_Value(Address)))))
-    return std::nullopt;
-
   ConstantInt *Offset = nullptr;
   if (match(Address, m_ConstantInt(Offset)))
     return Offset->getZExtValue();
 
+  // A failed match may still bind its first operand, so match into
+  // temporaries and keep them only on success
   Value *Base = Address;
   uint64_t Addend = 0;
-  if (match(Address, m_Add(m_Value(Base), m_ConstantInt(Offset))))
+  Value *Matched = nullptr;
+  if (match(Address, m_Add(m_Value(Matched), m_ConstantInt(Offset)))) {
+    Base = Matched;
     Addend = Offset->getZExtValue();
+  }
 
   auto *Getter = dyn_cast<CallInst>(Base);
   Function *Callee = Getter ? getCalledFunction(Getter) : nullptr;
   if (Callee == nullptr or not hasSegmentKeyMetadata(*Callee))
     return std::nullopt;
   return extractSegmentKeyFromMetadata(*Callee).address() + Addend;
+}
+
+/// The address \p V loads from, if it is a load from a constant address
+static std::optional<uint64_t> constantLoadAddress(llvm::Value *V) {
+  using namespace llvm;
+  using namespace PatternMatch;
+  Value *Address = nullptr;
+  if (not match(V, m_Load(m_IntToPtr(m_Value(Address)))))
+    return std::nullopt;
+  return constantAddress(Address);
+}
+
+/// The values \p V may take, if it is a constant address or a choice among a
+/// few of them, through selects, PHIs and additions of constants
+static std::optional<std::set<uint64_t>>
+constantValues(llvm::Value *V, llvm::SmallPtrSetImpl<llvm::Value *> &Visiting) {
+  using namespace llvm;
+  constexpr size_t MaxValues = 16;
+  if (auto Address = constantAddress(V))
+    return std::set<uint64_t>{ *Address };
+  if (not Visiting.insert(V).second)
+    return std::set<uint64_t>{};
+
+  std::optional<std::set<uint64_t>> Result;
+  auto Unite = [&](Value *Operand) {
+    auto Values = constantValues(Operand, Visiting);
+    if (not Values or (Result and Result->size() + Values->size() > MaxValues))
+      return false;
+    if (not Result)
+      Result.emplace();
+    Result->insert(Values->begin(), Values->end());
+    return true;
+  };
+
+  bool Known = false;
+  if (auto *Select = dyn_cast<SelectInst>(V)) {
+    Known = Unite(Select->getTrueValue()) and Unite(Select->getFalseValue());
+  } else if (auto *Phi = dyn_cast<PHINode>(V)) {
+    Known = true;
+    for (Value *Incoming : Phi->incoming_values())
+      Known = Known and Unite(Incoming);
+  } else if (auto *Add = dyn_cast<BinaryOperator>(V);
+             Add != nullptr and Add->getOpcode() == Instruction::Add) {
+    auto LHS = constantValues(Add->getOperand(0), Visiting);
+    auto RHS = constantValues(Add->getOperand(1), Visiting);
+    if (LHS and RHS and LHS->size() * RHS->size() <= MaxValues) {
+      Result.emplace();
+      for (uint64_t L : *LHS)
+        for (uint64_t R : *RHS)
+          Result->insert(L + R);
+      Known = true;
+    }
+  } else if (auto *Cast = dyn_cast<CastInst>(V)) {
+    Known = Unite(Cast->getOperand(0));
+  }
+
+  Visiting.erase(V);
+  if (not Known)
+    return std::nullopt;
+  return Result;
 }
 
 std::vector<IndirectBranchFacts>
@@ -872,6 +933,29 @@ CFGAnalyzer::readIndirectBranchInfo(llvm::Function &F,
                                  std::to_string(*Call.CalleeLoadAddress) :
                                  std::string("no constant address")));
     }
+  }
+
+  // Pointer-sized stores to constant addresses, with the values they store:
+  // the possible values of a function pointer the program keeps in memory
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (Instruction &I : instructions(F)) {
+    auto *Store = dyn_cast<StoreInst>(&I);
+    if (Store == nullptr
+        or DL.getTypeStoreSize(Store->getValueOperand()->getType())
+             != DL.getPointerSize())
+      continue;
+    Value *Pointer = Store->getPointerOperand();
+    if (auto *Cast = dyn_cast<IntToPtrInst>(Pointer))
+      Pointer = Cast->getOperand(0);
+    std::optional<uint64_t> Address = constantAddress(Pointer);
+    if (not Address)
+      continue;
+    IndirectBranchFacts &Facts = Result.emplace_back();
+    Facts.StoreAddress = *Address;
+    SmallPtrSet<Value *, 8> Visiting;
+    if (auto Values = constantValues(Store->getValueOperand(), Visiting))
+      Facts.StoredValues = std::vector<uint64_t>(Values->begin(),
+                                                 Values->end());
   }
 
   for (CallBase *CI : callers(&Marker)) {
@@ -1017,7 +1101,7 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
   }
 
   for (const IndirectBranchFacts &Branch : Branches) {
-    if (Branch.IsCall)
+    if (Branch.IsCall or Branch.StoreAddress)
       continue;
     BranchFacts CI = &Branch;
     bool JumpsToReturnAddress = Branch.JumpsToReturnAddress;
@@ -1278,6 +1362,25 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
                          {},
                          std::move(CFG),
                          MaybeWinFSO);
+
+  // Record where calls load their callee from and what the function stores
+  // to constant addresses, from which detect-abi finds the functions a
+  // pointer kept in writable memory may be
+  for (const IndirectBranchFacts &Facts : Branches) {
+    if (Facts.IsCall and Facts.CalleeLoadAddress)
+      Result.CallSlots[Facts.Block] = *Facts.CalleeLoadAddress;
+    if (not Facts.StoreAddress)
+      continue;
+    auto [It, New] = Result.SlotStores.try_emplace(*Facts.StoreAddress,
+                                                   std::set<uint64_t>{});
+    if (not It->second)
+      continue;
+    if (not Facts.StoredValues)
+      It->second.reset();
+    else
+      It->second->insert(Facts.StoredValues->begin(),
+                         Facts.StoredValues->end());
+  }
 
   if (Log.isEnabled()) {
     Log << "Result:\n";

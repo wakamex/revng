@@ -304,6 +304,7 @@ public:
     // 4. the CFG (specifically, which indirect jumps are returns);
     Task.advance("preliminaryFunctionAnalysis");
     preliminaryFunctionAnalysis();
+    findSlotCallees();
 
     // Run the (fixed-point) analysis of the ABI of each function
     Task.advance("analyzeABI");
@@ -324,7 +325,17 @@ public:
   }
 
 private:
+  /// For each call whose callee is loaded from writable memory holding only
+  /// known functions, keyed by caller and block: those functions
+  std::map<std::pair<MetaAddress, BasicBlockID>, std::set<MetaAddress>>
+    SlotCallees;
+
+  /// For each function, the functions that may call it through such memory
+  std::map<MetaAddress, std::set<MetaAddress>> SlotCallers;
+
+private:
   void computeApproximateCallGraph();
+  void findSlotCallees();
   void preliminaryFunctionAnalysis();
   void preliminaryFunctionAnalysisInParallel(BasicBlockQueue &Queue,
                                              revng::ConvergenceMonitor &C,
@@ -378,6 +389,100 @@ private:
   buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
                                 const efa::BasicBlock &CallerBlock);
 };
+
+/// A call whose callee is loaded from writable memory, such as a function
+/// pointer a program selects at run time among implementations for the CPU,
+/// may call any function stored there: the one the memory starts with, from
+/// its relocation, and every one the program stores to it. When every store
+/// to that address stores known functions, the call calls one of them.
+void DetectABI::findSlotCallees() {
+  // What each constant address may hold, from every function's stores
+  std::map<uint64_t, std::optional<std::set<uint64_t>>> Stored;
+  for (const model::Function &Function : Binary->Functions()) {
+    const auto &Summary = Oracle.getLocalFunction(Function.Entry());
+    for (const auto &[Address, Values] : Summary.SlotStores) {
+      auto [It, New] = Stored.try_emplace(Address, std::set<uint64_t>{});
+      if (not It->second)
+        continue;
+      if (not Values)
+        It->second.reset();
+      else
+        It->second->insert(Values->begin(), Values->end());
+    }
+  }
+
+  auto Architecture = Binary->Architecture();
+  auto PointerSize = getPointerSize(Architecture);
+  auto FunctionAt = [&](MetaAddress Address) -> MetaAddress {
+    MetaAddress Entry = Address.toPC(Architecture);
+    if (Entry.isInvalid() or Binary->Functions().count(Entry) == 0)
+      return MetaAddress::invalid();
+    return Entry;
+  };
+  auto InitialFunction = [&](uint64_t Address) -> MetaAddress {
+    for (const model::Segment &Segment : Binary->Segments())
+      for (const model::Relocation &Relocation : Segment.Relocations())
+        if (Relocation.Address().address() == Address
+            and model::RelocationType::getSize(Relocation.Type())
+                  == PointerSize)
+          return FunctionAt(Segment.StartAddress() + Relocation.Addend());
+    return MetaAddress::invalid();
+  };
+
+  for (const model::Function &Function : Binary->Functions()) {
+    const auto &Summary = Oracle.getLocalFunction(Function.Entry());
+    for (const auto &[BlockID, Address] : Summary.CallSlots) {
+      // Only calls the CFG still has no callee for
+      bool Unknown = false;
+      for (const efa::BasicBlock &Block : Summary.CFG)
+        if (Block.ID() == BlockID)
+          for (const auto &Edge : Block.Successors())
+            if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
+              Unknown = not Call->Destination().isValid()
+                        and Call->DynamicFunction().empty();
+      if (not Unknown)
+        continue;
+
+      MetaAddress Initial = InitialFunction(Address);
+      if (Initial.isInvalid())
+        continue;
+      std::set<MetaAddress> Callees{ Initial };
+      if (auto It = Stored.find(Address); It != Stored.end()) {
+        if (not It->second)
+          continue;
+        bool AllFunctions = true;
+        for (uint64_t Value : *It->second) {
+          MetaAddress Callee = FunctionAt(MetaAddress::fromGeneric(Architecture,
+                                                                   Value));
+          AllFunctions = AllFunctions and Callee.isValid();
+          Callees.insert(Callee);
+        }
+        if (not AllFunctions)
+          continue;
+      }
+
+      revng_log(Log,
+                "The call in " << BlockID.toString() << " of "
+                               << Function.Entry().toString() << " calls one of "
+                               << Callees.size() << " functions through "
+                               << Address);
+      for (const MetaAddress &Callee : Callees)
+        SlotCallers[Callee].insert(Function.Entry());
+      SlotCallees[{ Function.Entry(), BlockID }] = std::move(Callees);
+    }
+  }
+
+  // The functions stored in such memory are often found only from data, in
+  // the second run, after their callers got a prototype; the callers'
+  // prototypes and the calls' prototypes are built again from what this run
+  // finds
+  for (const auto &[Key, Callees] : SlotCallees) {
+    model::Function &Caller = Binary->Functions().at(Key.first);
+    Caller.Prototype() = model::UpcastableType();
+    if (not Key.second.isInlined())
+      Caller.CallSitePrototypes().erase(Key.second.notInlinedAddress());
+  }
+}
 
 void DetectABI::computeApproximateCallGraph() {
   using llvm::BasicBlock;
@@ -528,6 +633,8 @@ void DetectABI::commitPreliminary(const BasicBlockNode *EntryNode,
   if (not Binary->Functions()[EntryPointAddress].Prototype().isEmpty()) {
     auto &Summary = Oracle.getLocalFunction(EntryPointAddress);
     Summary.CFG = std::move(AnalysisResult.CFG);
+    Summary.CallSlots = std::move(AnalysisResult.CallSlots);
+    Summary.SlotStores = std::move(AnalysisResult.SlotStores);
     Convergence.visit(EntryPointAddress.toString(),
                       summaryState(Summary),
                       false);
@@ -980,6 +1087,13 @@ void DetectABI::analyzeABI() {
         if (CallerNode->Address.isValid()) {
           revng_log(Log, CallerNode->Address.toString());
           ToAnalyze.insert(&Binary->Functions().at(CallerNode->Address));
+        }
+      }
+      if (auto It = SlotCallers.find(Function.Entry());
+          It != SlotCallers.end()) {
+        for (const MetaAddress &Caller : It->second) {
+          revng_log(Log, Caller.toString() << " through memory");
+          ToAnalyze.insert(&Binary->Functions().at(Caller));
         }
       }
     }
@@ -1694,10 +1808,25 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
       if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get()))
         if (not Call->DynamicFunction().empty())
           CallsImported.insert(Block.ID());
+  // A call through writable memory that holds only known functions calls one
+  // of them
+  auto SlotTargets = [&](const BasicBlockID &BlockID)
+    -> const std::set<MetaAddress> * {
+    auto It = SlotCallees.find({ EntryAddress, BlockID });
+    return It == SlotCallees.end() ? nullptr : &It->second;
+  };
   auto IsUnknownCallee = [&](const BasicBlockID &BlockID,
                              const auto &CallSite) {
     return not CallSite.CalleeAddress.isValid()
-           and not CallsImported.contains(BlockID);
+           and not CallsImported.contains(BlockID)
+           and SlotTargets(BlockID) == nullptr;
+  };
+  auto UnionOver = [&](const std::set<MetaAddress> &Targets, auto Member) {
+    CSVSet Result;
+    for (const MetaAddress &Target : Targets)
+      for (auto *CSV : Oracle.getLocalFunction(Target).ABIResults.*Member)
+        Result.insert(CSV);
+    return Result;
   };
 
   // The general purpose argument registers this function passes on unchanged
@@ -1748,6 +1877,30 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
         if (ArgumentCSVs.contains(CSV))
           PassedToUnknownCallees.insert(CSV);
 
+  // A call through memory holding known functions passes them what one of
+  // them consumes, vector registers included, and what this function passes
+  // on unchanged counts as consumed here; it returns what one of them may
+  // return
+  for (auto &[BlockID, CallSite] : ABIResults.CallSites) {
+    const std::set<MetaAddress> *Targets = SlotTargets(BlockID);
+    if (Targets == nullptr)
+      continue;
+    CSVSet Consumed = UnionOver(*Targets, &RUAResults::ConsumedRegisters);
+    CSVSet Produced = UnionOver(*Targets, &RUAResults::ProducedRegisters);
+    std::erase_if(CallSite.ArgumentsRegisters, [&](auto *CSV) {
+      return VectorCSVs.contains(CSV) and not Consumed.contains(CSV);
+    });
+    for (auto *CSV : CallSite.IncomingRegisters) {
+      if (Consumed.contains(CSV)) {
+        CallSite.ArgumentsRegisters.insert(CSV);
+        PassedToUnknownCallees.insert(CSV);
+      }
+    }
+    std::erase_if(CallSite.ReturnValuesRegisters, [&](auto *CSV) {
+      return not Produced.contains(CSV);
+    });
+  }
+
   // What this function reads at its entry, and what it passes on unchanged to
   // unknown callees
   ABIResults.ConsumedRegisters = ABIResults.ArgumentsRegisters;
@@ -1779,6 +1932,9 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                It != DynamicCallees.end()) {
       CalleeReturns = &Oracle.getDynamicFunction(It->second)
                          .ABIResults.ReturnValuesRegisters;
+    } else if (const std::set<MetaAddress> *Targets = SlotTargets(BlockID)) {
+      Unknown = UnionOver(*Targets, &RUAResults::ProducedRegisters);
+      CalleeReturns = &Unknown;
     } else {
       Unknown = csvsOf(GeneralPurposeReturns);
       CalleeReturns = &Unknown;
@@ -1919,6 +2075,25 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
 
       if (Changed and Callee.isValid())
         Changes.Callees.insert(Callee);
+    }
+
+    // A call through memory holding known functions adjusts each of them as
+    // a call to it would
+    if (const std::set<MetaAddress> *Targets = SlotTargets(BlockID)) {
+      for (const MetaAddress &Target : *Targets) {
+        RUAResults &ToAdjust = Oracle.getLocalFunction(Target).ABIResults;
+        bool Changed = false;
+        for (auto *CSV : CallSite.ArgumentsRegisters)
+          if (ToAdjust.ConsumedRegisters.contains(CSV))
+            Changed |= ToAdjust.ArgumentsRegisters.insert(CSV).second;
+        for (auto *CSV : CallSite.ReturnValuesRegisters) {
+          Changed |= ToAdjust.ReadReturnValuesRegisters.insert(CSV).second;
+          if (ToAdjust.ProducedRegisters.contains(CSV))
+            Changed |= ToAdjust.ReturnValuesRegisters.insert(CSV).second;
+        }
+        if (Changed)
+          Changes.Callees.insert(Target);
+      }
     }
   }
 

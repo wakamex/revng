@@ -1,0 +1,91 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+# `wrapper` calls through `slot`, writable memory that starts out holding
+# `resolver`, which stores `fast` or `slow` there, by a CPU feature, and jumps
+# to it: the dispatch Rust's compiler_builtins uses for `fma`. `wrapper` does
+# not touch xmm0 to xmm2, it passes them on. Every value stored to `slot` is a
+# known function, so the call calls one of them: it passes the vector
+# registers they read and returns what they return, and `entry`'s three
+# doubles reach them. The call used to be one to an unknown callee, which takes
+# no vector registers, and `wrapper` and the call took and returned nothing.
+#
+# RUN: clang --target=x86_64-unknown-linux-gnu -c -fPIE %s -o %t.o
+# RUN: ld.lld -pie -s --build-id=none --eh-frame-hdr -z relro -e entry %t.o -o %t
+# RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
+# RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
+#
+# CHECK: generic512_t var_{{[0-9]+}} = function_0x{{[0-9a-f]+}}_Code_x86_64(var_{{[0-9]+}}, var_{{[0-9]+}}, int64_to_float64(argument_2
+# CHECK: generic512_t function_0x{{[0-9a-f]+}}_Code_x86_64(generic512_t register_zmm0 _REG(zmm0_x86_64), generic512_t register_zmm1 _REG(zmm1_x86_64), generic512_t register_zmm2 _REG(zmm2_x86_64)) {
+# CHECK-NEXT: generic64_t var_0 = ((rawfunction_{{[0-9]+}} *) {{.+}})(register_zmm0, register_zmm1, register_zmm2);
+
+.text
+.globl entry
+.type entry, @function
+entry:
+  .cfi_startproc
+  sub $8, %rsp
+  .cfi_def_cfa_offset 16
+  cvtsi2sd %rdi, %xmm0
+  cvtsi2sd %rsi, %xmm1
+  cvtsi2sd %rdx, %xmm2
+  call wrapper
+  cvttsd2si %xmm0, %rax
+  add $8, %rsp
+  .cfi_def_cfa_offset 8
+  ret
+  .cfi_endproc
+.size entry, .-entry
+
+.type wrapper, @function
+wrapper:
+  .cfi_startproc
+  push %rbp
+  .cfi_def_cfa_offset 16
+  mov %rsp, %rbp
+  mov slot(%rip), %rax
+  call *%rax
+  pop %rbp
+  .cfi_def_cfa_offset 8
+  ret
+  .cfi_endproc
+.size wrapper, .-wrapper
+
+.type resolver, @function
+resolver:
+  .cfi_startproc
+  mov feature(%rip), %eax
+  lea fast(%rip), %rcx
+  lea slow(%rip), %rdx
+  test %eax, %eax
+  cmovne %rcx, %rdx
+  mov %rdx, slot(%rip)
+  jmp *%rdx
+  .cfi_endproc
+.size resolver, .-resolver
+
+.type fast, @function
+fast:
+  .cfi_startproc
+  mulsd %xmm1, %xmm0
+  addsd %xmm2, %xmm0
+  ret
+  .cfi_endproc
+.size fast, .-fast
+
+.type slow, @function
+slow:
+  .cfi_startproc
+  movapd %xmm0, %xmm3
+  mulsd %xmm1, %xmm3
+  addsd %xmm2, %xmm3
+  movapd %xmm3, %xmm0
+  ret
+  .cfi_endproc
+.size slow, .-slow
+
+.data
+slot:
+  .quad resolver
+feature:
+  .long 1

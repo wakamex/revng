@@ -122,6 +122,12 @@ struct IndirectBranchFacts {
   /// address loaded from, as a call through a pointer loaded earlier into a
   /// register reads a GOT slot
   std::optional<uint64_t> CalleeLoadAddress;
+
+  /// Whether these are the facts of a pointer-sized store to a constant
+  /// address, rather than of a branch: the address, and the values stored if
+  /// they are all known constants
+  std::optional<uint64_t> StoreAddress;
+  std::optional<std::vector<uint64_t>> StoredValues;
 };
 
 /// A function outlined and prepared for the optimization pipeline, with what

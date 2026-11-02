@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <map>
 #include <set>
 
 #include "revng/ADT/MutableSet.h"
@@ -35,6 +36,14 @@ public:
   SortedVector<efa::BasicBlock> CFG;
   std::optional<int64_t> ElectedFSO;
   CSVSet WrittenRegisters;
+
+  /// The calls whose callee is loaded from a constant address, by block, with
+  /// that address
+  std::map<BasicBlockID, uint64_t> CallSlots;
+
+  /// The constant addresses the function stores pointer-sized values to, with
+  /// the values stored if they are all known constants
+  std::map<uint64_t, std::optional<std::set<uint64_t>>> SlotStores;
 
 public:
   FunctionSummary(MutableSet<model::FunctionAttribute::Values> Attributes,

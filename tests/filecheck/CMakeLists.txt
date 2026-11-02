@@ -451,6 +451,7 @@ set(FILECHECK_TESTS
     detect-abi/unknown-callers.S
     detect-abi/unknown-callers-vector.S
     detect-abi/unwind-entry-pointer.S
+    detect-abi/writable-slot-callees.S
     detect-abi/relocated-code-pointer.S
     detect-abi/trap-kinds.S
     lift/added-function-relift.S
