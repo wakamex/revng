@@ -23,6 +23,13 @@ functions = {int(f["Entry"].split(":")[0], 16): f.get("Name") or f"function_{f['
              for f in m.get("Functions", [])}
 
 
+def absolute64(relocation):
+    """Whether a model relocation writes an object's 64-bit absolute address, in either model schema."""
+    if relocation["Type"] == "WriteAbsoluteAddress64":
+        return True
+    return relocation["Type"] == "Absolute" and relocation.get("Size") == 8
+
+
 def place(address):
     """The data segment index and offset holding an image address, or None."""
     for index, (s, start) in enumerate(zip(segments, starts)):
@@ -65,7 +72,7 @@ for slot, addend in re.findall(r"^([0-9a-f]+)\s+[0-9a-f]+\s+R_X86_64_RELATIVE\s+
 for f in m.get("ImportedDynamicFunctions", []):
     for r in f.get("Relocations", []):
         where = place(int(r["Address"].split(":")[0], 16))
-        if r["Type"] != "WriteAbsoluteAddress64" or r.get("Addend", 0) or where is None:
+        if not absolute64(r) or r.get("Addend", 0) or where is None:
             relocated["other"] += 1
             continue
         externs.update({f"segment_{where[0]}", f["Name"]})
