@@ -19,17 +19,23 @@ struct RegisterWriters {
   /// Set of writes that have been read on any path leading to this point
   llvm::BitVector Read;
 
+  /// Set of writes that have been read other than by a comparison on any path
+  /// leading to this point
+  llvm::BitVector Consumed;
+
   bool operator==(const RegisterWriters &Other) const = default;
 
   RegisterWriters &operator|=(const RegisterWriters &Other) {
     Reaching |= Other.Reaching;
     Read |= Other.Read;
+    Consumed |= Other.Consumed;
     return *this;
   }
 
   RegisterWriters &operator&=(const RegisterWriters &Other) {
     Reaching &= Other.Reaching;
     Read &= Other.Read;
+    Consumed &= Other.Consumed;
     return *this;
   }
 };
@@ -87,19 +93,23 @@ public:
     for (unsigned I = 0; I < CSVWriteIndex.size(); ++I) {
       Default[I].Reaching.resize(CSVWriteIndex[I]);
       Default[I].Read.resize(CSVWriteIndex[I]);
+      Default[I].Consumed.resize(CSVWriteIndex[I]);
     }
   }
 
 public:
+  /// \return the registers with a write reaching \p ProgramPoint that is never
+  ///         read, or, with \p Consumed, never read other than by a comparison
   static llvm::BitVector compute(const WritersSet &ProgramPoint,
-                                 const WritersSet &Sink) {
+                                 const WritersSet &Sink,
+                                 bool Consumed = false) {
     llvm::BitVector Result;
     revng_assert(Sink.size() == ProgramPoint.size());
     Result.resize(ProgramPoint.size());
 
     unsigned Index = 0;
     for (const auto &[AtPoint, AtSink] : zip(ProgramPoint, Sink)) {
-      auto Unread = AtSink.Read;
+      auto Unread = Consumed ? AtSink.Consumed : AtSink.Read;
       Unread.flip();
       Result[Index] = AtPoint.Reaching.anyCommon(Unread);
       ++Index;
@@ -148,6 +158,10 @@ public:
         Writes.Reaching.reset();
       } break;
       case OperationType::Read: {
+        Writes.Read |= Writes.Reaching;
+        Writes.Consumed |= Writes.Reaching;
+      } break;
+      case OperationType::Examine: {
         Writes.Read |= Writes.Reaching;
       } break;
       case OperationType::Invalid:

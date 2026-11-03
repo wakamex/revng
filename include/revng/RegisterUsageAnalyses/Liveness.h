@@ -68,6 +68,7 @@ public:
 
       switch (Operation.Type) {
       case OperationType::Read:
+      case OperationType::Examine:
         Result.set(Operation.Target);
         break;
 

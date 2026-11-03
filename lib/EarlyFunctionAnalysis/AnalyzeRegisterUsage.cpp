@@ -77,6 +77,21 @@ static rua::Function::Node *findUnrechableNode(rua::Function::Node *Start) {
   return nullptr;
 }
 
+/// \return whether \p V is used only by integer comparisons, possibly after
+///         casts
+static bool isOnlyCompared(Value *V, unsigned Depth = 2) {
+  if (V->use_empty())
+    return false;
+  for (User *U : V->users()) {
+    if (isa<ICmpInst>(U))
+      continue;
+    if (isa<CastInst>(U) and Depth > 0 and isOnlyCompared(U, Depth - 1))
+      continue;
+    return false;
+  }
+  return true;
+}
+
 static rua::OperationType::Values storeType(Value *V, bool CalleeWritesReach) {
   Function *Callee = nullptr;
   if (auto *Call = dyn_cast<CallInst>(V))
@@ -162,7 +177,9 @@ fromLLVMFunction(llvm::Function &F,
 
       if (auto *Load = dyn_cast<LoadInst>(&I)) {
         // If reading a register, record it
-        CreateOperation(rua::OperationType::Read, Load->getPointerOperand());
+        CreateOperation(isOnlyCompared(Load) ? rua::OperationType::Examine :
+                                               rua::OperationType::Read,
+                        Load->getPointerOperand());
       } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
         // If writing a register, record it
         CreateOperation(storeType(Store->getValueOperand(), CalleeWritesReach),
@@ -365,14 +382,17 @@ RUAResults analyzeRegisterUsage(Function *F,
     auto AnalysisResult = GetMaximalFixedPoint(Configuration);
 
     auto Compute = [&AnalysisResult, &Function](rua::Function::Node *Node,
-                                                bool Before) {
+                                                bool Before,
+                                                bool Consumed = false) {
       const auto &SinkResults = AnalysisResult.at(Function.SinkNode).OutValue;
 
       const auto *NodeResults = &AnalysisResult.at(Node).OutValue;
       if (Before)
         NodeResults = &AnalysisResult.at(Node).InValue;
 
-      return rua::ReachingDefinitions::compute(*NodeResults, SinkResults);
+      return rua::ReachingDefinitions::compute(*NodeResults,
+                                               SinkResults,
+                                               Consumed);
     };
 
     revng_log(Log,
@@ -396,8 +416,10 @@ RUAResults analyzeRegisterUsage(Function *F,
                   << CallSite.Callee.toString() << " at " << PC.toString()
                   << " without ever being read:");
 
+      // A value the function only compares, as in `if (n != 0) f(p, n)`, is
+      // still in the register for the call
       auto *PreNode = CallSite.Block;
-      const BitVector &CallSiteResult = Compute(PreNode, true);
+      const BitVector &CallSiteResult = Compute(PreNode, true, true);
       for (auto *CSV : Function.Function.csvsInSet(CallSiteResult)) {
         // This CSV has at least one write that reaches the call site
         // without ever being read

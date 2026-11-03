@@ -62,6 +62,7 @@ public:
     for (const Operation &Operation : *Block) {
       switch (Operation.Type) {
       case OperationType::Read:
+      case OperationType::Examine:
         break;
 
       case OperationType::Write:

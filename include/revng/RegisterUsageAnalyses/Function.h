@@ -24,6 +24,9 @@ namespace OperationType {
 enum Values : uint8_t {
   Invalid,
   Read,
+  /// A read whose value is only compared: the register keeps the value, which
+  /// can still be passed to a call
+  Examine,
   Write,
   Clobber
 };
@@ -34,6 +37,8 @@ inline llvm::StringRef getName(Values V) {
     return "Invalid";
   case Read:
     return "Read";
+  case Examine:
+    return "Examine";
   case Write:
     return "Write";
   case Clobber:
