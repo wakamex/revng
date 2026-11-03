@@ -55,7 +55,11 @@ def initialize_data(model_path, binary, output):
             raise ValueError("segment relocations need explicit producer support")
     for f in model.get("ImportedDynamicFunctions", []):
         for r in f.get("Relocations", []):
-            if r["Type"] != "WriteAbsoluteAddress64" or r.get("Addend", 0):
+            # The model schema before rev.ng's 2026-09 relocation change, and after it
+            absolute64 = r["Type"] == "WriteAbsoluteAddress64" or (
+                r["Type"] == "Absolute" and r.get("Size") == 8
+            )
+            if not absolute64 or r.get("Addend", 0):
                 raise ValueError("unsupported imported relocation")
             address = int(r["Address"].split(":")[0], 16)
             s = next(
