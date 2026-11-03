@@ -230,7 +230,12 @@ public:
   void handleIndirectJump(revng::IRBuilder &Builder,
                           MetaAddress Block,
                           const efa::CSVSet &ClobberedRegisters,
-                          llvm::Value *SymbolNamePointer) final {
+                          llvm::Value *SymbolNamePointer,
+                          bool IsDirectTailCall) final {
+    // `handleCall` already called the target of a direct tail call
+    if (IsDirectTailCall)
+      return;
+
     // A jump the CFG records as a tail call calls its target, named or not;
     // `handleCall` emits nothing for any other indirect jump, such as a return
     revng_assert(SymbolNamePointer != nullptr);

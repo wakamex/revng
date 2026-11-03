@@ -204,6 +204,9 @@ public:
 
   FunctionSummary &getLocalFunction(MetaAddress PC);
 
+  /// \return whether a function of the binary starts at \p PC
+  bool isLocalFunction(MetaAddress PC);
+
   /// \return a description of the call and boolean indicating whether the call
   ///         site is a tail call or not.
   std::pair<const FunctionSummary *, bool>

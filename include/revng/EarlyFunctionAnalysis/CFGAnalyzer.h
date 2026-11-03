@@ -73,7 +73,8 @@ public:
   void handleIndirectJump(revng::IRBuilder &Builder,
                           MetaAddress Block,
                           const CSVSet &ClobberedRegisters,
-                          llvm::Value *SymbolNamePointer) final;
+                          llvm::Value *SymbolNamePointer,
+                          bool IsDirectTailCall) final;
 };
 
 /// Lifts the scan limits of MemorySSA and of memory dependence analysis for as

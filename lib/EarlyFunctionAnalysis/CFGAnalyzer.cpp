@@ -124,6 +124,15 @@ makeIndirectEdge(efa::FunctionEdgeType::Values Type) {
   return makeEdge(BasicBlockID::invalid(), Type);
 };
 
+/// \return the function \p Block calls directly as a tail call, if any
+static MetaAddress directTailCallee(const efa::BasicBlock &Block) {
+  for (const auto &Successor : Block.Successors())
+    if (auto *Call = llvm::dyn_cast<efa::CallEdge>(Successor.get()))
+      if (Call->IsTailCall() and Call->Destination().isValid())
+        return Call->Destination().notInlinedAddress();
+  return MetaAddress::invalid();
+}
+
 namespace efa {
 
 static efa::BasicBlock &
@@ -1111,11 +1120,14 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
                                                                Decoded);
 
     // Is this a tail call? If so, we are very interested in the FSO since
-    // it's useful to determine the FSO of the caller
-    auto &&[Summary, IsTailCall] = Oracle.getCallSite(Address,
-                                                      Block.ID(),
-                                                      MetaAddress::invalid(),
-                                                      Branch.CalledSymbol);
+    // it's useful to determine the FSO of the caller. A branch to another
+    // function's entry calls it as a tail call.
+    MetaAddress DirectCallee = directTailCallee(Block);
+    auto &&[Summary, IsMarkedTailCall] = Oracle.getCallSite(Address,
+                                                            Block.ID(),
+                                                            DirectCallee,
+                                                            Branch.CalledSymbol);
+    bool IsTailCall = IsMarkedTailCall or DirectCallee.isValid();
 
     if (Branch.StackPointerOffset.has_value()) {
       int64_t FSO = *Branch.StackPointerOffset;
@@ -1206,10 +1218,16 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
         efa::BasicBlock &Block = blockFromIndirectBranchInfo(*CI,
                                                              CFG,
                                                              Decoded);
-        revng_assert(Block.Successors().size() == 1);
-        auto OldEdge = cast<efa::CallEdge>(Block.Successors().begin()->get());
-        revng_assert(OldEdge->IsTailCall());
-        Block.Successors() = { makeIndirectEdge(LongJmp) };
+        // The block's other successors, such as the fallthrough of a
+        // conditional branch to another function, stay
+        auto IsTailCallEdge = [](const auto &Edge) {
+          auto *Call = dyn_cast<efa::CallEdge>(Edge.get());
+          return Call != nullptr and Call->IsTailCall();
+        };
+        auto It = llvm::find_if(Block.Successors(), IsTailCallEdge);
+        revng_assert(It != Block.Successors().end());
+        Block.Successors().erase(It);
+        Block.Successors().insert(makeIndirectEdge(LongJmp));
       }
     }
 
@@ -1726,13 +1744,13 @@ void CallSummarizer::handlePostNoReturn(revng::IRBuilder &Builder,
 void CallSummarizer::handleIndirectJump(revng::IRBuilder &Builder,
                                         MetaAddress Block,
                                         const CSVSet &ClobberedRegisters,
-                                        llvm::Value *SymbolNamePointer) {
-  bool EmitCallHook = true;
+                                        llvm::Value *SymbolNamePointer,
+                                        bool IsDirectTailCall) {
+  // A direct tail call has its call hooks already: it only returns here
+  bool EmitCallHook = not IsDirectTailCall;
 
-  if (ReturnBlocks != nullptr) {
-    bool IsReturn = ReturnBlocks->count(Block) != 0;
-    EmitCallHook = not IsReturn;
-  }
+  if (ReturnBlocks != nullptr and ReturnBlocks->count(Block) != 0)
+    EmitCallHook = false;
 
   CallInst *NewPreCallHook = nullptr;
   CallInst *NewPostCallHook = nullptr;

@@ -29,6 +29,9 @@
 
 using namespace llvm;
 
+/// Marks the jump to anypc ending a direct tail call
+static constexpr const char *DirectTailCallMDName = "revng.direct-tail-call";
+
 namespace efa {
 
 class OutlinedFunctionsMap {
@@ -285,6 +288,36 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
   Queue.insert(AnyPCBB);
   Queue.insert(UnexpectedPCBB);
 
+  // A branch to the entry of another function is a tail call to it: compilers
+  // jump to a function only to call it with the caller's frame already gone.
+  // Following the branch would copy the callee's code into the caller.
+  // A block holds a single call site, so a branch with more than one such
+  // destination, or one that may also jump to anypc, such as after a syscall,
+  // keeps the callees' code.
+  std::vector<std::pair<BasicBlock *, BasicBlock *>> DirectTailCalls;
+  auto MayJumpToAnyPC = [&](const BasicBlock *JumpTarget) {
+    // Visit the blocks translating the jump target's instructions
+    llvm::SmallPtrSet<const BasicBlock *, 8> Visited;
+    llvm::SmallVector<const BasicBlock *, 8> Worklist = { JumpTarget };
+    while (not Worklist.empty()) {
+      const BasicBlock *Block = Worklist.pop_back_val();
+      for (const BasicBlock *Successor : successors(Block)) {
+        if (Successor == AnyPCBB or Successor == UnexpectedPCBB
+            or isPartOfRootDispatcher(const_cast<BasicBlock *>(Successor)))
+          return true;
+        if (not isJumpTarget(Successor) and Visited.insert(Successor).second)
+          Worklist.push_back(Successor);
+      }
+    }
+    return false;
+  };
+  auto DirectTailCallee = [&](BasicBlock *Successor) {
+    MetaAddress Address = getBasicBlockAddress(Successor);
+    return Address.isValid() and Address != FunctionAddress
+           and RootF.getBlockAt(Address) == Successor
+           and Oracle.isLocalFunction(Address);
+  };
+
   //
   // Collect list of blocks to clone
   //
@@ -312,9 +345,29 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
         Queue.insert(getFallthrough(Current));
       }
     } else {
-      for (auto *Successor : successors(Current)) {
-        if (not isPartOfRootDispatcher(Successor))
-          Queue.insert(Successor);
+      llvm::SmallSetVector<BasicBlock *, 4> Successors;
+      Successors.insert(succ_begin(Current), succ_end(Current));
+      unsigned Callees = llvm::count_if(Successors, DirectTailCallee);
+      if (Callees != 0 and MayJumpToAnyPC(getJumpTargetBlock(Current)))
+        Callees = 0;
+      for (auto *Successor : Successors) {
+        if (isPartOfRootDispatcher(Successor))
+          continue;
+        if (Callees == 1 and DirectTailCallee(Successor)) {
+          // A function whose code has to be inlined keeps its code here
+          MetaAddress Callee = getBasicBlockAddress(Successor);
+          auto &&[Summary, _] = getCallSiteInfo(FunctionAddress,
+                                                Current,
+                                                nullptr,
+                                                nullptr,
+                                                Callee);
+          using namespace model::FunctionAttribute;
+          if (not Summary->Attributes.contains(HasOneBrokenReturn)) {
+            DirectTailCalls.emplace_back(Current, Successor);
+            continue;
+          }
+        }
+        Queue.insert(Successor);
       }
     }
   }
@@ -402,6 +455,50 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
     }
   }
 
+  //
+  // Branch to a tail call in place of each other function's entry
+  //
+  for (auto &&[Caller, Entry] : DirectTailCalls) {
+    auto *Cloned = cast<BasicBlock>(VMap[Caller]);
+    MetaAddress Callee = getBasicBlockAddress(Entry);
+    auto &&[Summary, _] = getCallSiteInfo(FunctionAddress,
+                                          Cloned,
+                                          nullptr,
+                                          nullptr,
+                                          Callee);
+    MetaAddress CallerBlock = getBasicBlockAddress(getJumpTargetBlock(Cloned));
+    revng_assert(CallerBlock.isValid());
+
+    auto *TailCall = BasicBlock::Create(Root->getContext(), "", Root);
+    Cloned->getTerminator()->replaceSuccessorWith(Entry, TailCall);
+    llvm::DebugLoc DebugLocation = Cloned->getTerminator()->getDebugLoc();
+    auto *Branch = BranchInst::Create(OutlinedFunction.AnyPCCloned, TailCall);
+    Branch->setDebugLoc(DebugLocation);
+    // The call hooks below describe this jump to anypc
+    Branch->setMetadata(DirectTailCallMDName, MDNode::get(M.getContext(), {}));
+
+    // TODO: the checks should be enabled conditionally based on the user.
+    revng::IRBuilder Builder(Branch);
+    using namespace model::FunctionAttribute;
+    bool IsNoReturn = Summary->Attributes.contains(NoReturn);
+    using CPN = ConstantPointerNull;
+    TheCallHandler->handleCall(CallerBlock,
+                               Builder,
+                               Callee,
+                               Summary->ClobberedRegisters,
+                               Summary->ElectedFSO,
+                               IsNoReturn,
+                               true,
+                               CPN::get(Type::getInt8PtrTy(M.getContext())));
+    if (IsNoReturn) {
+      Branch->eraseFromParent();
+      Builder.SetInsertPoint(TailCall);
+      TheCallHandler->handlePostNoReturn(Builder, DebugLocation);
+    }
+
+    BlocksToExtract.push_back(TailCall);
+  }
+
   if (not HasEntryBlock) {
     auto *EntryBlock = BasicBlock::Create(Root->getContext(), "", Root);
     emitAbort(EntryBlock, "This starts at non-executable address");
@@ -465,6 +562,7 @@ void Outliner::createAnyPCHooks(CallHandler *TheCallHandler,
   // well. The results will not be merged eventually, if the indirect jump turns
   // out to be a proper return.
   for (auto *Term : IndirectBranchPredecessors) {
+    bool IsDirectTailCall = Term->getMetadata(DirectTailCallMDName) != nullptr;
     auto *BB = Term->getParent();
     auto *JumpTargetBB = getJumpTargetBlock(BB);
     MetaAddress IndirectRetBBAddress = getBasicBlockAddress(JumpTargetBB);
@@ -496,7 +594,8 @@ void Outliner::createAnyPCHooks(CallHandler *TheCallHandler,
     TheCallHandler->handleIndirectJump(Builder,
                                        IndirectRetBBAddress,
                                        Summary->ClobberedRegisters,
-                                       SymbolName);
+                                       SymbolName,
+                                       IsDirectTailCall);
   }
 }
 

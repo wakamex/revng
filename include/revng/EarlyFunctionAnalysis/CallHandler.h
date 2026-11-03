@@ -34,11 +34,15 @@ public:
   virtual void handlePostNoReturn(revng::IRBuilder &Builder,
                                   const llvm::DebugLoc &DbgLocation) = 0;
 
+  /// \p IsDirectTailCall marks the jump ending a direct tail call, for which
+  /// `handleCall` already ran.
+  ///
   /// \note Implementers should not emit a terminator
   virtual void handleIndirectJump(revng::IRBuilder &Builder,
                                   MetaAddress Block,
                                   const CSVSet &ClobberedRegisters,
-                                  llvm::Value *SymbolNamePointer) = 0;
+                                  llvm::Value *SymbolNamePointer,
+                                  bool IsDirectTailCall) = 0;
 };
 
 } // namespace efa

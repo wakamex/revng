@@ -167,6 +167,13 @@ const FunctionSummary &FunctionSummaryOracle::getDefault() {
   return Default.value();
 }
 
+bool FunctionSummaryOracle::isLocalFunction(MetaAddress PC) {
+  bool Result = Binary.Functions().contains(PC);
+  if (Recorder != nullptr)
+    Recorder->recordIsFunction(PC, Result);
+  return Result;
+}
+
 FunctionSummary &FunctionSummaryOracle::getLocalFunction(MetaAddress PC) {
   if (not LocalFunctions.contains(PC)) {
     const model::Function &Function = Binary.Functions().at(PC);
