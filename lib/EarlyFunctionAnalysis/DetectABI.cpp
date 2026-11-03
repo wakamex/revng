@@ -535,6 +535,16 @@ void DetectABI::computeApproximateCallGraph() {
       } else {
 
         for (BasicBlock *Successor : successors(Current)) {
+          // A branch to another function's entry calls it as a tail call
+          auto It = BasicBlockNodeMap.find(Successor);
+          if (It != BasicBlockNodeMap.end()
+              and It->second->Address != Function.Entry()) {
+            auto IsCurrentSuccessor = [&It](auto &Successor) {
+              return Successor == It->second;
+            };
+            if (not any_of(StartNode->successors(), IsCurrentSuccessor))
+              StartNode->addSuccessor(It->second);
+          }
           if (not isPartOfRootDispatcher(Successor)
               && !Visited.contains(Successor)) {
             revng_assert(Successor != nullptr);

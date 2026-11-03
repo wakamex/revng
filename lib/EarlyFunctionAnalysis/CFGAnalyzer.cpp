@@ -1344,6 +1344,15 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
     }
   }
 
+  // A direct tail call, which has no indirect branch result, returns where its
+  // callee does
+  for (const efa::BasicBlock &Block : CFG)
+    for (const auto &Edge : Block.Successors())
+      if (auto *Call = dyn_cast<CallEdge>(Edge.get()))
+        if (Call->IsTailCall() and Call->Destination().isValid()
+            and not isNoReturn(*Binary, Oracle, *Call, Recording))
+          FoundReturn = true;
+
   revng_log(Log, "FoundReturn: " << FoundReturn);
   revng_log(Log, "FoundBrokenReturn: " << FoundBrokenReturn);
   revng_log(Log, "BrokenReturnCount: " << BrokenReturnCount);
