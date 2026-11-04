@@ -1319,6 +1319,17 @@ CFGAnalyzer::milkInfo(const MetaAddress &Address,
     revng_log(Log,
               "Committing the indirect branch of "
                 << CI->Block.toString() << " to " << Block.ID().toString());
+    // A direct tail call gets a result only when the stack analysis cannot
+    // confirm it, for instance with the stack pointer unknown: the result
+    // takes the place of the call
+    if (directTailCallee(Block).isValid()) {
+      auto IsTailCallEdge = [](const auto &Successor) {
+        auto *Call = dyn_cast<efa::CallEdge>(Successor.get());
+        return Call != nullptr and Call->IsTailCall();
+      };
+      Block.Successors().erase(llvm::find_if(Block.Successors(),
+                                             IsTailCallEdge));
+    }
     Block.Successors().insert(std::move(Edge));
   }
 
