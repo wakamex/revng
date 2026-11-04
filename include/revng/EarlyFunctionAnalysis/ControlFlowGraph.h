@@ -38,6 +38,10 @@ public:
 
 public:
   void simplify(const model::Binary &Binary);
+
+  /// Remove the blocks the entry does not reach, given the callees that the
+  /// model says do not return
+  void removeUnreachableBlocks(const model::Binary &Binary);
 };
 
 #include "revng/EarlyFunctionAnalysis/Generated/Late/ControlFlowGraph.h"

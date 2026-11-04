@@ -1473,6 +1473,11 @@ void DetectABI::finalizeModel() {
   for (auto &Function : Functions) {
     auto &Summary = Oracle.getLocalFunction(Function->Entry());
     efa::ControlFlowGraph FM(Function->Entry(), "", Summary.CFG);
+    // A callee found not to return after the CFG was collected, such as one
+    // called through a slot, leaves the code after the call unreachable, an
+    // exception landing pad for instance
+    FM.removeUnreachableBlocks(*Binary);
+    Summary.CFG = FM.Blocks();
     FM.verify(*Binary, true);
   }
 

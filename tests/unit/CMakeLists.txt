@@ -606,3 +606,17 @@ target_link_libraries(test_speculative_worklist revngSupport
                       Boost::unit_test_framework ${LLVM_LIBRARIES})
 revng_add_test(NAME test_speculative_worklist COMMAND test_speculative_worklist)
 set_tests_properties(test_speculative_worklist PROPERTIES LABELS "unit")
+
+#
+# test_control_flow_graph
+#
+
+revng_add_test_executable(test_control_flow_graph "${SRC}/ControlFlowGraph.cpp")
+target_compile_definitions(test_control_flow_graph
+                           PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_control_flow_graph PRIVATE "${CMAKE_SOURCE_DIR}")
+target_link_libraries(test_control_flow_graph revngEarlyFunctionAnalysis
+                      revngModel revngSupport revngUnitTestHelpers
+                      Boost::unit_test_framework ${LLVM_LIBRARIES})
+revng_add_test(NAME test_control_flow_graph COMMAND test_control_flow_graph)
+set_tests_properties(test_control_flow_graph PROPERTIES LABELS "unit")

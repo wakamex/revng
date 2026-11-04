@@ -160,6 +160,13 @@ void ControlFlowGraph::serialize(RootFunction &Root) const {
   Term->setMetadata(ControlFlowGraphMDName, Node);
 }
 
+void ControlFlowGraph::removeUnreachableBlocks(const model::Binary &Binary) {
+  FunctionCFGVerificationHelper Helper(*this, Binary);
+  for (const FunctionCFGNode *Node : Helper.unreachableNodes())
+    if (Node->ID.isValid())
+      Blocks().erase(Node->ID);
+}
+
 void ControlFlowGraph::simplify(const model::Binary &Binary) {
   // If A does not end with a call and A.end == B.start and A is the only
   // predecessor of B and B is the only successor of A, merge
