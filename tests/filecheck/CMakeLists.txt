@@ -483,6 +483,7 @@ set(FILECHECK_TESTS
     detect-abi/trap-kinds.S
     lift/added-function-relift.S
     lift/cpu-state-initializers-layout.S
+    lift/cpuid.S
     lift/dead-csv-out-arguments.S
     lift/globaldata-instruction-interiors.S
     model/clift-shared-types.S

@@ -302,6 +302,21 @@ int memfd_create(const char *name, unsigned int flags) {
   return -1;
 }
 
+#if defined(TARGET_x86_64) || defined(TARGET_i386)
+#include <cpuid.h>
+
+// The CPUID answers helper_cpuid returns: the host's, as the original program
+// would see running on it
+void revng_cpuid(uint32_t leaf,
+                 uint32_t subleaf,
+                 uint32_t *eax,
+                 uint32_t *ebx,
+                 uint32_t *ecx,
+                 uint32_t *edx) {
+  __cpuid_count(leaf, subleaf, *eax, *ebx, *ecx, *edx);
+}
+#endif
+
 void unknown_pc() {
   int arg;
   fprintf(stderr, "Unknown PC: ");

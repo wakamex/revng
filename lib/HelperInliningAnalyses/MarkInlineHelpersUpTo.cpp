@@ -36,6 +36,11 @@ static constexpr unsigned MaxBodyInstructions = 100;
 /// after stripping the file name, ends in one of these suffixes.
 static constexpr StringLiteral RuntimeLibraryDirectories[] = { "fpu" };
 
+/// Functions the helpers declare and the translated program's runtime defines,
+/// such as the host CPUID `helper_cpuid` returns. They are leaves too, so the
+/// lifted code calls them directly.
+static constexpr StringLiteral RuntimeProvidedFunctions[] = { "revng_cpuid" };
+
 /// True if the directory containing `F`'s definition ends in one of
 /// `DirectorySuffixes`.
 static bool isDefinedUnderDirectory(const Function &F,
@@ -91,8 +96,13 @@ public:
       revng_log(Log, "Collecting runtime-library leaf functions:");
       LoggerIndent Indent(Log);
       for (Function &F : M) {
-        if (F.isDeclaration())
+        if (F.isDeclaration()) {
+          if (llvm::is_contained(RuntimeProvidedFunctions, F.getName())) {
+            Leaves.insert(&F);
+            revng_log(Log, F.getName());
+          }
           continue;
+        }
         if (isDefinedUnderDirectory(F, RuntimeLibraryDirectories)) {
           Leaves.insert(&F);
           revng_log(Log, F.getName());
