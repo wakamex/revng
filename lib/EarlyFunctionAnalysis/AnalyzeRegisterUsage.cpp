@@ -39,6 +39,11 @@ struct CallSite {
   using Node = rua::Function::Node;
 
   Node *Block = nullptr;
+
+  /// The node after the call, which starts by writing the return values of
+  /// the callee
+  Node *AfterCall = nullptr;
+
   MetaAddress Callee;
 
   void setCallee(MetaAddress Callee) {
@@ -136,6 +141,8 @@ fromLLVMFunction(llvm::Function &F,
   Result.ReturnNode->addSuccessor(Result.SinkNode);
   Preserve.insert(Result.SinkNode);
 
+  std::map<BasicBlockID, llvm::BasicBlock *> AfterCallBlocks;
+
   uint8_t RegistersCount = 0;
 
   // Translate the function
@@ -216,6 +223,8 @@ fromLLVMFunction(llvm::Function &F,
           revng_assert(&*BB->getTerminator()->getPrevNode() == &I);
           revng_assert(Result.CallSites.contains(PC));
           revng_assert(Result.CallSites.at(PC).Block == NewNode);
+          if (llvm::BasicBlock *Next = BB->getSingleSuccessor())
+            AfterCallBlocks[PC] = Next;
         } else if (isCallTo(Call, RetHook)) {
           // This is a proper return, link to the exit node
           NewNode->addSuccessor(Result.ReturnNode);
@@ -234,6 +243,13 @@ fromLLVMFunction(llvm::Function &F,
     for (llvm::BasicBlock *Successor : successors(LLVMBlock)) {
       revng_assert(BlocksMap.count(Successor) != 0);
       Node->addSuccessor(BlocksMap[Successor]);
+    }
+  }
+
+  for (auto &[PC, Next] : AfterCallBlocks) {
+    if (auto It = BlocksMap.find(Next); It != BlocksMap.end()) {
+      Result.CallSites.at(PC).AfterCall = It->second;
+      Preserve.insert(It->second);
     }
   }
 
@@ -341,7 +357,10 @@ RUAResults analyzeRegisterUsage(Function *F,
       auto &ResultsCallSite = FinalResults.CallSites[PC];
       ResultsCallSite.CalleeAddress = CallSite.Callee;
 
-      auto *PostNode = CallSite.Block;
+      // What is alive after the return values of the callee are written: a
+      // register the callee returns and the caller reads is read after the
+      // call too
+      auto *PostNode = CallSite.AfterCall ? CallSite.AfterCall : CallSite.Block;
       revng_log(Log,
                 "Registers alive after the call to "
                   << CallSite.Callee.toString() << " at " << PC.toString()
