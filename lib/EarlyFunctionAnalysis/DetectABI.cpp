@@ -387,7 +387,8 @@ private:
 
   model::UpcastableType
   buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
-                                const efa::BasicBlock &CallerBlock);
+                                const efa::BasicBlock &CallerBlock,
+                                const std::set<MetaAddress> *Targets);
 };
 
 /// A call whose callee is loaded from writable memory, such as a function
@@ -1464,7 +1465,11 @@ void DetectABI::finalizeModel() {
           bool HasInfoOnEdge = CallSitePrototypes.contains(BlockAddress);
           if (not IsDynamic and not IsDirect and not HasInfoOnEdge) {
             // It's an indirect call for which we have now call site information
-            auto Prototype = buildPrototypeForIndirectCall(Summary, Block);
+            auto It = SlotCallees.find({ Function->Entry(), Block.ID() });
+            auto *Targets = It == SlotCallees.end() ? nullptr : &It->second;
+            auto Prototype = buildPrototypeForIndirectCall(Summary,
+                                                           Block,
+                                                           Targets);
 
             // This analysis does not have the power to detect whether an
             // indirect call site is a tail call, noreturn or inline
@@ -1626,8 +1631,27 @@ void DetectABI::propagatePrototypesInFunction(model::Function &Function) {
 
 model::UpcastableType
 DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
-                                         const efa::BasicBlock &CallerBlock) {
+                                         const efa::BasicBlock &CallerBlock,
+                                         const std::set<MetaAddress> *Targets) {
   using namespace model;
+
+  // For a call through memory holding known functions, a register is as wide
+  // as in their prototypes, which take and return what they use of it, so
+  // that the call and the functions agree on its C type
+  auto AsWideAsTargets = [&](CSVSet &CSVs, CSVSet RUAResults::*Member) {
+    if (Targets == nullptr)
+      return;
+    auto Architecture = Binary->Architecture();
+    std::set<Register::Values> Registers;
+    for (auto *CSV : CSVs)
+      Registers.insert(Register::Portion(CSV->getName(), Architecture)
+                         .Register);
+    for (const MetaAddress &Target : *Targets)
+      for (auto *CSV : Oracle.getLocalFunction(Target).ABIResults.*Member)
+        if (Registers.contains(Register::Portion(CSV->getName(), Architecture)
+                                 .Register))
+          CSVs.insert(CSV);
+  };
 
   auto &&[Prototype, NewType] = Binary->makeRawFunctionDefinition();
   Prototype.Architecture() = getCodeArchitecture(CallerBlock.ID().start());
@@ -1646,6 +1670,7 @@ DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
     CSVSet Arguments = deducedArguments(CallSites.ArgumentsRegisters);
     for (auto *CSV : CallSites.ArgumentsRegisters)
       Arguments.insert(CSV);
+    AsWideAsTargets(Arguments, &RUAResults::ArgumentsRegisters);
     recordRegisters(Arguments, Prototype.Arguments().batch_insert());
 
     // A tail call returns what the caller returns
@@ -1655,6 +1680,7 @@ DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
         if (Call->IsTailCall())
           for (auto *CSV : CallerSummary.ABIResults.ReturnValuesRegisters)
             ReturnValues.insert(CSV);
+    AsWideAsTargets(ReturnValues, &RUAResults::ReturnValuesRegisters);
     recordRegisters(ReturnValues, Prototype.ReturnValues().batch_insert());
   }
   revng_assert(Found);

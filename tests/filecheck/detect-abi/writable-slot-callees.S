@@ -9,6 +9,10 @@
 # registers they read and returns what they return, and `entry`'s three
 # doubles reach them. The call used to be one to an unknown callee, which takes
 # no vector registers, and `wrapper` and the call took and returned nothing.
+# The call's prototype has the registers as wide as the prototypes of the
+# functions do, so that C passes and returns them the same way: it returned
+# the 8 bytes of xmm0 `wrapper` keeps, and C returned the 64 bytes of zmm0 the
+# functions return through memory the call did not provide.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -c -fPIE %s -o %t.o
 # RUN: ld.lld -pie -s --build-id=none --eh-frame-hdr -z relro -e entry %t.o -o %t
@@ -17,7 +21,7 @@
 #
 # CHECK: generic512_t var_{{[0-9]+}} = function_0x{{[0-9a-f]+}}_Code_x86_64(var_{{[0-9]+}}, var_{{[0-9]+}}, int64_to_float64(argument_2
 # CHECK: generic512_t function_0x{{[0-9a-f]+}}_Code_x86_64(generic512_t register_zmm0 _REG(zmm0_x86_64), generic512_t register_zmm1 _REG(zmm1_x86_64), generic512_t register_zmm2 _REG(zmm2_x86_64)) {
-# CHECK-NEXT: generic64_t var_0 = ((rawfunction_{{[0-9]+}} *) {{.+}})(register_zmm0, register_zmm1, register_zmm2);
+# CHECK-NEXT: generic512_t var_0 = ((rawfunction_{{[0-9]+}} *) {{.+}})(register_zmm0, register_zmm1, register_zmm2);
 
 .text
 .globl entry
