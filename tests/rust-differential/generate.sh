@@ -30,6 +30,10 @@ stubs.append("unsigned long revng_undefined_local_sp(void) { return 0; }")
 stubs.append("void cpu_x86_cpuid(void *env, unsigned index, unsigned count, unsigned *a, unsigned *b, unsigned *c, "
              "unsigned *d) { (void)env; __asm__ volatile(\"cpuid\" : \"=a\"(*a), \"=b\"(*b), \"=c\"(*c), \"=d\"(*d) "
              ": \"a\"(index), \"c\"(count)); }")
+# The runtime function the fork's helper_cpuid calls: the host's answers too
+stubs.append("void revng_cpuid(unsigned leaf, unsigned subleaf, unsigned *a, unsigned *b, unsigned *c, unsigned *d) "
+             "{ __asm__ volatile(\"cpuid\" : \"=a\"(*a), \"=b\"(*b), \"=c\"(*c), \"=d\"(*d) "
+             ": \"a\"(leaf), \"c\"(subleaf)); }")
 # glibc's old classification entry points, which QEMU's softfloat calls and current glibc keeps for existing
 # binaries only
 stubs.append("int __fpclassify(double x) { return fpclassify(x); }")
