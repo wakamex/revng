@@ -315,6 +315,13 @@ void revng_cpuid(uint32_t leaf,
                  uint32_t *edx) {
   __cpuid_count(leaf, subleaf, *eax, *ebx, *ecx, *edx);
 }
+
+// The extended control register helper_xgetbv returns: the host's
+uint64_t revng_xgetbv(uint32_t ecx) {
+  uint32_t eax, edx;
+  __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(ecx));
+  return ((uint64_t) edx << 32) | eax;
+}
 #endif
 
 void unknown_pc() {

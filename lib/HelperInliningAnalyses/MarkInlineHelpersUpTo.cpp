@@ -37,9 +37,11 @@ static constexpr unsigned MaxBodyInstructions = 100;
 static constexpr StringLiteral RuntimeLibraryDirectories[] = { "fpu" };
 
 /// Functions the helpers declare and the translated program's runtime defines,
-/// such as the host CPUID `helper_cpuid` returns. They are leaves too, so the
-/// lifted code calls them directly.
-static constexpr StringLiteral RuntimeProvidedFunctions[] = { "revng_cpuid" };
+/// such as the host CPUID `helper_cpuid` returns and the host XCR0
+/// `helper_xgetbv` does. They are leaves too, so the lifted code calls them
+/// directly.
+static constexpr StringLiteral RuntimeProvidedFunctions[] = { "revng_cpuid",
+                                                              "revng_xgetbv" };
 
 /// True if the directory containing `F`'s definition ends in one of
 /// `DirectorySuffixes`.

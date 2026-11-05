@@ -34,6 +34,8 @@ stubs.append("void cpu_x86_cpuid(void *env, unsigned index, unsigned count, unsi
 stubs.append("void revng_cpuid(unsigned leaf, unsigned subleaf, unsigned *a, unsigned *b, unsigned *c, unsigned *d) "
              "{ __asm__ volatile(\"cpuid\" : \"=a\"(*a), \"=b\"(*b), \"=c\"(*c), \"=d\"(*d) "
              ": \"a\"(leaf), \"c\"(subleaf)); }")
+stubs.append("unsigned long revng_xgetbv(unsigned ecx) { unsigned a, d; __asm__ volatile(\"xgetbv\" : \"=a\"(a), "
+             "\"=d\"(d) : \"c\"(ecx)); return ((unsigned long) d << 32) | a; }")
 # glibc's old classification entry points, which QEMU's softfloat calls and current glibc keeps for existing
 # binaries only
 stubs.append("int __fpclassify(double x) { return fpclassify(x); }")
