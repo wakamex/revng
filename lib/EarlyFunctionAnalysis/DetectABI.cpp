@@ -1175,6 +1175,16 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
         RegisterReader.read(Builder, const_cast<GlobalVariable *>(CSV));
       }
 
+      // A call through memory holding known functions reads what one of them
+      // consumes, as a call to it does: the caller may pass on registers it
+      // does not touch itself
+      if (auto It = SlotCallees.find({ Function.Entry(), CallerBlock });
+          It != SlotCallees.end())
+        for (const MetaAddress &Target : It->second)
+          for (auto *CSV :
+               Oracle.getLocalFunction(Target).ABIResults.ConsumedRegisters)
+            RegisterReader.read(Builder, const_cast<GlobalVariable *>(CSV));
+
       // Ensure the precall_hook is the first instruction of the block
       BB->splitBasicBlockBefore(Call);
     } else {
