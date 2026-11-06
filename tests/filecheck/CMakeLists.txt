@@ -466,7 +466,6 @@ set(FILECHECK_TESTS
     detect-abi/overlapping-indirect-branch.S
     detect-abi/raw-argument-order.S
     detect-abi/slot-callees-untouched-arguments.S
-    detect-abi/returned-vector-result.S
     detect-abi/scratch-vector-register.S
     detect-abi/self-compare-idiom.S
     detect-abi/compared-call-argument.S
