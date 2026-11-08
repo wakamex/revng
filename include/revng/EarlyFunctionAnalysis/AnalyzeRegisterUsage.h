@@ -85,6 +85,12 @@ public:
   /// this function only if it is one of these.
   CSVSet ProducedRegisters;
 
+  /// The argument registers this function stores to the register save area
+  /// of a variadic function, which `va_arg` reads the variable arguments from.
+  /// They are no arguments of the function itself: each call passes those its
+  /// caller sets.
+  CSVSet VariadicRegisters;
+
   // Per call site analysis
   std::map<BasicBlockID, CallSiteResults> CallSites;
 
@@ -103,6 +109,7 @@ public:
     HandleMap(ReadReturnValuesRegisters, Other.ReadReturnValuesRegisters);
     HandleMap(ConsumedRegisters, Other.ConsumedRegisters);
     HandleMap(ProducedRegisters, Other.ProducedRegisters);
+    HandleMap(VariadicRegisters, Other.VariadicRegisters);
 
     for (auto &[OtherBlockID, OtherResults] : Other.CallSites) {
       HandleMap(CallSites[OtherBlockID].ArgumentsRegisters,

@@ -218,6 +218,7 @@ static uint64_t abiState(const efa::RUAResults &Results) {
   hashCSVs(Hash, Results.ReadReturnValuesRegisters);
   hashCSVs(Hash, Results.ConsumedRegisters);
   hashCSVs(Hash, Results.ProducedRegisters);
+  hashCSVs(Hash, Results.VariadicRegisters);
   for (const auto &[Block, CallSite] : Results.CallSites) {
     // Indirect call sites have no callee address
     const MetaAddress &Callee = CallSite.CalleeAddress;
@@ -384,6 +385,18 @@ private:
                       OutlinedFunction &OutlinedFunction);
 
   CSVSet findWrittenRegisters(llvm::Function *F);
+
+  /// \return the argument registers \p F stores to the register save area of
+  /// a variadic function, if it has one
+  CSVSet findVariadicRegisters(llvm::Function &F) const;
+
+  /// \return the prototype of the call ending \p CallerBlock to the variadic
+  /// function \p Callee: its fixed arguments and the variable ones the caller
+  /// sets, or nothing if the callee has no raw prototype
+  model::UpcastableType
+  buildPrototypeForVariadicCall(const FunctionSummary &CallerSummary,
+                                const efa::BasicBlock &CallerBlock,
+                                const model::Function &Callee);
 
   model::UpcastableType
   buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
@@ -1463,6 +1476,24 @@ void DetectABI::finalizeModel() {
           bool IsDirect = CE->Destination().isValid();
           bool IsDynamic = not CE->DynamicFunction().empty();
           bool HasInfoOnEdge = CallSitePrototypes.contains(BlockAddress);
+          // A call to a variadic function passes the variable arguments its
+          // caller sets
+          if (IsDirect and not HasInfoOnEdge) {
+            const auto &Callee = Binary->Functions().at(CE->Destination()
+                                                          .start());
+            const auto &CalleeResults = Oracle
+                                          .getLocalFunction(Callee.Entry())
+                                          .ABIResults;
+            if (not CalleeResults.VariadicRegisters.empty()) {
+              auto Prototype = buildPrototypeForVariadicCall(Summary,
+                                                             Block,
+                                                             Callee);
+              if (not Prototype.isEmpty())
+                Function->CallSitePrototypes().emplace(BlockAddress,
+                                                       std::move(Prototype),
+                                                       CE->IsTailCall());
+            }
+          }
           if (not IsDynamic and not IsDirect and not HasInfoOnEdge) {
             // It's an indirect call for which we have now call site information
             auto It = SlotCallees.find({ Function->Entry(), Block.ID() });
@@ -1627,6 +1658,120 @@ void DetectABI::propagatePrototypesInFunction(model::Function &Function) {
 
   // TODO: should this be done at a higher abstraction level?
   model::deduplicateCollidingNames(Binary);
+}
+
+CSVSet DetectABI::findVariadicRegisters(llvm::Function &F) const {
+  using namespace llvm;
+  auto Architecture = Binary->Architecture();
+  const auto &ABI = abi::Definition::get(Binary->DefaultABI());
+  std::set<model::Register::Values> Arguments;
+  for (auto Register : ABI.GeneralPurposeArgumentRegisters())
+    Arguments.insert(Register);
+  std::set<model::Register::Values> Vector;
+  for (auto Register : ABI.FloatArgumentRegisters())
+    Vector.insert(Register);
+  Arguments.insert(Vector.begin(), Vector.end());
+
+  // Whether a load of an argument register's CSV that may read the value the
+  // function received, one no store to the CSV precedes on some path from the
+  // entry, is stored to memory. Its value can have other uses too: the
+  // optimizer forwards it to the loads `va_arg` makes from the save area.
+  auto IsStored = [](LoadInst *Load) {
+    return llvm::any_of(Load->users(), [&](User *U) {
+      auto *Store = dyn_cast<StoreInst>(U);
+      return Store != nullptr and Store->getValueOperand() == Load
+             and not isa<GlobalVariable>(Store->getPointerOperand());
+    });
+  };
+  std::map<GlobalVariable *, bool> SavedCSVs;
+  for (GlobalVariable &CSV : F.getParent()->globals()) {
+    model::Register::Portion Portion(CSV.getName(), Architecture);
+    if (not Arguments.contains(Portion.Register))
+      continue;
+    bool Saved = false;
+    SmallPtrSet<llvm::BasicBlock *, 16> Visited;
+    SmallVector<llvm::BasicBlock *, 16> Worklist{ &F.getEntryBlock() };
+    while (not Worklist.empty() and not Saved) {
+      llvm::BasicBlock *BB = Worklist.pop_back_val();
+      if (not Visited.insert(BB).second)
+        continue;
+      bool Overwritten = false;
+      for (Instruction &I : *BB) {
+        if (auto *Store = dyn_cast<StoreInst>(&I);
+            Store != nullptr and Store->getPointerOperand() == &CSV) {
+          Overwritten = true;
+          break;
+        }
+        if (auto *Load = dyn_cast<LoadInst>(&I);
+            Load != nullptr and Load->getPointerOperand() == &CSV)
+          Saved = Saved or IsStored(Load);
+      }
+      if (not Overwritten)
+        for (llvm::BasicBlock *Successor : llvm::successors(BB))
+          Worklist.push_back(Successor);
+    }
+    if (Saved)
+      SavedCSVs[&CSV] = true;
+  }
+
+  // A function saving all the vector argument registers so has a register save
+  // area; the general purpose ones it saves with them are in it too
+  std::set<model::Register::Values> SavedVector;
+  for (auto &[CSV, Saved] : SavedCSVs) {
+    model::Register::Portion Portion(CSV->getName(), Architecture);
+    if (Saved and Vector.contains(Portion.Register))
+      SavedVector.insert(Portion.Register);
+  }
+  if (SavedVector != Vector)
+    return {};
+
+  CSVSet Result;
+  for (auto &[CSV, Saved] : SavedCSVs)
+    if (Saved)
+      Result.insert(CSV);
+  return Result;
+}
+
+model::UpcastableType
+DetectABI::buildPrototypeForVariadicCall(const FunctionSummary &CallerSummary,
+                                         const efa::BasicBlock &CallerBlock,
+                                         const model::Function &Callee) {
+  using namespace model;
+  const auto *CalleePrototype = Callee.prototype();
+  const auto *Raw = llvm::dyn_cast_or_null<RawFunctionDefinition>(CalleePrototype);
+  if (Raw == nullptr)
+    return {};
+
+  const RUAResults &CalleeResults = Oracle.getLocalFunction(Callee.Entry())
+                                      .ABIResults;
+  auto It = CallerSummary.ABIResults.CallSites.find(CallerBlock.ID());
+  if (It == CallerSummary.ABIResults.CallSites.end())
+    return {};
+
+  // The variable arguments are those the caller writes before the call and
+  // does not read again, of the registers the callee saves
+  CSVSet Variable;
+  for (auto *CSV : It->second.ArgumentsRegisters)
+    if (CalleeResults.VariadicRegisters.contains(CSV))
+      Variable.insert(CSV);
+  if (Variable.empty())
+    return {};
+
+  auto &&[Prototype, NewType] = Binary->makeRawFunctionDefinition();
+  Prototype.Architecture() = Raw->Architecture();
+  for (const auto &Argument : Raw->Arguments())
+    Prototype.Arguments().insert(Argument);
+  CSVSet Arguments = deducedArguments(Variable);
+  for (auto *CSV : Variable)
+    Arguments.insert(CSV);
+  for (const auto &Argument : registersOf(Arguments))
+    if (not Prototype.Arguments().contains(Argument))
+      recordRegisters(csvsOf({ Argument }), Prototype.Arguments().batch_insert());
+  for (const auto &ReturnValue : Raw->ReturnValues())
+    Prototype.ReturnValues().insert(ReturnValue);
+  Prototype.PreservedRegisters() = Raw->PreservedRegisters();
+  Prototype.FinalStackOffset() = Raw->FinalStackOffset();
+  return std::move(NewType);
 }
 
 model::UpcastableType
@@ -1869,6 +2014,13 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
   // Refine ABI analyses results by suppressing callee-saved and stack
   // pointer registers.
   suppressCalleeSaved(ABIResults, ActualCalleeSavedRegs);
+
+  // The stores of a variadic function's register save area read no argument:
+  // the variable arguments are each call's
+  ABIResults.VariadicRegisters = findVariadicRegisters(*OutlinedFunction
+                                                          .Function);
+  for (auto *CSV : ABIResults.VariadicRegisters)
+    ABIResults.ArgumentsRegisters.erase(CSV);
 
   // A call to an imported function has no callee address either, but the
   // imported function's prototype tells what it reads and returns: only calls
