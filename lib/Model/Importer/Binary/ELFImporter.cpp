@@ -1061,16 +1061,7 @@ void ELFImporter<T, HasAddend>::parseDynamicSymbol(Elf_Sym_Impl<T> &Symbol,
     revng_log(ELFImporterLog, "This is an imported symbol");
     if (IsCode) {
       // Create dynamic function symbol
-      auto &Function = Model->ImportedDynamicFunctions()[Name.str()];
-
-      // Functions that never return, whatever their declarations say: the
-      // Itanium C++ ABI's _Unwind_Resume goes on unwinding, but GCC's
-      // unwind.h declares it without noreturn, so prototypes taken from
-      // headers miss it, and the code after each landing pad would become
-      // part of the function before it
-      static constexpr llvm::StringLiteral NeverReturn[] = { "_Unwind_Resume" };
-      if (llvm::is_contained(NeverReturn, Name))
-        Function.Attributes().insert(model::FunctionAttribute::NoReturn);
+      Model->ImportedDynamicFunctions()[Name.str()];
     } else {
       // TODO: create dynamic global variable
       revng_log(ELFImporterLog, "Ignoring non-code");
