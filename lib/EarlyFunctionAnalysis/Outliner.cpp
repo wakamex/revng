@@ -372,6 +372,14 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
     }
   }
 
+  // A callee this function also reaches some other way, such as by falling
+  // through into it, has its code here: a branch to its entry stays a branch
+  // into that copy
+  const std::set<BasicBlock *> Reached = Queue.visited();
+  llvm::erase_if(DirectTailCalls, [&Reached](const auto &TailCall) {
+    return Reached.contains(TailCall.second);
+  });
+
   //
   // Create a copy of all the basic blocks to outline in `root`
   //
