@@ -497,6 +497,7 @@ set(FILECHECK_TESTS
     model/microsoft-stack-arguments.S
     model/microsoft-float-arguments.S
     model/sysv-float-arguments.S
+    model/microsoft-home-space.S
     segment-references/c-strings-outside-code.S
     lift/got-pointer-function.S
     lift/unwind-entry-after-call.S

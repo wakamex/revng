@@ -637,6 +637,17 @@ TCC::tryConvertingStackArguments(const model::UpcastableType &StackStruct,
     }
   }
 
+  // The area some ABIs reserve at the top of the stack for the register
+  // arguments belongs to the callee, which may spill registers there. A stack
+  // area that ends inside it holds no arguments.
+  if (ABI.UnusedStackArgumentBytes() != 0
+      and Stack.Size() <= ABI.UnusedStackArgumentBytes()) {
+    revng_log(Log,
+              "The stack area is inside the part reserved for register "
+              "arguments: there are no stack arguments.");
+    return llvm::SmallVector<model::Argument, 8>{};
+  }
+
   uint64_t StackSize = paddedSizeOnStack(Stack.Size(),
                                          adjustedAlignment(Stack));
 
