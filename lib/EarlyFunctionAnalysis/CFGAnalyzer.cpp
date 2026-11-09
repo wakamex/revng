@@ -291,8 +291,10 @@ llvm::FunctionType *CFGAnalyzer::createCallMarkerType(llvm::Module &M) {
   Type *I8Ptr = Type::getInt8PtrTy(Context);
   Type *BoolType = Type::getInt1Ty(Context);
   Type *Void = Type::getVoidTy(Context);
+  // The caller's block, the callee, its symbol, whether it is a tail call and
+  // whether it ends the caller's code
   return llvm::FunctionType::get(Void,
-                                 { I8Ptr, I8Ptr, I8Ptr, BoolType },
+                                 { I8Ptr, I8Ptr, I8Ptr, BoolType, BoolType },
                                  false);
 }
 
@@ -348,6 +350,9 @@ CFGAnalyzer::handleCall(llvm::CallInst *PreCallHookCall) {
 
   auto *CE = cast<efa::CallEdge>(Edge.get());
   CE->IsTailCall() = IsTailCall;
+  // A call that ends its function does not return whatever its callee does
+  if (getLimitedValue(PreCallHookCall->getArgOperand(4)) == 1)
+    CE->Attributes().insert(model::FunctionAttribute::NoReturn);
   if (IsDynamicCall)
     CE->DynamicFunction() = SymbolName.str();
 
@@ -1702,6 +1707,7 @@ void CallSummarizer::handleCall(MetaAddress CallerBlock,
                                 const CSVSet &ClobberedRegisters,
                                 const std::optional<int64_t> &MaybeFSO,
                                 bool IsNoReturn,
+                                bool EndsFunction,
                                 bool IsTailCall,
                                 llvm::Value *SymbolNamePointer) {
   using namespace llvm;
@@ -1710,10 +1716,11 @@ void CallSummarizer::handleCall(MetaAddress CallerBlock,
   // Mark end of basic block with a pre-hook call
   Value *IsTailCallValue = ConstantInt::getBool(Context, IsTailCall);
 
-  SmallVector<Value *, 4> Args = { CallerBlock.toValue(M),
+  SmallVector<Value *, 5> Args = { CallerBlock.toValue(M),
                                    Callee.toValue(M),
                                    SymbolNamePointer,
-                                   IsTailCallValue };
+                                   IsTailCallValue,
+                                   ConstantInt::getBool(Context, EndsFunction) };
 
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
 
@@ -1779,7 +1786,8 @@ void CallSummarizer::handleIndirectJump(revng::IRBuilder &Builder,
                                         { Block.toValue(M),
                                           MetaAddress::invalid().toValue(M),
                                           SymbolNamePointer,
-                                          Builder.getTrue() });
+                                          Builder.getTrue(),
+                                          Builder.getFalse() });
 
     // Emulate registers being clobbered
     for (GlobalVariable *Register : ClobberedRegisters)
@@ -1789,7 +1797,8 @@ void CallSummarizer::handleIndirectJump(revng::IRBuilder &Builder,
                                          { Block.toValue(M),
                                            MetaAddress::invalid().toValue(M),
                                            SymbolNamePointer,
-                                           Builder.getTrue() });
+                                           Builder.getTrue(),
+                                           Builder.getFalse() });
   }
 
   Builder.CreateCall(RetHook, { Block.toValue(M) });

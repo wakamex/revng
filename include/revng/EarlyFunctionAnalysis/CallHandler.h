@@ -20,6 +20,9 @@ class CallHandler {
 public:
   virtual ~CallHandler() {}
 
+  /// \p EndsFunction marks a call that does not return whatever its callee
+  /// does, because no code of the caller follows it.
+  ///
   /// \note Implementers should not emit a terminator
   virtual void handleCall(MetaAddress CallerBlock,
                           revng::IRBuilder &Builder,
@@ -27,6 +30,7 @@ public:
                           const CSVSet &ClobberedRegisters,
                           const std::optional<int64_t> &MaybeFSO,
                           bool IsNoReturn,
+                          bool EndsFunction,
                           bool IsTailCall,
                           llvm::Value *SymbolNamePointer) = 0;
 

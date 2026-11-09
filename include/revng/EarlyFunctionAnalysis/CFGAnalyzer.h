@@ -64,6 +64,7 @@ public:
                   const CSVSet &ClobberedRegisters,
                   const std::optional<int64_t> &MaybeFSO,
                   bool IsNoReturn,
+                  bool EndsFunction,
                   bool IsTailCall,
                   llvm::Value *SymbolNamePointer) final;
 

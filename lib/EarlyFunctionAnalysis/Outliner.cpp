@@ -17,6 +17,7 @@
 #include "revng/EarlyFunctionAnalysis/CallHandler.h"
 #include "revng/EarlyFunctionAnalysis/Outliner.h"
 #include "revng/Lift/Helpers.h"
+#include "revng/Lift/JumpTargetReason.h"
 #include "revng/Model/IRHelpers.h"
 #include "revng/Support/BlockType.h"
 #include "revng/Support/EmitAbort.h"
@@ -128,12 +129,47 @@ bool OutlinedFunctionsMap::banRecursiveFunctions() {
   return Result;
 }
 
+bool Outliner::callEndsFunction(llvm::BasicBlock *CallBlock) const {
+  // Padding between functions that executes, such as a multi-byte `nop`, only
+  // moves the program counter on to the next address
+  auto IsPadding = [this](llvm::BasicBlock *Block) {
+    llvm::BasicBlock *Next = Block->getSingleSuccessor();
+    if (Next == nullptr)
+      return false;
+
+    for (llvm::Instruction &I : *Block) {
+      if (I.isTerminator() or NewPCHelper.getCall(&I).has_value())
+        continue;
+
+      if (auto *Store = llvm::dyn_cast<llvm::StoreInst>(&I)) {
+        if (Store->getPointerOperand() != Globals.pcReg())
+          return false;
+      } else if (I.mayHaveSideEffects()) {
+        return false;
+      }
+    }
+
+    auto &&[Last, Size] = getPC(Block->getTerminator());
+    return Last + Size == getBasicBlockAddress(Next);
+  };
+
+  llvm::BasicBlock *Next = getFallthrough(CallBlock);
+  llvm::SmallPtrSet<llvm::BasicBlock *, 4> Visited;
+  while (Next != nullptr and Visited.insert(Next).second and IsPadding(Next))
+    Next = Next->getSingleSuccessor();
+
+  using namespace JumpTargetReason;
+  return Next != nullptr and Next->getTerminator()->hasMetadata(MDName)
+         and hasReason(getReasons(Next), UnwindEntry);
+}
+
 void Outliner::integrateFunctionCallee(CallHandler *TheCallHandler,
                                        MetaAddress CallerFunction,
                                        llvm::BasicBlock *CallerBlock,
                                        llvm::CallInst *FunctionCall,
                                        llvm::CallInst *JumpToSymbol,
                                        MetaAddress Callee,
+                                       bool EndsFunction,
                                        OutlinedFunctionsMap &FunctionsMap) {
   llvm::LLVMContext &Context = M.getContext();
 
@@ -191,7 +227,7 @@ void Outliner::integrateFunctionCallee(CallHandler *TheCallHandler,
   }
 
   using namespace model::FunctionAttribute;
-  bool IsNoReturn = Summary->Attributes.contains(NoReturn);
+  bool IsNoReturn = EndsFunction or Summary->Attributes.contains(NoReturn);
 
   if (IsInline) {
     // Emit a call to the function to inline: a later step will inline this call
@@ -243,6 +279,7 @@ void Outliner::integrateFunctionCallee(CallHandler *TheCallHandler,
                                Summary->ClobberedRegisters,
                                Summary->ElectedFSO,
                                IsNoReturn,
+                               EndsFunction,
                                IsTailCall,
                                SymbolNamePointer);
 
@@ -274,6 +311,9 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
   OutlinedFunction.Address = FunctionAddress;
   OnceQueue<BasicBlock *> Queue;
   std::vector<BasicBlock *> BlocksToClone;
+  // The `function_call` markers of the calls for which callEndsFunction holds:
+  // those of `root` first, then their clones
+  SmallPtrSet<CallInst *, 4> CallsEndingFunction;
 
   auto *AnyPCBB = RootF.anyPC();
   auto *UnexpectedPCBB = RootF.unexpectedPC();
@@ -338,12 +378,14 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
                                                      JumpToSymbol,
                                                      PCCallee);
 
-      // Unless it's NoReturn, enqueue the call fallthrough
+      // Unless it's NoReturn or the last instruction of the function, enqueue
+      // the call fallthrough
       using namespace model::FunctionAttribute;
       bool IsNoReturn = Summary->Attributes.contains(NoReturn);
-      if (not IsNoReturn and not IsTailCall) {
+      if (callEndsFunction(Current))
+        CallsEndingFunction.insert(FunctionCall);
+      else if (not IsNoReturn and not IsTailCall)
         Queue.insert(getFallthrough(Current));
-      }
     } else {
       llvm::SmallSetVector<BasicBlock *, 4> Successors;
       Successors.insert(succ_begin(Current), succ_end(Current));
@@ -401,6 +443,13 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
   //
   remapInstructionsInBlocks(BlocksToExtract, VMap);
 
+  {
+    SmallPtrSet<CallInst *, 4> Cloned;
+    for (CallInst *FunctionCall : CallsEndingFunction)
+      Cloned.insert(cast<CallInst>(VMap[FunctionCall]));
+    CallsEndingFunction = std::move(Cloned);
+  }
+
   //
   // Switch successor of function calls from callee to fallthrough
   //
@@ -424,7 +473,8 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
                                                            PCCallee);
 
       using namespace model::FunctionAttribute;
-      bool IsNoReturn = CalleeSummary->Attributes.contains(NoReturn);
+      bool IsNoReturn = CallsEndingFunction.contains(FunctionCall)
+                        or CalleeSummary->Attributes.contains(NoReturn);
       if (IsNoReturn) {
         auto *BB = Term->getParent();
         Term->eraseFromParent();
@@ -496,6 +546,7 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
                                Summary->ClobberedRegisters,
                                Summary->ElectedFSO,
                                IsNoReturn,
+                               false,
                                true,
                                CPN::get(Type::getInt8PtrTy(M.getContext())));
     if (IsNoReturn) {
@@ -543,6 +594,7 @@ Outliner::outlineFunctionInternal(CallHandler *TheCallHandler,
                               FunctionCall,
                               JumpToSymbol,
                               Callee,
+                              CallsEndingFunction.contains(FunctionCall),
                               FunctionsToInline);
     }
   }

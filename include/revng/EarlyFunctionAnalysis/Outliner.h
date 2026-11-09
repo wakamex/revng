@@ -171,12 +171,21 @@ private:
                   llvm::CallInst *JumpToSymbol,
                   MetaAddress Callee);
 
+  /// \return whether the call ending \p CallBlock, a block of `root`, is the
+  ///         last instruction of its function: past any padding, its return
+  ///         address is where the unwind information starts another function.
+  ///         No code of the caller follows such a call, so it does not return,
+  ///         whatever is known of its callee.
+  bool callEndsFunction(llvm::BasicBlock *CallBlock) const;
+
+  /// \p EndsFunction is what callEndsFunction returned for the call
   void integrateFunctionCallee(CallHandler *TheCallHandler,
                                MetaAddress Caller,
                                llvm::BasicBlock *CallerBlock,
                                llvm::CallInst *FunctionCall,
                                llvm::CallInst *JumpToSymbol,
                                MetaAddress Callee,
+                               bool EndsFunction,
                                OutlinedFunctionsMap &FunctionsToInline);
 
   llvm::Function *

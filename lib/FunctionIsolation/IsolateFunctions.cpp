@@ -212,6 +212,7 @@ public:
                   const efa::CSVSet &ClobberedRegisters,
                   const std::optional<int64_t> &MaybeFSO,
                   bool IsNoReturn,
+                  bool EndsFunction,
                   bool IsTailCall,
                   llvm::Value *SymbolNamePointer) final {
     revng_assert(MaybeFSO == std::nullopt,
