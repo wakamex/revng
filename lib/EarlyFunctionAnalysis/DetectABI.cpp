@@ -1683,11 +1683,24 @@ CSVSet DetectABI::findVariadicRegisters(llvm::Function &F) const {
              and not isa<GlobalVariable>(Store->getPointerOperand());
     });
   };
+  // Only a function loading every vector argument register can have a save
+  // area, which leaves out almost every function cheaply
+  CSVSet ArgumentCSVs = csvsOf(Arguments);
+  std::set<model::Register::Values> LoadedVector;
+  for (Instruction &I : instructions(F))
+    if (auto *Load = dyn_cast<LoadInst>(&I))
+      if (auto *CSV = dyn_cast<GlobalVariable>(Load->getPointerOperand());
+          CSV != nullptr and ArgumentCSVs.contains(CSV)) {
+        model::Register::Portion Portion(CSV->getName(), Architecture);
+        if (Vector.contains(Portion.Register))
+          LoadedVector.insert(Portion.Register);
+      }
+  if (LoadedVector != Vector)
+    return {};
+
   std::map<GlobalVariable *, bool> SavedCSVs;
-  for (GlobalVariable &CSV : F.getParent()->globals()) {
-    model::Register::Portion Portion(CSV.getName(), Architecture);
-    if (not Arguments.contains(Portion.Register))
-      continue;
+  for (auto *ConstCSV : ArgumentCSVs) {
+    auto &CSV = *const_cast<GlobalVariable *>(ConstCSV);
     bool Saved = false;
     SmallPtrSet<llvm::BasicBlock *, 16> Visited;
     SmallVector<llvm::BasicBlock *, 16> Worklist{ &F.getEntryBlock() };
