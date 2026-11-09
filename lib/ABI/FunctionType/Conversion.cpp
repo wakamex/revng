@@ -321,7 +321,9 @@ static bool verifyAlignment(const abi::Definition &ABI,
     return false;
   }
 
-  uint64_t ExpectedOffset = 0;
+  // The first stack argument follows the area some ABIs reserve at the top of
+  // the stack for the register arguments.
+  uint64_t ExpectedOffset = ABI.UnusedStackArgumentBytes();
   if (Previous.has_value()) {
     uint64_t PaddedSize = paddedSizeOnStack(Previous->Size,
                                             Previous->Alignment);
@@ -441,6 +443,39 @@ TCC::tryConvertingStackArguments(const model::UpcastableType &StackStruct,
     return llvm::SmallVector<model::Argument, 8>{};
   }
   auto &Stack = StackStruct->toStruct();
+
+  // Data layout analysis can merge what the callee reads and its callers write
+  // on the stack into a union at the start of the area, with one struct of the
+  // whole area for each. When every struct has fields of the same sizes at the
+  // same offsets they describe the same arguments: take the first.
+  if (Stack.Fields().size() == 1 and Stack.Fields().begin()->Offset() == 0) {
+    if (const auto *Union = Stack.Fields().begin()->Type()->getUnion()) {
+      auto Layout = [&](const model::UpcastableType &Type) {
+        std::optional<llvm::SmallVector<std::pair<uint64_t, uint64_t>, 4>>
+          Result;
+        const auto *Struct = Type->getStruct();
+        if (Struct == nullptr or Struct->Size() != Stack.Size())
+          return Result;
+        Result.emplace();
+        for (const model::StructField &Field : Struct->Fields())
+          Result->emplace_back(Field.Offset(), *Field.Type()->size());
+        return Result;
+      };
+      const auto &First = Union->Fields().begin()->Type();
+      auto FirstLayout = Layout(First);
+      auto SameLayout = [&](const model::UnionField &Member) {
+        return Layout(Member.Type()) == FirstLayout;
+      };
+      if (FirstLayout.has_value()
+          and llvm::all_of(Union->Fields(), SameLayout)) {
+        revng_log(Log,
+                  "The stack arguments are a union of structs with the same "
+                  "layout, taking the first");
+        return tryConvertingStackArguments(First, std::move(Distributor));
+      }
+    }
+  }
+
   uint64_t StackSize = paddedSizeOnStack(Stack.Size(),
                                          adjustedAlignment(Stack));
 
