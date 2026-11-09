@@ -369,6 +369,32 @@ tryConvertToCABI(const model::RawFunctionDefinition &FunctionType,
 }
 
 using TCC = ToCABIConverter;
+/// The C type of a value \p Register holds with type \p Type, or
+/// `std::nullopt` if there is none.
+///
+/// A C argument or return value is placed in a vector register only if its
+/// type is a floating point one, so a value detect-abi found in one, typed as
+/// generic, is a `float` or a `double` of its size. A wider value there, such
+/// as a vector, has no C type the ABI places in a single vector register.
+static std::optional<model::UpcastableType>
+typeIn(model::Register::Values Register, const model::UpcastableType &Type) {
+  if (model::Register::getPrimitiveKind(Register) != model::PrimitiveKind::Float)
+    return Type.copy();
+
+  if (Type->isFloatPrimitive())
+    return Type.copy();
+
+  std::optional<uint64_t> Size = Type->size();
+  if (Type->isGenericPrimitive() and Size.has_value()
+      and (*Size == 4 or *Size == 8))
+    return model::PrimitiveType::makeFloat(*Size);
+
+  revng_log(Log,
+            "A value in " << model::Register::getName(Register).str()
+                          << " has no C type placed in that register.");
+  return std::nullopt;
+}
+
 std::optional<llvm::SmallVector<model::Argument, 8>>
 TCC::tryConvertingRegisterArguments(RFTArguments Registers) {
   // Rely onto the register state deduction to make sure no "holes" are
@@ -399,7 +425,10 @@ TCC::tryConvertingRegisterArguments(RFTArguments Registers) {
       Current.Name() = CurrentRegisterIterator->Name();
 
       revng_assert(!CurrentRegisterIterator->Type().isEmpty());
-      Current.Type() = CurrentRegisterIterator->Type().copy();
+      auto Type = typeIn(Register, CurrentRegisterIterator->Type());
+      if (not Type.has_value())
+        return std::nullopt;
+      Current.Type() = std::move(*Type);
     } else {
       // This register is unused but we still have to create an argument
       // for it. Otherwise the resulting function will be semantically different
@@ -410,7 +439,10 @@ TCC::tryConvertingRegisterArguments(RFTArguments Registers) {
       // converted back to the representation similar to original (e.g. when
       // producing the `Layout` for this function).
       using Primitive = model::PrimitiveType;
-      Result.emplace_back().Type() = Primitive::makeGeneric(Register);
+      auto Type = typeIn(Register, Primitive::makeGeneric(Register));
+      if (not Type.has_value())
+        Type = Primitive::makeFloat(8);
+      Result.emplace_back().Type() = std::move(*Type);
     }
   }
 
@@ -852,14 +884,29 @@ TCC::tryConvertingReturnValue(RFTReturnValues Registers) {
   if (Ordered.size() == 1) {
     if (auto Iter = Registers.find(*Ordered.begin()); Iter != Registers.end()) {
       // Only one register is used, just return its type.
-      return Iter->Type();
+      return typeIn(Iter->Location(), Iter->Type());
     } else {
       // One register is used but its type cannot be obtained.
       // Create a register sized return type instead.
-      return model::PrimitiveType::make(*Ordered.begin());
+      model::Register::Values Register = *Ordered.begin();
+      if (model::Register::getPrimitiveKind(Register)
+          == model::PrimitiveKind::Float)
+        return typeIn(Register, model::PrimitiveType::makeGeneric(Register));
+      return model::PrimitiveType::make(Register);
     }
   } else {
     // Multiple registers, it's either a struct or a big scalar.
+
+    // Both are built of general purpose registers only.
+    for (model::Register::Values Register : Ordered) {
+      if (model::Register::getPrimitiveKind(Register)
+          == model::PrimitiveKind::Float) {
+        revng_log(Log,
+                  "Return values in several registers, one of them a vector "
+                  "register, are not supported.");
+        return std::nullopt;
+      }
+    }
 
     // First, check if it can possibly be a struct.
     if (ABI.MaximumGPRsPerAggregateReturnValue() < Ordered.size()) {

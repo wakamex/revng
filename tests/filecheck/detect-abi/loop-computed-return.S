@@ -18,9 +18,9 @@
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
-# CHECK: generic512_t scale(
-# CHECK: generic512_t [[RESULT:var_[0-9]+]] = scale(
-# CHECK-NEXT: float64_to_int64_round_to_zero([[RESULT]],
+# CHECK: float64_t scale(
+# CHECK: float64_t [[RESULT:var_[0-9]+]] = scale(
+# CHECK-NEXT: float64_to_int64_round_to_zero(bit_cast(generic64_t, [[RESULT]]),
 
 	.text
 	.globl	scale

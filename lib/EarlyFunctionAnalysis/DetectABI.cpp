@@ -359,6 +359,8 @@ private:
 
   /// \return the CSVs that compose \p Registers
   CSVSet csvsOf(const abi::Definition::RegisterSet &Registers) const;
+  CSVSet csvsOf(const abi::Definition::RegisterSet &Registers,
+                const CSVSet &Used) const;
 
   /// \return the arguments or the return values that the raw \p Registers
   ///         become once `applyABIDeductions` has run
@@ -1255,6 +1257,37 @@ CSVSet DetectABI::csvsOf(const abi::Definition::RegisterSet &Registers) const {
   return Result;
 }
 
+/// The CSVs of \p Registers that are in \p Used, and the first CSV of each
+/// register none of whose CSVs is: the ABI deductions work on whole registers,
+/// and a register is as wide in a prototype as the CSVs of it in use, so a
+/// double in `xmm0` stays a `generic64_t` rather than all of `zmm0`. A register
+/// the deductions add is not read, and its first CSV is enough to hold its
+/// place.
+CSVSet DetectABI::csvsOf(const abi::Definition::RegisterSet &Registers,
+                         const CSVSet &Used) const {
+  CSVSet Result;
+  for (const auto &Register : Registers) {
+    llvm::GlobalVariable *First = nullptr;
+    bool Any = false;
+    for (const model::Register::CSV &RegisterCSV :
+         model::Register::getCSVs(Register)) {
+      llvm::GlobalVariable *CSV = M.getGlobalVariable(RegisterCSV.Name, true);
+      if (CSV == nullptr)
+        continue;
+      if (First == nullptr)
+        First = CSV;
+      if (Used.contains(CSV)) {
+        Result.insert(CSV);
+        Any = true;
+      }
+    }
+    if (not Any and First != nullptr)
+      Result.insert(First);
+  }
+
+  return Result;
+}
+
 CSVSet DetectABI::deducedArguments(const CSVSet &Registers) const {
   if (ABIEnforcement == NoABIEnforcement)
     return Registers;
@@ -1262,10 +1295,10 @@ CSVSet DetectABI::deducedArguments(const CSVSet &Registers) const {
   auto ABI = abi::Definition::get(Binary->DefaultABI());
   auto Set = registersOf(Registers);
   if (ABIEnforcement == FullABIEnforcement)
-    return csvsOf(ABI.enforceArgumentRegisterState(std::move(Set)));
+    return csvsOf(ABI.enforceArgumentRegisterState(std::move(Set)), Registers);
 
   if (auto R = ABI.tryDeducingArgumentRegisterState(std::move(Set)))
-    return csvsOf(*R);
+    return csvsOf(*R, Registers);
 
   return Registers;
 }
@@ -1277,10 +1310,11 @@ CSVSet DetectABI::deducedReturnValues(const CSVSet &Registers) const {
   auto ABI = abi::Definition::get(Binary->DefaultABI());
   auto Set = registersOf(Registers);
   if (ABIEnforcement == FullABIEnforcement)
-    return csvsOf(ABI.enforceReturnValueRegisterState(std::move(Set)));
+    return csvsOf(ABI.enforceReturnValueRegisterState(std::move(Set)),
+                  Registers);
 
   if (auto R = ABI.tryDeducingReturnValueRegisterState(std::move(Set)))
-    return csvsOf(*R);
+    return csvsOf(*R, Registers);
 
   return Registers;
 }
@@ -1349,8 +1383,10 @@ void DetectABI::applyABIDeductions() {
         continue; // Register deduction failed.
     }
 
-    efa::CSVSet ResultingArguments = csvsOf(Arguments);
-    efa::CSVSet ResultingReturnValues = csvsOf(RValues);
+    efa::CSVSet ResultingArguments = csvsOf(Arguments,
+                                            Summary.ABIResults
+                                              .ArgumentsRegisters);
+    efa::CSVSet ResultingReturnValues = csvsOf(RValues, Returned);
 
     for (auto &Block : Summary.CFG) {
       for (auto &Edge : Block.Successors()) {
@@ -1780,7 +1816,8 @@ DetectABI::buildPrototypeForVariadicCall(const FunctionSummary &CallerSummary,
     Arguments.insert(CSV);
   for (const auto &Argument : registersOf(Arguments))
     if (not Prototype.Arguments().contains(Argument))
-      recordRegisters(csvsOf({ Argument }), Prototype.Arguments().batch_insert());
+      recordRegisters(csvsOf({ Argument }, Arguments),
+                      Prototype.Arguments().batch_insert());
   for (const auto &ReturnValue : Raw->ReturnValues())
     Prototype.ReturnValues().insert(ReturnValue);
   Prototype.PreservedRegisters() = Raw->PreservedRegisters();

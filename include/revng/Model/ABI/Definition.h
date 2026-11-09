@@ -147,10 +147,24 @@ private:
     if (RVL != Invalid && !llvm::is_contained(GPRs, RVL))
       Result.emplace_back(RVL);
 
+    // When arguments are position based, the argument at position `I` is in
+    // the `I`-th general purpose or floating point register, so the order is
+    // that of the positions.
+    const auto &FPRs = FloatArgumentRegisters();
+    if (ArgumentsArePositionBased()) {
+      for (size_t I = 0; I < std::max(GPRs.size(), FPRs.size()); ++I) {
+        if (I < GPRs.size() and !llvm::is_contained(Result, GPRs[I]))
+          Result.emplace_back(GPRs[I]);
+        if (I < FPRs.size() and !llvm::is_contained(Result, FPRs[I]))
+          Result.emplace_back(FPRs[I]);
+      }
+      return Result;
+    }
+
     for (auto Register : GPRs)
       if (!llvm::is_contained(Result, Register))
         Result.emplace_back(Register);
-    for (auto Register : FloatArgumentRegisters())
+    for (auto Register : FPRs)
       if (!llvm::is_contained(Result, Register))
         Result.emplace_back(Register);
 
