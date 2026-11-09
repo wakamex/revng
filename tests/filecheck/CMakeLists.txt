@@ -499,6 +499,7 @@ set(FILECHECK_TESTS
     model/sysv-float-arguments.S
     segment-references/c-strings-outside-code.S
     lift/got-pointer-function.S
+    lift/unwind-entry-after-call.S
     lift/gvec-equality.S
     lift/helper-abort-message.S
     lift/helper-written-csv-passthrough.S

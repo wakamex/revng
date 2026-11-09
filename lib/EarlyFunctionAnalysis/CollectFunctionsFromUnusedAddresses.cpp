@@ -104,9 +104,11 @@ private:
       // A pointer to the start of a function in the unwind information is a
       // function entry even when another function's CFG reaches it by falling
       // through, as one does past a call it does not know to be no-return, or
-      // when a tail call jumps to it.
-      bool Ignore = IsReturnAddress or
-                    (not IsUnwindEntry and (IsPartOfOtherCFG or IsDirectJump));
+      // when a tail call jumps to it. For the same reason it is one when it
+      // follows a call, which makes it look like a return address: a function
+      // starting there means the call does not return.
+      bool Ignore = not IsUnwindEntry
+                    and (IsReturnAddress or IsPartOfOtherCFG or IsDirectJump);
       if (Interesting and not Ignore) {
 
         if (IsLoadAddress and not IsUnwindEntry) {
