@@ -491,6 +491,7 @@ set(FILECHECK_TESTS
     model/clift-shared-types.S
     model/function-pipe-jobs.S
     model/prototype-set-after-use.S
+    model/microsoft-stack-arguments.S
     segment-references/c-strings-outside-code.S
     lift/got-pointer-function.S
     lift/gvec-equality.S
