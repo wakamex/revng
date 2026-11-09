@@ -5,6 +5,7 @@
 #include "llvm/ADT/SmallSet.h"
 
 #include "revng/ABI/FunctionType/Conversion.h"
+#include "revng/ABI/FunctionType/Layout.h"
 #include "revng/ABI/FunctionType/Support.h"
 #include "revng/ADT/STLExtras.h"
 #include "revng/Model/ABI/Definition.h"
@@ -17,6 +18,9 @@
 #include "ValueDistributor.h"
 
 static Logger Log("function-type-conversion-to-cabi");
+
+/// One line for each conversion the layout check rejects, with the reason
+static Logger RejectLog("cabi-layout-mismatch");
 
 namespace abi::FunctionType {
 
@@ -153,6 +157,119 @@ private:
   }
 };
 
+/// Whether \p CABI, laid out by \p ABI, passes and returns values where
+/// \p Raw does: the registers the ABI deduces from those of \p Raw, each at
+/// least as wide, every field of its stack arguments inside a stack argument,
+/// and the same final stack offset if it returns. A conversion that fails this would give the
+/// function a C prototype that means something else, so it is not made.
+static bool layoutMatches(const abi::Definition &ABI,
+                          const model::RawFunctionDefinition &Raw,
+                          const model::CABIFunctionDefinition &CABI,
+                          bool UseSoftRegisterStateDeductions,
+                          std::string &Reason) {
+  using RegisterSet = abi::Definition::RegisterSet;
+  auto Deduce = [&](RegisterSet Set, bool Arguments) -> std::optional<RegisterSet> {
+    if (not UseSoftRegisterStateDeductions)
+      return Arguments ? ABI.enforceArgumentRegisterState(std::move(Set)) :
+                         ABI.enforceReturnValueRegisterState(std::move(Set));
+    return Arguments ? ABI.tryDeducingArgumentRegisterState(std::move(Set)) :
+                       ABI.tryDeducingReturnValueRegisterState(std::move(Set));
+  };
+
+  auto Compare = [&](const auto &RawRegisters,
+                     llvm::ArrayRef<model::Register::Portion> Laid,
+                     bool Arguments) {
+    llvm::StringRef What = Arguments ? "argument" : "return value";
+    RegisterSet Locations;
+    for (const model::NamedTypedRegister &Register : RawRegisters)
+      Locations.insert(Register.Location());
+    auto Expected = Deduce(std::move(Locations), Arguments);
+    if (not Expected.has_value()) {
+      Reason = (What + " registers cannot be deduced").str();
+      return false;
+    }
+
+    std::map<model::Register::Values, uint64_t> Widths;
+    for (const model::Register::Portion &Portion : Laid)
+      Widths[Portion.Register] = std::max(Widths[Portion.Register],
+                                          Portion.StartOffset + Portion.Size);
+
+    for (model::Register::Values Register : *Expected) {
+      if (not Widths.contains(Register)) {
+        Reason = (What + " register " + model::Register::getName(Register)
+                  + " is not used by the C prototype")
+                   .str();
+        return false;
+      }
+    }
+    for (const auto &[Register, Width] : Widths) {
+      if (not Expected->contains(Register)) {
+        Reason = ("C prototype uses " + model::Register::getName(Register)
+                  + ", not an " + What + " register")
+                   .str();
+        return false;
+      }
+    }
+    for (const model::NamedTypedRegister &Register : RawRegisters) {
+      if (Widths.at(Register.Location()) < *Register.Type()->size()) {
+        Reason = (What + " register "
+                  + model::Register::getName(Register.Location())
+                  + " is narrower in the C prototype")
+                   .str();
+        return false;
+      }
+    }
+    return true;
+  };
+
+  UsedRegisters Used = usedRegisters(CABI);
+  if (not Compare(Raw.Arguments(), Used.Arguments, true))
+    return false;
+  if (not Compare(Raw.ReturnValues(), Used.ReturnValues, false))
+    return false;
+
+  Layout Laid = Layout::make(CABI);
+  llvm::SmallVector<std::pair<uint64_t, uint64_t>> Spans;
+  for (const Layout::Argument &Argument : Laid.Arguments)
+    if (Argument.Stack.has_value())
+      Spans.emplace_back(Argument.Stack->Offset,
+                         Argument.Stack->Offset + Argument.Stack->Size);
+
+  if (const auto *Stack = Raw.stackArgumentsType()) {
+    for (const model::StructField &Field : Stack->Fields()) {
+      // The bytes some ABIs reserve for the register arguments are not
+      // arguments.
+      uint64_t End = Field.Offset() + *Field.Type()->size();
+      uint64_t Begin = std::max(Field.Offset(), ABI.UnusedStackArgumentBytes());
+      if (Begin >= End)
+        continue;
+      auto Covers = [&](const auto &Span) {
+        return Span.first <= Begin and End <= Span.second;
+      };
+      if (not llvm::any_of(Spans, Covers)) {
+        Reason = "stack bytes " + std::to_string(Begin) + " to "
+                 + std::to_string(End)
+                 + " are in no stack argument of the C prototype";
+        return false;
+      }
+    }
+  } else if (not Spans.empty()) {
+    Reason = "C prototype has stack arguments and the raw one has none";
+    return false;
+  }
+
+  // A final stack offset of 0 is that of a function that does not return
+  // through a `ret`, after whose calls nothing runs.
+  if (Raw.FinalStackOffset() != 0
+      and finalStackOffset(CABI) != Raw.FinalStackOffset()) {
+    Reason = "final stack offset " + std::to_string(finalStackOffset(CABI))
+             + " instead of " + std::to_string(Raw.FinalStackOffset());
+    return false;
+  }
+
+  return true;
+}
+
 std::optional<model::UpcastableType>
 tryMakeCABIFunction(const model::RawFunctionDefinition &FunctionType,
                     TupleTree<model::Binary> &Binary,
@@ -198,6 +315,18 @@ tryMakeCABIFunction(const model::RawFunctionDefinition &FunctionType,
   Definition.ReturnType() = Converted->ReturnValueType;
 
   revng_log(Log, "Conversion successful:\n" << toString(Definition));
+
+  std::string Reason;
+  if (not layoutMatches(ABI,
+                        FunctionType,
+                        Definition,
+                        UseSoftRegisterStateDeductions,
+                        Reason)) {
+    revng_log(Log, "Rejected, the layout does not match: " << Reason);
+    revng_log(RejectLog, "ID " << FunctionType.ID() << ": " << Reason);
+    Binary->TypeDefinitions().erase(Definition.key());
+    return std::nullopt;
+  }
 
   // Since CABI-FT only have one field for return value comments - we have no
   // choice but to resort to concatenation in order to preserve as much
