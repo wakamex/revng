@@ -63,6 +63,7 @@ public:
       switch (Operation.Type) {
       case OperationType::Read:
       case OperationType::Examine:
+      case OperationType::VirtualRead:
         break;
 
       case OperationType::Write:

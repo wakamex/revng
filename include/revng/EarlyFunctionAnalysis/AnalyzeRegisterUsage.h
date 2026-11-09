@@ -85,6 +85,12 @@ public:
   /// this function only if it is one of these.
   CSVSet ProducedRegisters;
 
+  /// The registers a write of which reaches the return on some path without
+  /// being read again along it, which ReturnValuesRegisters leaves out when the
+  /// write is read on another path, as a value computed in a loop is by the
+  /// loop's next iteration
+  CSVSet LeftWrittenRegisters;
+
   /// The argument registers this function stores to the register save area
   /// of a variadic function, which `va_arg` reads the variable arguments from.
   /// They are no arguments of the function itself: each call passes those its
@@ -109,6 +115,7 @@ public:
     HandleMap(ReadReturnValuesRegisters, Other.ReadReturnValuesRegisters);
     HandleMap(ConsumedRegisters, Other.ConsumedRegisters);
     HandleMap(ProducedRegisters, Other.ProducedRegisters);
+    HandleMap(LeftWrittenRegisters, Other.LeftWrittenRegisters);
     HandleMap(VariadicRegisters, Other.VariadicRegisters);
 
     for (auto &[OtherBlockID, OtherResults] : Other.CallSites) {

@@ -27,6 +27,9 @@ enum Values : uint8_t {
   /// A read whose value is only compared: the register keeps the value, which
   /// can still be passed to a call
   Examine,
+  /// A read the analysis adds before a call for the arguments of the callee,
+  /// rather than one the code makes
+  VirtualRead,
   Write,
   Clobber
 };
@@ -39,6 +42,8 @@ inline llvm::StringRef getName(Values V) {
     return "Read";
   case Examine:
     return "Examine";
+  case VirtualRead:
+    return "VirtualRead";
   case Write:
     return "Write";
   case Clobber:

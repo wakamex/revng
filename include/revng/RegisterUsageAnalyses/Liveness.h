@@ -29,8 +29,13 @@ public:
 private:
   Set Default;
 
+  /// Whether reads the analysis adds before calls count: without them, what
+  /// is alive is what the code itself reads
+  bool CountVirtualReads = true;
+
 public:
-  Liveness(const Function &F) {
+  Liveness(const Function &F, bool CountVirtualReads = true) :
+    CountVirtualReads(CountVirtualReads) {
     uint8_t Max = 0;
     for (const Block *Block : F.nodes()) {
       for (const Operation &Operation : Block->Operations) {
@@ -70,6 +75,11 @@ public:
       case OperationType::Read:
       case OperationType::Examine:
         Result.set(Operation.Target);
+        break;
+
+      case OperationType::VirtualRead:
+        if (CountVirtualReads)
+          Result.set(Operation.Target);
         break;
 
       case OperationType::Write:

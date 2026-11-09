@@ -219,6 +219,7 @@ static uint64_t abiState(const efa::RUAResults &Results) {
   hashCSVs(Hash, Results.ConsumedRegisters);
   hashCSVs(Hash, Results.ProducedRegisters);
   hashCSVs(Hash, Results.VariadicRegisters);
+  hashCSVs(Hash, Results.LeftWrittenRegisters);
   for (const auto &[Block, CallSite] : Results.CallSites) {
     // Indirect call sites have no callee address
     const MetaAddress &Callee = CallSite.CalleeAddress;
@@ -2158,6 +2159,9 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                          .GeneralPurposeReturnValueRegisters())
     GeneralPurposeReturns.insert(Register);
   ABIResults.ProducedRegisters = ABIResults.ReturnValuesRegisters;
+  for (auto *CSV : ABIResults.LeftWrittenRegisters)
+    if (not ActualCalleeSavedRegs.contains(CSV))
+      ABIResults.ProducedRegisters.insert(CSV);
   for (auto &[BlockID, CallSite] : ABIResults.CallSites) {
     const CSVSet *CalleeReturns = nullptr;
     CSVSet Unknown;

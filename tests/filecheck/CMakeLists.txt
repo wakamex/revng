@@ -463,8 +463,10 @@ set(FILECHECK_TESTS
     clift/types/union-with-pointer-recursion.mlir
     detect-abi/indirect-call-site-prototype.S
     detect-abi/indirect-call-vector-scratch.S
+    detect-abi/loop-computed-return.S
     detect-abi/overlapping-indirect-branch.S
     detect-abi/raw-argument-order.S
+    detect-abi/returned-vector-result.S
     detect-abi/slot-callees-untouched-arguments.S
     detect-abi/scratch-vector-register.S
     detect-abi/self-compare-idiom.S

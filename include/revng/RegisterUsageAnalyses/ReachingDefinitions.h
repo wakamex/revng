@@ -23,12 +23,17 @@ struct RegisterWriters {
   /// leading to this point
   llvm::BitVector Consumed;
 
+  /// Set of writes that reach this point on some path along which they have
+  /// not been read since
+  llvm::BitVector Unread;
+
   bool operator==(const RegisterWriters &Other) const = default;
 
   RegisterWriters &operator|=(const RegisterWriters &Other) {
     Reaching |= Other.Reaching;
     Read |= Other.Read;
     Consumed |= Other.Consumed;
+    Unread |= Other.Unread;
     return *this;
   }
 
@@ -36,6 +41,7 @@ struct RegisterWriters {
     Reaching &= Other.Reaching;
     Read &= Other.Read;
     Consumed &= Other.Consumed;
+    Unread &= Other.Unread;
     return *this;
   }
 };
@@ -94,6 +100,7 @@ public:
       Default[I].Reaching.resize(CSVWriteIndex[I]);
       Default[I].Read.resize(CSVWriteIndex[I]);
       Default[I].Consumed.resize(CSVWriteIndex[I]);
+      Default[I].Unread.resize(CSVWriteIndex[I]);
     }
   }
 
@@ -115,6 +122,16 @@ public:
       ++Index;
     }
 
+    return Result;
+  }
+
+  /// \return the registers with a write reaching \p ProgramPoint on some path
+  ///         along which it has not been read since: a value computed in a
+  ///         loop and read by its next iteration still reaches the exit so
+  static llvm::BitVector computeUnreadSince(const WritersSet &ProgramPoint) {
+    llvm::BitVector Result(ProgramPoint.size());
+    for (unsigned Index = 0; Index < ProgramPoint.size(); ++Index)
+      Result[Index] = ProgramPoint[Index].Unread.any();
     return Result;
   }
 
@@ -153,16 +170,22 @@ public:
       case OperationType::Write: {
         Writes.Reaching.reset();
         Writes.Reaching.set(WriteToIndex.find(&Operation)->second);
+        Writes.Unread.reset();
+        Writes.Unread.set(WriteToIndex.find(&Operation)->second);
       } break;
       case OperationType::Clobber: {
         Writes.Reaching.reset();
+        Writes.Unread.reset();
       } break;
-      case OperationType::Read: {
+      case OperationType::Read:
+      case OperationType::VirtualRead: {
         Writes.Read |= Writes.Reaching;
         Writes.Consumed |= Writes.Reaching;
+        Writes.Unread.reset();
       } break;
       case OperationType::Examine: {
         Writes.Read |= Writes.Reaching;
+        Writes.Unread.reset();
       } break;
       case OperationType::Invalid:
         revng_abort();

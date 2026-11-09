@@ -39,6 +39,11 @@ struct CallSite {
   using Node = rua::Function::Node;
 
   Node *Block = nullptr;
+
+  /// The node after the call, which starts by writing the return values of
+  /// the callee
+  Node *AfterCall = nullptr;
+
   MetaAddress Callee;
 
   void setCallee(MetaAddress Callee) {
@@ -92,6 +97,18 @@ static bool isOnlyCompared(Value *V, unsigned Depth = 2) {
   return true;
 }
 
+/// \return whether \p Load is a read the ABI analysis adds before a call for
+///         the arguments of the callee, whose only user is an opaque reader
+static bool isVirtualRead(LoadInst *Load) {
+  if (not Load->hasOneUse())
+    return false;
+  auto *Call = dyn_cast<CallInst>(*Load->user_begin());
+  if (Call == nullptr)
+    return false;
+  Function *Callee = getCalledFunction(Call);
+  return Callee != nullptr and FunctionTags::ReaderFunction.isTagOf(Callee);
+}
+
 static rua::OperationType::Values storeType(Value *V, bool CalleeWritesReach) {
   Function *Callee = nullptr;
   if (auto *Call = dyn_cast<CallInst>(V))
@@ -136,6 +153,8 @@ fromLLVMFunction(llvm::Function &F,
   Result.ReturnNode->addSuccessor(Result.SinkNode);
   Preserve.insert(Result.SinkNode);
 
+  std::map<BasicBlockID, llvm::BasicBlock *> AfterCallBlocks;
+
   uint8_t RegistersCount = 0;
 
   // Translate the function
@@ -177,9 +196,12 @@ fromLLVMFunction(llvm::Function &F,
 
       if (auto *Load = dyn_cast<LoadInst>(&I)) {
         // If reading a register, record it
-        CreateOperation(isOnlyCompared(Load) ? rua::OperationType::Examine :
-                                               rua::OperationType::Read,
-                        Load->getPointerOperand());
+        auto Type = rua::OperationType::Read;
+        if (isVirtualRead(Load))
+          Type = rua::OperationType::VirtualRead;
+        else if (isOnlyCompared(Load))
+          Type = rua::OperationType::Examine;
+        CreateOperation(Type, Load->getPointerOperand());
       } else if (auto *Store = dyn_cast<StoreInst>(&I)) {
         // If writing a register, record it
         CreateOperation(storeType(Store->getValueOperand(), CalleeWritesReach),
@@ -216,6 +238,8 @@ fromLLVMFunction(llvm::Function &F,
           revng_assert(&*BB->getTerminator()->getPrevNode() == &I);
           revng_assert(Result.CallSites.contains(PC));
           revng_assert(Result.CallSites.at(PC).Block == NewNode);
+          if (llvm::BasicBlock *Next = BB->getSingleSuccessor())
+            AfterCallBlocks[PC] = Next;
         } else if (isCallTo(Call, RetHook)) {
           // This is a proper return, link to the exit node
           NewNode->addSuccessor(Result.ReturnNode);
@@ -237,6 +261,13 @@ fromLLVMFunction(llvm::Function &F,
     }
   }
 
+  for (auto &[PC, Next] : AfterCallBlocks) {
+    if (auto It = BlocksMap.find(Next); It != BlocksMap.end()) {
+      Result.CallSites.at(PC).AfterCall = It->second;
+      Preserve.insert(It->second);
+    }
+  }
+
   // Ensure every node reaches the sink
   using Node = rua::Function::Node;
   Node *MaybeUnrechableNode = findUnrechableNode(Result.SinkNode);
@@ -254,8 +285,9 @@ fromLLVMFunction(llvm::Function &F,
 /// \return the registers of \p Function alive after each node, given the
 ///         registers in \p AliveAtReturn alive at the return node
 static auto computeLiveness(const FunctionToAnalyze &Function,
-                            const CSVSet &AliveAtReturn) {
-  rua::Liveness Liveness(Function.Function);
+                            const CSVSet &AliveAtReturn,
+                            bool CountVirtualReads = true) {
+  rua::Liveness Liveness(Function.Function, CountVirtualReads);
 
   auto DefaultValue = Liveness.defaultValue();
   auto ReturnValue = DefaultValue;
@@ -337,6 +369,14 @@ RUAResults analyzeRegisterUsage(Function *F,
     if (not ReturnValues.empty() and not Function.CallSites.empty())
       AnalysisResult = computeLiveness(Function, ReturnValues);
 
+    // What the code itself reads after each call once the callee's return
+    // values are written, its returning them included. A register the callee
+    // returns is otherwise never alive after the call, so a caller reading the
+    // result never shows as a reader. Reads added for the arguments of the
+    // next call do not count: a value left in a register they read is not a
+    // value the code reads.
+    auto CodeReads = computeLiveness(Function, ReturnValues, false);
+
     for (const auto &[PC, CallSite] : Function.CallSites) {
       auto &ResultsCallSite = FinalResults.CallSites[PC];
       ResultsCallSite.CalleeAddress = CallSite.Callee;
@@ -346,7 +386,9 @@ RUAResults analyzeRegisterUsage(Function *F,
                 "Registers alive after the call to "
                   << CallSite.Callee.toString() << " at " << PC.toString()
                   << " (block " << PostNode->label() << ")");
-      const BitVector &CallSiteResult = AnalysisResult.at(PostNode).InValue;
+      BitVector CallSiteResult = AnalysisResult.at(PostNode).InValue;
+      if (CallSite.AfterCall != nullptr)
+        CallSiteResult |= CodeReads.at(CallSite.AfterCall).InValue;
       for (auto *CSV : Function.Function.csvsInSet(CallSiteResult)) {
         // This CSV is alive after the call site
 
@@ -400,6 +442,11 @@ RUAResults analyzeRegisterUsage(Function *F,
               "the function without ever being read:");
     rua::BlockNode *ExitNode = Function.ReturnNode;
     const BitVector &ExitResult = Compute(ExitNode, false);
+    const auto &AtExit = AnalysisResult.at(ExitNode).OutValue;
+    // csvsInSet holds on to the set it walks
+    BitVector LeftWritten = rua::ReachingDefinitions::computeUnreadSince(AtExit);
+    for (auto *CSV : Function.Function.csvsInSet(LeftWritten))
+      FinalResults.LeftWrittenRegisters.insert(CSV);
     for (auto *CSV : Function.Function.csvsInSet(ExitResult)) {
       // This CSV has at least one write that reaches the exit node of the
       // function without ever being read
