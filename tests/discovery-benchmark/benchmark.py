@@ -4,16 +4,18 @@
 #
 """How well rev.ng finds the functions of a C++ binary with exceptions, and which of them never return.
 
-  benchmark.py OUT [--revng REVNG] [--prototypes-db DB] [--count N] [--seed S] [--json FILE] [--check]
+  benchmark.py OUT [--revng REVNG] [--prototypes-db DB] [--count N] [--seed S] [--pie] [--repeat N] [--json FILE]
+               [--check]
 
 Generates C++ functions of random kinds that call each other: plain ones, ones that may throw, ones that always
 throw, ones whose locals have destructors around a call that may throw (a cleanup landing pad ending in
-`_Unwind_Resume`), ones that catch, and ones that call a function that always throws on one path. About a third are
-called only through a table of function pointers, as virtual functions and Rust trait objects are. They are compiled
-with clang for x86-64 and linked with `ld.lld` against a stub shared library providing the C++ runtime functions,
-so that, as in a real program, rev.ng sees `__cxa_throw` and `_Unwind_Resume` as imports. A copy stripped of its
-symbol table, as hl-node is, is analyzed with `revng project init`, and the model's functions are compared with the
-symbol table of the original:
+`_Unwind_Resume`), ones that catch, ones that call a function that always throws on one path, and ones that
+dispatch through a `switch` to helpers nothing else calls. About a third are called only through a table of function
+pointers, as virtual functions and Rust trait objects are. They are compiled with clang for x86-64, as
+position-independent code with --pie, and linked with `ld.lld` against a stub shared library providing the C++
+runtime functions, so that, as in a real program, rev.ng sees `__cxa_throw` and `_Unwind_Resume` as imports. A copy
+stripped of its symbol table, as hl-node is, is analyzed with `revng project init`, and the model's functions are
+compared with the symbol table of the original:
 
 - found: a function of the model starts where the symbol does;
 - missing: none does, so the code is part of another function or of none;
@@ -22,12 +24,14 @@ symbol table of the original:
 - missed noreturn: the function always throws, and the model says it may return.
 
 --prototypes-db links a prototypes database into the launcher's resource root for the run, as the hl-node runs and
-the Rust corpora use one; without it rev.ng does not know that `__cxa_throw` never returns. --check exits with
-status 1 on any missing function, split or false noreturn.
+the Rust corpora use one; without it rev.ng does not know that `__cxa_throw` never returns. --repeat analyzes the
+binary that many times and reports how many different models came out; the verdicts are those of the first.
+--check exits with status 1 on any missing function, split or false noreturn, and on models that differ.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -37,7 +41,11 @@ import sys
 
 import yaml
 
-KINDS = ["plain", "may_throw", "always_throws", "cleanup", "catches", "calls_thrower"]
+KINDS = ["plain", "may_throw", "always_throws", "cleanup", "catches", "calls_thrower", "switches"]
+# The helpers of a function that dispatches through a `switch`, each called from one case only
+CASES = 6
+# Where rev.ng places a position-independent binary
+PIE_BASE = 0x400000
 
 RUNTIME = """\
 void *__cxa_allocate_exception(unsigned long size) { static char buffer[64]; return buffer; }
@@ -79,7 +87,13 @@ def source(functions: list) -> str:
         if kind == "always_throws":
             lines.append(f"__attribute__((noinline, noreturn)) int f{index}(int x) {{ throw Error{{x * {k}}}; }}")
             continue
+        if kind == "switches":
+            for case in range(CASES):
+                lines.append(f"__attribute__((noinline)) int g{index}_{case}(int x) {{ if (x > {case + k}) "
+                             f"throw Error{{x}}; return x * {case + 2}; }}")
+        cases = " ".join(f"case {case}: return g{index}_{case}(x) + {case};" for case in range(CASES))
         body = {
+            "switches": f"Guard guard{{&sink}}; switch (x & 7) {{ {cases} default: return x * {k} + {calls}; }}",
             "plain": f"return x * {k} + {calls};",
             "may_throw": f"if (x > {k}) throw Error{{x}}; return x * {k} + {calls};",
             "cleanup": f"Guard guard{{&sink}}; return x * {k} + {calls} + (x > {k} ? (throw Error{{x}}, 0) : 0);",
@@ -103,8 +117,8 @@ def source(functions: list) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build(directory: str, text: str) -> tuple:
-    """The stripped binary and the address and size of each function defined in the original"""
+def build(directory: str, text: str, pie: bool = False) -> tuple:
+    """The stripped binary and, as rev.ng addresses them, the address and size of each function of the original"""
     def path(name):
         return os.path.join(directory, name)
 
@@ -118,13 +132,14 @@ def build(directory: str, text: str) -> tuple:
     subprocess.run(["clang", target, "-O2", "-fPIC", "-c", path("runtime.c"), "-o", path("runtime.o")], check=True)
     subprocess.run(["ld.lld", "-shared", "-soname", "libruntime.so", path("runtime.o"), "-o",
                     path("libruntime.so")], check=True)
-    subprocess.run(["clang++", target, "-O2", "-fno-pic", "-c", path("functions.cpp"), "-o", path("functions.o")],
+    model = "-fPIE" if pie else "-fno-pic"
+    subprocess.run(["clang++", target, "-O2", model, "-c", path("functions.cpp"), "-o", path("functions.o")],
                    check=True)
-    subprocess.run(["clang", target, "-O2", "-fno-pic", "-c", path("typeinfo.c"), "-o", path("typeinfo.o")],
-                   check=True)
+    subprocess.run(["clang", target, "-O2", model, "-c", path("typeinfo.c"), "-o", path("typeinfo.o")], check=True)
     binary = path("functions")
-    subprocess.run(["ld.lld", "--eh-frame-hdr", "-e", "_start", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
-                    path("functions.o"), path("typeinfo.o"), path("libruntime.so"), "-o", binary], check=True)
+    subprocess.run(["ld.lld", *(["-pie"] if pie else []), "--eh-frame-hdr", "-e", "_start", "--dynamic-linker",
+                    "/lib64/ld-linux-x86-64.so.2", path("functions.o"), path("typeinfo.o"), path("libruntime.so"),
+                    "-o", binary], check=True)
     output = subprocess.run(["llvm-nm", "--print-size", "--defined-only", binary], check=True, capture_output=True,
                             text=True).stdout
     stripped = binary + ".stripped"
@@ -133,7 +148,7 @@ def build(directory: str, text: str) -> tuple:
     for line in output.splitlines():
         fields = line.split()
         if len(fields) == 4 and fields[2] in "Tt":
-            symbols[fields[3]] = (int(fields[0], 16), int(fields[1], 16))
+            symbols[fields[3]] = (int(fields[0], 16) + (PIE_BASE if pie else 0), int(fields[1], 16))
     return stripped, symbols
 
 
@@ -143,8 +158,9 @@ def resource_link(revng: str) -> str:
                         "prototypes.sqlite")
 
 
-def analyze(revng: str, binary: str, directory: str, database: str | None) -> dict:
-    project = os.path.join(directory, "project")
+def analyze(revng: str, binary: str, directory: str, database: str | None, run: int = 0) -> tuple:
+    """The model of the binary and a hash that two runs share when their models are the same"""
+    project = os.path.join(directory, "project" if run == 0 else f"project-{run}")
     os.makedirs(project, exist_ok=True)
     link = resource_link(revng)
     if database:
@@ -159,7 +175,24 @@ def analyze(revng: str, binary: str, directory: str, database: str | None) -> di
         if database:
             os.remove(link)
     with open(os.path.join(project, "revng.yml")) as stream:
-        return yaml.load(stream, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+        text = stream.read()
+    return yaml.load(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader)), identity(text)
+
+
+def identity(model_text: str) -> str:
+    """A hash of a model without the path of its binary, which names the project"""
+    lines = [line for line in model_text.splitlines() if "CanonicalPath:" not in line]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def scored(functions: list) -> list:
+    """The name, kind and whether it is called only through the table, of each generated function and helper"""
+    result = []
+    for index, function in enumerate(functions):
+        result.append((f"f{index}", function["kind"], function["indirect"]))
+        if function["kind"] == "switches":
+            result += [(f"g{index}_{case}", "case_only", False) for case in range(CASES)]
+    return result
 
 
 def score(functions: list, symbols: dict, model: dict) -> list:
@@ -170,10 +203,9 @@ def score(functions: list, symbols: dict, model: dict) -> list:
             continue
         entries[int(function["Entry"].split(":")[0], 16)] = "NoReturn" in attributes
     result = []
-    for index, function in enumerate(functions):
-        name = f"_Z{len(f'f{index}')}f{index}i"
-        begin, size = symbols[name]
-        noreturn = function["kind"] == "always_throws"
+    for name, kind, indirect in scored(functions):
+        begin, size = symbols[f"_Z{len(name)}{name}i"]
+        noreturn = kind == "always_throws"
         splits = sorted(f"0x{a:x}" for a in entries if begin < a < begin + size)
         verdicts = []
         if begin not in entries:
@@ -184,8 +216,7 @@ def score(functions: list, symbols: dict, model: dict) -> list:
             verdicts.append("missed noreturn")
         if splits:
             verdicts.append("split")
-        result.append({"function": f"f{index}", "kind": function["kind"], "indirect": function["indirect"],
-                       "address": f"0x{begin:x}",
+        result.append({"function": name, "kind": kind, "indirect": indirect, "address": f"0x{begin:x}",
                        "verdicts": verdicts or ["found"], "splits": splits})
     return result
 
@@ -200,19 +231,26 @@ def main(argv=None) -> int:
     parser.add_argument("--prototypes-db", help="prototypes database to link into the launcher's resource root")
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--pie", action="store_true", help="build position-independent code")
+    parser.add_argument("--repeat", type=int, default=1, help="analyze the binary this many times")
     parser.add_argument("--json", help="write every function's verdicts here")
-    parser.add_argument("--check", action="store_true", help="fail on any missing function, split or false noreturn")
+    parser.add_argument("--check", action="store_true",
+                        help="fail on any missing function, split or false noreturn, and on models that differ")
     args = parser.parse_args(argv)
     os.makedirs(args.out, exist_ok=True)
     functions = plan(args.count, args.seed)
-    binary, symbols = build(args.out, source(functions))
-    result = score(functions, symbols, analyze(args.revng, binary, args.out, args.prototypes_db))
+    binary, symbols = build(args.out, source(functions), args.pie)
+    runs = [analyze(args.revng, binary, args.out, args.prototypes_db, run) for run in range(args.repeat)]
+    result = score(functions, symbols, runs[0][0])
+    models = sorted({model_identity for _, model_identity in runs})
     print("| kind | functions | " + " | ".join(VERDICTS) + " |")
     print("| --- | --- |" + " --- |" * len(VERDICTS))
-    for kind in KINDS + ["indirect", "all"]:
+    for kind in KINDS + ["case_only", "indirect", "all"]:
         entries = [e for e in result if kind in ("all", e["kind"]) or (kind == "indirect" and e["indirect"])]
         counts = [sum(1 for e in entries if v in e["verdicts"]) for v in VERDICTS]
         print(f"| {kind} | {len(entries)} | " + " | ".join(str(c) for c in counts) + " |")
+    if args.repeat > 1:
+        print(f"{len(models)} different models in {args.repeat} runs")
     if args.json:
         with open(args.json, "w") as stream:
             json.dump(result, stream, indent=1)
@@ -221,7 +259,7 @@ def main(argv=None) -> int:
         for entry in failed:
             print(f"{entry['function']} {entry['kind']} {entry['address']}: {', '.join(entry['verdicts'])}"
                   f"{' at ' + ', '.join(entry['splits']) if entry['splits'] else ''}")
-        return 1 if failed else 0
+        return 1 if failed or len(models) > 1 else 0
     return 0
 
 

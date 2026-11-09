@@ -28,6 +28,24 @@ class PlanTest(unittest.TestCase):
         for index, function in enumerate(functions):
             self.assertEqual(f" f{index}(input)" in run, not function["indirect"])
 
+    def test_switch_helpers_are_called_only_from_their_case(self):
+        functions = benchmark.plan(60, seed=1)
+        text = benchmark.source(functions)
+        switches = [index for index, function in enumerate(functions) if function["kind"] == "switches"]
+        self.assertTrue(switches)
+        for index in switches:
+            for case in range(benchmark.CASES):
+                self.assertEqual(text.count(f"g{index}_{case}(x)"), 1)
+                self.assertIn((f"g{index}_{case}", "case_only", False), benchmark.scored(functions))
+
+
+class IdentityTest(unittest.TestCase):
+    def test_the_path_of_the_binary_does_not_count(self):
+        model = "Binaries:\n  - CanonicalPath: '/a/project/functions'\nFunctions:\n  - Entry: \"0x1000:Code_x86_64\"\n"
+        other = model.replace("/a/project", "/b/project-1")
+        self.assertEqual(benchmark.identity(model), benchmark.identity(other))
+        self.assertNotEqual(benchmark.identity(model), benchmark.identity(model.replace("0x1000", "0x1010")))
+
 
 class ScoreTest(unittest.TestCase):
     functions = [{"kind": "plain", "indirect": False}, {"kind": "always_throws", "indirect": True},
