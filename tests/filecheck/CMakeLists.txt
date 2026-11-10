@@ -478,6 +478,7 @@ set(FILECHECK_TESTS
     detect-abi/unread-vector-return.S
     detect-abi/trap-fallthrough.S
     detect-abi/call-ends-function.S
+    detect-abi/import-double-argument.S
     detect-abi/unknown-callee-return.S
     detect-abi/unknown-callers.S
     detect-abi/unknown-callers-vector.S

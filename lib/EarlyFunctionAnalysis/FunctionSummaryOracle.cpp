@@ -53,17 +53,26 @@ PrototypeImporter::prototype(const AttributesSet &Attributes,
   auto &&[ArgumentRegisters,
           ReturnValueRegisters] = abi::FunctionType::usedRegisters(*Prototype);
 
-  for (const model::Register::Portion &RegisterPortion : ArgumentRegisters) {
-    model::Register::Values Register = RegisterPortion.Register;
-    for (auto *CSV : model::Register::getCSVs(Register) | ToVar | IgnoreNullptr)
-      Summary.ABIResults.ArgumentsRegisters.insert(CSV);
-  }
+  // A value narrower than its register, such as a double in `zmm0`, is in the
+  // CSVs its bytes are in. Taking the whole register would have a caller that
+  // writes only those pass the others on from its own caller.
+  auto Holding = [](const model::Register::Portion &Portion) {
+    return std::views::filter([Portion](const model::Register::CSV &CSV) {
+      return Portion.Size == 0
+             or (CSV.StartOffset < Portion.StartOffset + Portion.Size
+                 and Portion.StartOffset < CSV.StartOffset + CSV.Size);
+    });
+  };
 
-  for (const model::Register::Portion &RegisterPortion : ReturnValueRegisters) {
-    model::Register::Values Register = RegisterPortion.Register;
-    for (auto *CSV : model::Register::getCSVs(Register) | ToVar | IgnoreNullptr)
+  for (const model::Register::Portion &Portion : ArgumentRegisters)
+    for (auto *CSV : model::Register::getCSVs(Portion.Register)
+                       | Holding(Portion) | ToVar | IgnoreNullptr)
+      Summary.ABIResults.ArgumentsRegisters.insert(CSV);
+
+  for (const model::Register::Portion &Portion : ReturnValueRegisters)
+    for (auto *CSV : model::Register::getCSVs(Portion.Register)
+                       | Holding(Portion) | ToVar | IgnoreNullptr)
       Summary.ABIResults.ReturnValuesRegisters.insert(CSV);
-  }
 
   // This point is only ever reached on the "full" import (like the one
   // DetectABI does) - the proper function summary in extracted.
