@@ -486,11 +486,24 @@ void CodeGenerator::translate(LibTcg &LibTcg,
                                           SinceInstructionStart);
 
         // Sometimes libtinycode terminates a basic block with a call, in this
-        // case force a fallthrough
+        // case force a fallthrough, unless the instruction is int3 or `int 3`:
+        // the breakpoint exception they raise does not return to the program,
+        // and padding of int3 would otherwise be lifted one byte at a time
+        auto IsBreakpoint = [&]() {
+          if (PC.type() != MetaAddressType::Code_x86
+              and PC.type() != MetaAddressType::Code_x86_64)
+            return false;
+          auto Bytes = JumpTargets.binaryView().getByAddress(PC, 2);
+          return Bytes and not Bytes->empty()
+                 and ((*Bytes)[0] == 0xcc
+                      or (Bytes->size() == 2 and (*Bytes)[0] == 0xcd
+                          and (*Bytes)[1] == 0x03));
+        };
         if (J == TranslationBlock->instruction_count - 1) {
-          BasicBlock *Target = JumpTargets
-                                 .registerJT(EndPC,
-                                             JumpTargetReason::PostHelper);
+          BasicBlock *Target = nullptr;
+          if (not IsBreakpoint())
+            Target = JumpTargets.registerJT(EndPC,
+                                            JumpTargetReason::PostHelper);
           if (Target != nullptr) {
             Builder.CreateBr(&notNull(Target));
           } else {

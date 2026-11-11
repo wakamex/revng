@@ -512,6 +512,7 @@ set(FILECHECK_TESTS
     lift/helper-abort-message.S
     lift/helper-written-csv-passthrough.S
     lift/hoisted-import-call.S
+    lift/int3-no-fallthrough.S
     lift/hoisted-relro-got-call.S
     lift/import-tail-call.S
     lift/direct-tail-call.S
