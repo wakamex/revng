@@ -487,6 +487,7 @@ set(FILECHECK_TESTS
     detect-abi/writable-slot-callees.S
     detect-abi/relocated-code-pointer.S
     detect-abi/trap-kinds.S
+    import/dwarf-specification-return-type.S
     lift/added-function-relift.S
     lift/cpu-state-initializers-layout.S
     lift/cpuid.S

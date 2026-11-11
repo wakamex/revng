@@ -446,6 +446,14 @@ DwarfToModelConverter::makeType(const DWARFDie &Die) {
   } else if (auto MaybeOrigin = Die.find(DW_AT_abstract_origin)) {
     DWARFDie Origin = Context.getDIEForOffset(*MaybeOrigin->getAsReference());
     rc_return rc_recur makeType(Origin);
+  } else if (auto MaybeSpecification = Die.find(DW_AT_specification)) {
+    // A C++ definition outside its class or namespace refers to the
+    // declaration inside it, which has the type: a member function's return
+    // type, or a static data member's type
+    DWARFDie Declaration = Context
+                             .getDIEForOffset(*MaybeSpecification
+                                                 ->getAsReference());
+    rc_return rc_recur makeType(Declaration);
   } else {
     rc_return model::UpcastableType::empty();
   }
