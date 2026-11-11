@@ -18,6 +18,7 @@ from revng.pypeline.storage import local_provider
 from revng.pypeline.storage.local_provider import LocalStorageProvider
 from revng.pypeline.storage.storage_provider import ContainerLocation, PipeDependencies
 from revng.pypeline.storage.storage_provider import SavePointsRange
+from revng.pypeline.utils.pipeline import NodeDefinition
 
 initialize_pypeline()
 
@@ -141,3 +142,101 @@ def test_fallback_cache_version_prunes(monkeypatch, tmp_path: Path):
     assert (
         open_with_cache_version(monkeypatch, tmp_path, "0.1.1759500001").has(LOCATION, [ROOT]) == []
     )
+
+
+def open_with_nodes(tmp_path: Path, pipeline_hash: str, nodes: list[NodeDefinition] | None):
+    model_path = tmp_path / "model.yml"
+    model_path.touch()
+    return LocalStorageProvider(
+        tmp_path / "cache.sqlite", model_path, tmp_path, pipeline_hash, nodes
+    )
+
+
+def pipeline_nodes(first: str = "a", second: str = "b", swapped: bool = False, pipe: str = "p"):
+    """A pipe (node 0) feeding two savepoints, which a change elsewhere in the pipeline can swap"""
+    a, b = (2, 1) if swapped else (1, 2)
+    return [
+        NodeDefinition(pipe, 0, False, 0, 2),
+        NodeDefinition(first, a, True, a, a),
+        NodeDefinition(second, b, True, b, b),
+    ]
+
+
+def store_both(provider: LocalStorageProvider, custom: bool = False):
+    provider.add_objects(
+        [
+            PipeDependencies(
+                0,
+                SavePointsRange(0, 2),
+                "",
+                [("a", ROOT, "/root"), ("b", ROOT, "/root")],
+                [[(ROOT, b"data")]] if custom else [],
+            )
+        ],
+        {
+            ContainerLocation(1, "a", ""): {ROOT: b"first"},
+            ContainerLocation(2, "b", ""): {ROOT: b"second"},
+        },
+    )
+
+
+def stored(provider: LocalStorageProvider, savepoint: int, container: str) -> bytes | None:
+    location = ContainerLocation(savepoint, container, "")
+    if provider.has(location, [ROOT]) != [ROOT]:
+        return None
+    return bytes(provider.get(location, [ROOT])[ROOT])
+
+
+def test_unchanged_nodes_are_renumbered(tmp_path: Path):
+    store_both(open_with_nodes(tmp_path, "p1", pipeline_nodes()))
+    provider = open_with_nodes(tmp_path, "p2", pipeline_nodes(swapped=True))
+    assert stored(provider, 2, "a") == b"first"
+    assert stored(provider, 1, "b") == b"second"
+    assert stored(provider, 1, "a") is None
+
+
+def test_changed_savepoint_is_dropped(tmp_path: Path):
+    store_both(open_with_nodes(tmp_path, "p1", pipeline_nodes()))
+    provider = open_with_nodes(tmp_path, "p2", pipeline_nodes(second="c", swapped=True))
+    assert stored(provider, 2, "a") == b"first"
+    assert stored(provider, 1, "b") is None
+
+
+def test_objects_guarded_by_a_changed_pipe_are_dropped(tmp_path: Path):
+    # The savepoints keep their hashes here only to show that the pipe's dependencies alone decide
+    store_both(open_with_nodes(tmp_path, "p1", pipeline_nodes()), custom=True)
+    provider = open_with_nodes(tmp_path, "p2", pipeline_nodes(pipe="q"))
+    assert stored(provider, 1, "a") is None
+    assert stored(provider, 2, "b") is None
+    with provider._cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM dependency_keys")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM custom_dependencies")
+        assert cursor.fetchone() == (0,)
+
+
+def test_inserted_savepoint_renumbers_what_follows(tmp_path: Path):
+    store_both(open_with_nodes(tmp_path, "p1", pipeline_nodes()), custom=True)
+    provider = open_with_nodes(
+        tmp_path,
+        "p2",
+        [
+            NodeDefinition("x", 0, True, 1, 1),
+            NodeDefinition("p", 1, False, 1, 3),
+            NodeDefinition("a", 2, True, 2, 2),
+            NodeDefinition("b", 3, True, 3, 3),
+        ],
+    )
+    assert stored(provider, 2, "a") == b"first"
+    assert stored(provider, 3, "b") == b"second"
+    assert provider.get_custom_invalidation_data(1, "") == [[(ROOT, b"data")]]
+    with provider._cursor() as cursor:
+        cursor.execute("SELECT savepoint_id_start, savepoint_id_end FROM dependency_keys")
+        assert cursor.fetchall() == [(1, 3), (1, 3)]
+
+
+def test_pipeline_change_without_stored_nodes_prunes_all(tmp_path: Path):
+    store_both(open_with_nodes(tmp_path, "p1", None))
+    provider = open_with_nodes(tmp_path, "p2", pipeline_nodes())
+    assert stored(provider, 1, "a") is None
+    assert stored(provider, 2, "b") is None

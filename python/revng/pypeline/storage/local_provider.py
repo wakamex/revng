@@ -11,7 +11,7 @@ import re
 import shutil
 import sqlite3
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Buffer
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -31,7 +31,8 @@ from revng.pypeline.task.pipe import PipeCustomInvalidation
 from revng.pypeline.utils import Locked, crypto_hash
 from revng.pypeline.utils.db_migrator import DBMigrator
 from revng.pypeline.utils.logger import pypeline_logger
-from revng.pypeline.utils.pipeline import get_pipeline_description
+from revng.pypeline.utils.pipeline import NodeDefinition, get_pipeline_description
+from revng.pypeline.utils.pipeline import pipeline_node_definitions
 from revng.pypeline.utils.registry import get_singleton
 
 from .file_provider import FileRequest
@@ -366,7 +367,12 @@ class LocalStorageProviderFactory(StorageProviderFactory):
         return model_path
 
     def _create_provider(
-        self, project_id: str | None, base_directory: Path, cache_dir: str, pipeline_hash: str
+        self,
+        project_id: str | None,
+        base_directory: Path,
+        cache_dir: str,
+        pipeline_hash: str,
+        node_definitions: list[NodeDefinition] | None = None,
     ):
         model_path = self._find_model(project_id, base_directory)
         if model_path is None:
@@ -393,7 +399,9 @@ class LocalStorageProviderFactory(StorageProviderFactory):
             db_path = Path(cache_dir) / db_name
 
         pypeline_logger.debug_log(f'Using DB "{db_path}"')
-        provider = LocalStorageProvider(db_path, model_path, cache_path, pipeline_hash)
+        provider = LocalStorageProvider(
+            db_path, model_path, cache_path, pipeline_hash, node_definitions
+        )
         return (provider, None)
 
     def _create_temporary_provider(self, pipeline_hash: str):
@@ -437,12 +445,17 @@ class LocalStorageProviderFactory(StorageProviderFactory):
             # If the provider is not found, create a new one and put it in a lock
             if project_provider is None:
                 pipeline_hash = _compute_pipeline_hash(pipeline)
+                node_definitions = pipeline_node_definitions(pipeline)
                 if self.temporary:
                     project_provider = Locked(self._create_temporary_provider(pipeline_hash))
                 else:
                     project_provider = Locked(
                         self._create_provider(
-                            project_id, base_directory, cast(str, cache_dir), pipeline_hash
+                            project_id,
+                            base_directory,
+                            cast(str, cache_dir),
+                            pipeline_hash,
+                            node_definitions,
                         )
                     )
                 providers[project_id] = project_provider
@@ -465,7 +478,14 @@ class _MetadataUpdate(enum.Enum):
 class LocalStorageProvider(StorageProvider):
     """StorageProvider implementation with backing sqlite3 db"""
 
-    def __init__(self, db_path: str | Path, model_path: Path, cache_dir: Path, pipeline_hash: str):
+    def __init__(
+        self,
+        db_path: str | Path,
+        model_path: Path,
+        cache_dir: Path,
+        pipeline_hash: str,
+        node_definitions: list[NodeDefinition] | None = None,
+    ):
         check_kind_structure()
         self._model_path = model_path
         self._model_directory = self._model_path.parent.resolve()
@@ -476,7 +496,7 @@ class LocalStorageProvider(StorageProvider):
         self._init_tables()
         self.epoch = self._get_epoch()
 
-        self._check_version_and_pipeline_hash(pipeline_hash)
+        self._check_version_and_pipeline_hash(pipeline_hash, node_definitions)
 
     def _cursor(self) -> CursorWrapper:
         return CursorWrapper(self._connection)
@@ -486,15 +506,37 @@ class LocalStorageProvider(StorageProvider):
             migrator = Migrator(cursor)
             migrator.migrate()
 
-    def _check_version_and_pipeline_hash(self, pipeline_hash: str):
+    def _check_version_and_pipeline_hash(
+        self, pipeline_hash: str, node_definitions: list[NodeDefinition] | None = None
+    ):
         with self._cursor() as cursor:
             cursor.execute("SELECT version, pipeline_hash FROM project WHERE id is 0")
             db_version, db_pipeline_hash = cursor.fetchone()
+            cursor.execute(
+                "SELECT definition_hash, node_id, savepoint, range_start, range_end"
+                " FROM node_definitions"
+            )
+            stored = [NodeDefinition(h, i, bool(p), s, e) for h, i, p, s, e in cursor.fetchall()]
 
-        if (db_version is not None and db_version != version) or (
-            db_pipeline_hash is not None and db_pipeline_hash != pipeline_hash
-        ):
+        if db_version is not None and db_version != version:
             self.prune_objects()
+        elif db_pipeline_hash is not None and db_pipeline_hash != pipeline_hash:
+            # Without the nodes the objects were stored with, nothing is known to be unchanged
+            if node_definitions is None or not stored:
+                self.prune_objects()
+            else:
+                self._renumber_objects(stored, node_definitions)
+
+        # Without the current nodes, the stored ones would describe objects they did not compute
+        with self._cursor() as cursor:
+            cursor.execute("DELETE FROM node_definitions")
+            cursor.executemany(
+                "INSERT INTO node_definitions VALUES (?, ?, ?, ?, ?)",
+                [
+                    (n.node_id, n.definition_hash, int(n.savepoint), n.range_start, n.range_end)
+                    for n in node_definitions or []
+                ],
+            )
 
         # We either never wrote the version field or we just pruned all objects
         # because of a version mismatch. In both cases write the current
@@ -734,6 +776,118 @@ class LocalStorageProvider(StorageProvider):
             self._write_metadata(cursor, _MetadataUpdate.OBJECT_SAVE)
         return dict(invalidated)
 
+    def _renumber_objects(self, stored: list[NodeDefinition], current: list[NodeDefinition]):
+        """Leave the cache as running the current pipeline would have: keep the objects,
+        dependencies and custom invalidation data of the nodes whose definition hash is unchanged,
+        renumbered to the positions those nodes have now, and drop everything else. Objects guarded
+        by a dependency range or custom invalidation data that cannot be carried over are dropped
+        with it, since nothing would invalidate them any more.
+        """
+
+        def by_hash(nodes: list[NodeDefinition]) -> dict[str, NodeDefinition]:
+            counts = Counter(n.definition_hash for n in nodes)
+            return {n.definition_hash: n for n in nodes if counts[n.definition_hash] == 1}
+
+        new = by_hash(current)
+        matches = [(old, new[h]) for h, old in by_hash(stored).items() if h in new]
+        savepoints = {o.range_start: n.range_start for o, n in matches if o.savepoint}
+        pipes = {o.node_id: n.node_id for o, n in matches if not o.savepoint}
+        targets: dict[tuple[int, int], set[tuple[int, int]]] = defaultdict(set)
+        for o, n in matches:
+            if not o.savepoint:
+                targets[(o.range_start, o.range_end)].add((n.range_start, n.range_end))
+        ranges = {old: next(iter(t)) for old, t in targets.items() if len(t) == 1}
+        hits = Counter(ranges.values())
+        ranges = {old: t for old, t in ranges.items() if hits[t] == 1}
+        stored_pipes = {n.node_id: n for n in stored if not n.savepoint}
+
+        with self._cursor() as cursor:
+            cursor.execute(
+                "SELECT DISTINCT savepoint_id_start, savepoint_id_end FROM dependency_keys"
+            )
+            lost_ranges = [r for r in map(tuple, cursor.fetchall()) if r not in ranges]
+            cursor.execute("SELECT DISTINCT pipe_id FROM custom_dependencies")
+            for (pipe_id,) in cursor.fetchall():
+                if pipe_id in pipes:
+                    continue
+                # Data of a pipe the stored nodes do not know of could guard any object
+                node = stored_pipes.get(pipe_id)
+                lost_ranges.append((node.range_start, node.range_end) if node else (-1, 2**62))
+            kept = {
+                old: new_id
+                for old, new_id in savepoints.items()
+                if not any(start <= old <= end for start, end in lost_ranges)
+            }
+            pypeline_logger.debug_log(
+                f"Pipeline changed: keeping savepoints {sorted(kept.items())},"
+                f" pipes {sorted(pipes.items())}"
+            )
+
+            cursor.execute(
+                "CREATE TEMPORARY TABLE savepoint_map(old INT PRIMARY KEY, new INT NOT NULL)"
+            )
+            cursor.executemany("INSERT INTO savepoint_map VALUES (?, ?)", kept.items())
+            cursor.execute(
+                "CREATE TEMPORARY TABLE range_map(old_start INT, old_end INT, new_start INT,"
+                " new_end INT, PRIMARY KEY (old_start, old_end))"
+            )
+            cursor.executemany(
+                "INSERT INTO range_map VALUES (?, ?, ?, ?)",
+                [(*old, *new_range) for old, new_range in ranges.items()],
+            )
+            cursor.execute("CREATE TEMPORARY TABLE pipe_map(old INT PRIMARY KEY, new INT NOT NULL)")
+            cursor.executemany("INSERT INTO pipe_map VALUES (?, ?)", pipes.items())
+
+            for table in ("objects", "object_chunks"):
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE savepoint_id NOT IN (SELECT old FROM savepoint_map)"
+                )
+            unmapped_keys = (
+                "SELECT id FROM dependency_keys WHERE (savepoint_id_start, savepoint_id_end)"
+                " NOT IN (SELECT old_start, old_end FROM range_map)"
+            )
+            cursor.execute(f"DELETE FROM dependencies WHERE key_id IN ({unmapped_keys})")
+            cursor.execute(f"DELETE FROM dependency_keys WHERE id IN ({unmapped_keys})")
+            cursor.execute(
+                "DELETE FROM custom_dependencies WHERE pipe_id NOT IN (SELECT old FROM pipe_map)"
+            )
+
+            # Renumber in two steps through negative ids, so that no row takes an id still held by
+            # another
+            for table in ("objects", "object_chunks"):
+                cursor.execute(
+                    f"UPDATE {table} SET savepoint_id ="
+                    " -1 - (SELECT new FROM savepoint_map WHERE old = savepoint_id)"
+                    " WHERE savepoint_id IN (SELECT old FROM savepoint_map WHERE old != new)"
+                )
+                cursor.execute(
+                    f"UPDATE {table} SET savepoint_id = -1 - savepoint_id WHERE savepoint_id < 0"
+                )
+            cursor.execute(
+                "UPDATE dependency_keys SET (savepoint_id_start, savepoint_id_end) ="
+                " (SELECT -1 - new_start, -1 - new_end FROM range_map"
+                "  WHERE old_start = savepoint_id_start AND old_end = savepoint_id_end)"
+                " WHERE (savepoint_id_start, savepoint_id_end) IN"
+                " (SELECT old_start, old_end FROM range_map"
+                "  WHERE (old_start, old_end) != (new_start, new_end))"
+            )
+            cursor.execute(
+                "UPDATE dependency_keys SET savepoint_id_start = -1 - savepoint_id_start,"
+                " savepoint_id_end = -1 - savepoint_id_end WHERE savepoint_id_start < 0"
+            )
+            cursor.execute(
+                "UPDATE custom_dependencies"
+                " SET pipe_id = -1 - (SELECT new FROM pipe_map WHERE old = pipe_id)"
+                " WHERE pipe_id IN (SELECT old FROM pipe_map WHERE old != new)"
+            )
+            cursor.execute(
+                "UPDATE custom_dependencies SET pipe_id = -1 - pipe_id WHERE pipe_id < 0"
+            )
+
+            for table in ("savepoint_map", "range_map", "pipe_map"):
+                cursor.execute(f"DROP TABLE temp.{table}")
+            self._write_metadata(cursor, _MetadataUpdate.OBJECT_SAVE)
+
     def prune_objects(self):
         with self._cursor() as cursor:
             cursor.execute("DELETE FROM objects")
@@ -837,10 +991,10 @@ class LocalStorageProvider(StorageProvider):
                 "UPDATE project SET model_hash = ?, model_mtime = ?, last_seen_model = ?"
                 " WHERE id is 0",
                 (
-                        compute_hash(model_bytes),
-                        self._model_path.stat().st_mtime,
-                        _encode_model_copy(model_bytes),
-                    ),
+                    compute_hash(model_bytes),
+                    self._model_path.stat().st_mtime,
+                    _encode_model_copy(model_bytes),
+                ),
             )
             self.epoch += 1
             self._write_metadata(cursor, _MetadataUpdate.MODEL_SAVE)

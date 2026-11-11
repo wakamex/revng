@@ -2,7 +2,11 @@
 # This file is distributed under the MIT License. See LICENSE.md for details.
 #
 
+import hashlib
+import json
+from dataclasses import dataclass
 from functools import partial
+from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +21,7 @@ from revng.pypeline.object import Kind
 from revng.pypeline.pipeline import Pipeline
 from revng.pypeline.pipeline_node import PipelineConfiguration
 from revng.pypeline.task.pipe import Pipe
+from revng.pypeline.task.savepoint import SavePoint
 from revng.pypeline.utils import PypelineException
 from revng.pypeline.utils.registry import get_registry, get_singleton
 
@@ -66,6 +71,66 @@ def get_pipeline_description(pipeline: Pipeline) -> dict[str, Any]:
     validator.validate(pipeline_description)
 
     return pipeline_description
+
+
+@dataclass(frozen=True)
+class NodeDefinition:
+    """A pipeline node as the cache refers to it.
+
+    `node_id` and the savepoint range are positions in a walk of this pipeline, and a change
+    anywhere in the pipeline can renumber them. `definition_hash` covers the node's own definition
+    and that of every node upstream of it, together with the containers and kinds of the pipeline,
+    so it identifies the node across pipelines: two nodes with the same hash compute the same
+    objects.
+    """
+
+    definition_hash: str
+    node_id: int
+    savepoint: bool
+    range_start: int
+    range_end: int
+
+
+def pipeline_node_definitions(pipeline: Pipeline) -> list[NodeDefinition]:
+    description = get_pipeline_description(pipeline)
+    shared = json.dumps(
+        {
+            key: description[key]
+            for key in ("version", "model", "kinds", "container_types", "containers")
+        },
+        sort_keys=True,
+    ).encode()
+
+    nodes = list(pipeline.walk_pipeline(stable=True))
+    sorter: TopologicalSorter = TopologicalSorter()
+    for node in nodes:
+        sorter.add(node, *node.predecessors)
+
+    upstream: dict = {}
+    for node in sorter.static_order():
+        hasher = hashlib.sha256(shared)
+        if isinstance(node.task, Pipe):
+            hasher.update(b"Pipe\0" + node.task.__class__.name.encode() + b"\0")
+            hasher.update(node.task.static_configuration.encode() + b"\0")
+        else:
+            hasher.update(b"Savepoint\0" + node.task.name.encode() + b"\0")
+        for binding in node.bindings:
+            hasher.update(binding.name.encode() + b"\0")
+        for predecessor_hash in sorted(upstream[predecessor] for predecessor in node.predecessors):
+            hasher.update(predecessor_hash.encode() + b"\0")
+        upstream[node] = hasher.hexdigest()
+
+    return [
+        NodeDefinition(
+            upstream[node],
+            node.id,
+            isinstance(node.task, SavePoint),
+            node.savepoint_range.start,
+            node.savepoint_range.end,
+        )
+        for node in nodes
+        if node.savepoint_range is not None
+    ]
 
 
 def deserialize_configuration(pipeline: Pipeline, input_: dict[str, str]) -> PipelineConfiguration:

@@ -1110,7 +1110,7 @@ def test_local_provider_v3_migration_keeps_inline_objects():
 
         provider = LocalStorageProvider(db_file.name, Path(f.name), Path(d), "")
         db = provider._connection
-        assert db.execute("SELECT version FROM migrations").fetchone()[0] == 5
+        assert db.execute("SELECT version FROM migrations").fetchone()[0] == 6
         location = ContainerLocation(0, container_id, configuration_id)
         assert provider.get(location, [root]) == {root: b"inline"}
         assert db.execute("SELECT chunk_count FROM objects").fetchall() == [(0,)]
