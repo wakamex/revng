@@ -1410,21 +1410,23 @@ void DetectABI::applyABIDeductions() {
   }
 }
 
-/// \return whether \p CFG is a single basic block calling a dynamic function
+/// \return the dynamic function \p CFG calls if it is a single basic block
+/// calling one, and an empty name otherwise
 ///
 /// That is what a PLT stub looks like: it exists only to reach the dynamic
 /// function, so inlining it lets its callers call that function directly.
-static bool isDynamicFunctionStub(const SortedVector<efa::BasicBlock> &CFG) {
+static llvm::StringRef
+stubbedDynamicFunction(const SortedVector<efa::BasicBlock> &CFG) {
   if (CFG.size() != 1)
-    return false;
+    return {};
 
   for (const auto &Edge : CFG.begin()->Successors()) {
     const auto *Call = llvm::dyn_cast<efa::CallEdge>(Edge.get());
     if (Call != nullptr and not Call->DynamicFunction().empty())
-      return true;
+      return Call->DynamicFunction();
   }
 
-  return false;
+  return {};
 }
 
 void DetectABI::recordRegisters(const efa::CSVSet &CSVs, auto Inserter) {
@@ -1473,8 +1475,21 @@ void DetectABI::finalizeModel() {
     // Replace function attributes
     Function.Attributes() = Summary.Attributes;
 
-    if (isDynamicFunctionStub(Summary.CFG))
+    llvm::StringRef Stubbed = stubbedDynamicFunction(Summary.CFG);
+    if (not Stubbed.empty()) {
       Function.Attributes().insert(FunctionAttribute::AlwaysInline);
+
+      // A stub takes and returns what the dynamic function it reaches does,
+      // which the dynamic function's prototype, when there is one, tells
+      // better than what this binary's callers happen to read
+      const auto &Dynamic = Binary->ImportedDynamicFunctions()
+                              .at(Stubbed.str());
+      if (not Dynamic.Prototype().isEmpty()) {
+        Function.Prototype() = Dynamic.Prototype().copy();
+        Functions.insert(&Function);
+        continue;
+      }
+    }
 
     auto &&[Prototype, NewType] = Binary->makeRawFunctionDefinition();
     Prototype.Architecture() = getCodeArchitecture(EntryPC);
