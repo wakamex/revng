@@ -90,6 +90,83 @@ static cl::opt<bool> RecordTCG("record-tcg",
 static Logger LibTcgLog("libtcg");
 static Logger Log("lift");
 
+/// Whether the x86-64 instruction in \p Bytes writes the 32-bit ESP, which
+/// zeroes the upper half of RSP. Compiled code never does it, and a path that
+/// does would continue with a stack real programs never have: Warcraft III's
+/// protector guards code with `cmp esp, imm32; ja; sub esp, imm8`, whose
+/// `sub esp` only junk paths reach. Recognizes the arithmetic, mov and lea
+/// forms; a 16-bit write keeps the upper half and REX.W makes it a 64-bit one.
+static bool writesTruncatedStackPointer(llvm::ArrayRef<uint8_t> Bytes) {
+  size_t I = 0;
+  bool OperandSize16 = false;
+  for (; I < Bytes.size(); ++I) {
+    uint8_t Prefix = Bytes[I];
+    if (Prefix == 0x66)
+      OperandSize16 = true;
+    else if (Prefix != 0x67 and Prefix != 0xf0 and Prefix != 0xf2
+             and Prefix != 0xf3 and Prefix != 0x2e and Prefix != 0x36
+             and Prefix != 0x3e and Prefix != 0x26 and Prefix != 0x64
+             and Prefix != 0x65)
+      break;
+  }
+
+  uint8_t Rex = 0;
+  if (I < Bytes.size() and (Bytes[I] & 0xf0) == 0x40)
+    Rex = Bytes[I++];
+  bool RexW = Rex & 8;
+  bool RexR = Rex & 4;
+  bool RexB = Rex & 1;
+  if (OperandSize16 or RexW or I >= Bytes.size())
+    return false;
+
+  uint8_t Opcode = Bytes[I++];
+  // mov esp, imm32
+  if (Opcode == 0xbc)
+    return not RexB;
+  if (I >= Bytes.size())
+    return false;
+
+  uint8_t ModRM = Bytes[I];
+  unsigned Mod = ModRM >> 6;
+  unsigned Reg = (ModRM >> 3) & 7;
+  unsigned Rm = ModRM & 7;
+  bool RmIsESP = Mod == 3 and Rm == 4 and not RexB;
+  bool RegIsESP = Reg == 4 and not RexR;
+
+  switch (Opcode) {
+  // add, or, adc, sbb, and, sub, xor and mov into r/m32
+  case 0x01:
+  case 0x09:
+  case 0x11:
+  case 0x19:
+  case 0x21:
+  case 0x29:
+  case 0x31:
+  case 0x89:
+    return RmIsESP;
+  // The same from r/m32 into r32, and lea
+  case 0x03:
+  case 0x0b:
+  case 0x13:
+  case 0x1b:
+  case 0x23:
+  case 0x2b:
+  case 0x33:
+  case 0x8b:
+  case 0x8d:
+    return RegIsESP;
+  // Arithmetic with an immediate, except cmp (/7), which writes nothing
+  case 0x81:
+  case 0x83:
+    return RmIsESP and Reg != 7;
+  // mov r/m32, imm32
+  case 0xc7:
+    return RmIsESP and Reg == 0;
+  default:
+    return false;
+  }
+}
+
 template<typename T, typename... ArgTypes>
 constexpr std::array<T, sizeof...(ArgTypes)> make_array(ArgTypes &&...Args) {
   return { { std::forward<ArgTypes>(Args)... } };
@@ -436,6 +513,22 @@ void CodeGenerator::translate(LibTcg &LibTcg,
 
     Variables.openTranslationBlock(*(--Builder.GetInsertPoint()));
 
+    // A path that writes the 32-bit ESP ends there: see
+    // writesTruncatedStackPointer
+    auto TruncatesStackPointer = [&](MetaAddress Address) {
+      if (Address.type() != MetaAddressType::Code_x86_64)
+        return false;
+      auto Bytes = JumpTargets.binaryView().getByAddress(Address, 15);
+      if (not Bytes)
+        Bytes = JumpTargets.binaryView().getFromAddressOn(Address);
+      return Bytes and writesTruncatedStackPointer(*Bytes);
+    };
+
+    if (Result == IT::Success and TruncatesStackPointer(PC)) {
+      emitAbort(Builder, "");
+      StopTranslation = true;
+    }
+
     unsigned SinceInstructionStart = 0;
 
     // TODO: shall we move this whole loop in InstructionTranslator?
@@ -479,6 +572,8 @@ void CodeGenerator::translate(LibTcg &LibTcg,
                                                      VirtualAddress,
                                                      EndPC,
                                                      false);
+        if (Result == IT::Success and TruncatesStackPointer(PC))
+          Result = IT::Abort;
       } break;
       case LIBTCG_op_call: {
         Result = Translator.translateCall(Instruction,
