@@ -390,6 +390,7 @@ branches:
             # DLA not to identify arrays properly
             - loop-simplify
             - instcombine-noarrays
+            - fold-magic-division
             - remove-extractvalues
             - simplify-comparisons
             # We need to re-run type shrinking after instcombine.

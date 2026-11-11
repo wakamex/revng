@@ -535,6 +535,7 @@ set(FILECHECK_TESTS
     lift/wide-division-quotient-bit.S
     clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-then.mlir
+    llvm-passes/fold-magic-division.ll
     llvm-passes/arithmetic-to-gep.ll
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll

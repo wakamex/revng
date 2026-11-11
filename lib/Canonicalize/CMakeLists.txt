@@ -8,6 +8,7 @@ revng_add_analyses_library_internal(
   DeferAllocas.cpp
   ExitSSAPass.cpp
   ExtractValueToGEP.cpp
+  FoldMagicDivisionPass.cpp
   FixPointerSize.cpp
   SplitStructPhis.cpp
   LoopRewriteWithCanonicalIV.cpp
