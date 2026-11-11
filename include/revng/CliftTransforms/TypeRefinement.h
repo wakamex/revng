@@ -17,4 +17,6 @@ namespace clift {
 
 void populateWithTypeRefinementPatterns(mlir::RewritePatternSet &Set);
 
+void populateWithLocalStorageAccessPatterns(mlir::RewritePatternSet &Set);
+
 } // namespace clift

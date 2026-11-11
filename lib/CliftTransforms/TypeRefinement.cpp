@@ -216,6 +216,34 @@ std::partial_ordering clift::compareTypeRefinement(mlir::Type T1,
   TypeKind K1 = getTypeKind(U1);
   TypeKind K2 = getTypeKind(U2);
 
+  // A pointer to a generic integer or to void points to something unknown,
+  // so a pointer to data of a known type and of the same size refines it. A
+  // function pointer does not: a call through a pointer is weak evidence that
+  // the pointer holds nothing else.
+  if (K1 == TypeKind::Pointer and K2 == TypeKind::Pointer) {
+    auto P1 = mlir::cast<PointerType>(U1);
+    auto P2 = mlir::cast<PointerType>(U2);
+    if (P1.getPointerSize() != P2.getPointerSize())
+      return std::partial_ordering::unordered;
+
+    enum class Pointee { Unknown, Function, Data };
+    auto Classify = [](PointerType P) {
+      mlir::Type T = fullyUnwrapType(P.getPointeeType()).first;
+      TypeKind K = getTypeKind(T);
+      if (K == TypeKind::Generic or K == TypeKind::Void)
+        return Pointee::Unknown;
+      if (mlir::isa<FunctionType>(T))
+        return Pointee::Function;
+      return Pointee::Data;
+    };
+    Pointee C1 = Classify(P1);
+    Pointee C2 = Classify(P2);
+    if (C1 == Pointee::Unknown and C2 == Pointee::Data)
+      return std::partial_ordering::less;
+    if (C1 == Pointee::Data and C2 == Pointee::Unknown)
+      return std::partial_ordering::greater;
+  }
+
   if (TypeTable::ordered(K1, K2))
     return K1 <=> K2;
 
@@ -304,6 +332,17 @@ static void setResultType(mlir::PatternRewriter &Rewriter,
     mlir::OpBuilder::InsertionGuard Guard(Rewriter);
     Rewriter.setInsertionPoint(Operand->getOwner());
 
+    // A read of an l-value converts its value, which a cast of the value
+    // expresses directly. Reinterpreting the object instead would hide the
+    // read from the rewrites that give it a field access.
+    auto E = mlir::dyn_cast<ExpressionOpInterface>(Operand->getOwner());
+    if (E
+        and E.lvalueToRvalueConversion(*Operand)
+              == LvalueToRvalueConversion::Yes) {
+      Operand->set(Rewriter.create<BitCastOp>(Op->getLoc(), OldType, Result));
+      continue;
+    }
+
     mlir::Value NewValue = emitTypeConversion(Rewriter, Op, Result, OldType);
 
     Operand->set(NewValue);
@@ -371,7 +410,10 @@ struct VariableForwardRefinementPattern : mlir::OpRewritePattern<AssignOp> {
 struct VariableBackwardRefinementPattern : mlir::OpRewritePattern<BitCastOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  void initialize() { addDebugLabels("type-refinement"); }
+  void initialize() {
+    addDebugLabels("type-refinement");
+    addDebugLabels("backward-type-refinement");
+  }
 
   mlir::LogicalResult
   matchAndRewrite(BitCastOp Cast,
@@ -547,7 +589,10 @@ struct ExpressionForwardRefinementPattern
 struct ExpressionBackwardRefinementPattern : mlir::OpRewritePattern<BitCastOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  void initialize() { addDebugLabels("type-refinement"); }
+  void initialize() {
+    addDebugLabels("type-refinement");
+    addDebugLabels("backward-type-refinement");
+  }
 
   mlir::LogicalResult
   matchAndRewriteUnaryExpression(ExpressionOpInterface Op,
@@ -647,6 +692,46 @@ struct TypeRefinementPass
 };
 
 } // namespace
+
+namespace {
+
+/// The clifter reads and writes a local through a reinterpretation of its
+/// storage with the local's own type, `*(T *)(void *)&x`, which is the local
+/// itself. Variable refinement matches only direct uses of the local.
+struct LocalStorageAccessPattern : mlir::OpRewritePattern<IndirectionOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  void initialize() { addDebugLabels("type-refinement"); }
+
+  mlir::LogicalResult
+  matchAndRewrite(IndirectionOp Indirection,
+                  mlir::PatternRewriter &Rewriter) const override {
+    mlir::Value Pointer = Indirection.getPointer();
+    while (auto Cast = Pointer.getDefiningOp<BitCastOp>())
+      Pointer = Cast.getValue();
+
+    auto Addressof = Pointer.getDefiningOp<AddressofOp>();
+    if (not Addressof)
+      return mlir::failure();
+
+    auto Local = Addressof.getObject().getDefiningOp<LocalVariableOp>();
+    if (not Local)
+      return mlir::failure();
+
+    if (not equivalent(Indirection.getType(), Local.getType()))
+      return mlir::failure();
+
+    Rewriter.replaceOp(Indirection, Local.getResult());
+    return mlir::success();
+  }
+};
+
+} // namespace
+
+void clift::populateWithLocalStorageAccessPatterns(mlir::RewritePatternSet
+                                                     &Set) {
+  Set.add<LocalStorageAccessPattern>(Set.getContext());
+}
 
 void clift::populateWithTypeRefinementPatterns(mlir::RewritePatternSet &Set) {
   Set.add<VariableForwardRefinementPattern>(Set.getContext());

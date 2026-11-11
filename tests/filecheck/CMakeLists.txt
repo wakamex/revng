@@ -446,6 +446,7 @@ set(FILECHECK_TESTS
     clift/type-refinement/backward-variable-refinement.mlir
     clift/type-refinement/forward-add-refinement.mlir
     clift/type-refinement/forward-neg-refinement.mlir
+    clift/type-refinement/forward-pointer-variable-refinement.mlir
     clift/type-refinement/forward-ternary-refinement.mlir
     clift/type-refinement/forward-variable-refinement.mlir
     clift/types/function-with-function-argument.mlir

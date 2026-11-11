@@ -24,9 +24,14 @@ namespace {
 struct TypeRefinementWithEFAPass
   : clift::impl::CliftTypeRefinementWithEFABase<TypeRefinementWithEFAPass> {
 
+  mlir::FrozenRewritePatternSet RefinementPatterns;
   mlir::FrozenRewritePatternSet Patterns;
 
   mlir::LogicalResult initialize(mlir::MLIRContext *Context) override {
+    mlir::RewritePatternSet RefinementSet(Context);
+    populateWithTypeRefinementPatterns(RefinementSet);
+    populateWithLocalStorageAccessPatterns(RefinementSet);
+
     mlir::RewritePatternSet Set(Context);
 
     populateWithEmitFieldAccessesPatterns(Set);
@@ -43,6 +48,13 @@ struct TypeRefinementWithEFAPass
     // TODO: Fix EFA and re-enable the relevant rewrite patterns.
     DisabledPatterns.emplace_back("incompatible-with-efa");
 
+    // A local takes the type of what is assigned to it before the type of a
+    // cast at one of its reads, which only says how that read uses it
+    llvm::SmallVector<std::string> ForwardOnly(DisabledPatterns);
+    ForwardOnly.emplace_back("backward-type-refinement");
+    RefinementPatterns = mlir::FrozenRewritePatternSet(std::move(RefinementSet),
+                                                       ForwardOnly,
+                                                       enabledPatterns);
     Patterns = mlir::FrozenRewritePatternSet(std::move(Set),
                                              DisabledPatterns,
                                              enabledPatterns);
@@ -55,6 +67,20 @@ struct TypeRefinementWithEFAPass
 
     mlir::GreedyRewriteConfig Config;
     Config.maxIterations = mlir::GreedyRewriteConfig::kNoLimit;
+
+    // Refine types forward before emitting field accesses: EFA rewrites an
+    // access through a byte pointer into a subscript, which it does not revisit
+    // once refinement gives the pointer a struct type, as it does for a local
+    // assigned a pointer to a struct. This phase runs no other rewrite, so
+    // that EFA still sees every other access in the form it expects.
+    if (mlir::applyPatternsAndFoldGreedily(getOperation(),
+                                           RefinementPatterns,
+                                           Config)
+          .failed()) {
+      signalPassFailure();
+      return;
+    }
+
     if (mlir::applyPatternsAndFoldGreedily(getOperation(), Patterns, Config)
           .failed())
       signalPassFailure();

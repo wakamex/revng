@@ -158,7 +158,10 @@ BOOST_AUTO_TEST_CASE(TypeRefinementOrdering) {
   Node &PtrOrNum = Generic.put(makeInteger(IntegerKind::PointerOrNumber));
 
   Node &Pointer1 = PtrOrNum.put(makePointer(Generic.Archetype));
-  Node &Pointer2 = PtrOrNum.put(makePointer(Pointer1.Archetype));
+  // A pointer to a generic integer points to something unknown, which any
+  // known pointee refines
+  Node &Pointer2 = Pointer1.put(makePointer(Pointer1.Archetype));
+  Node &StructPointer = Pointer1.put(makePointer(Struct.Archetype));
 
   Node &FloatingPoint = Generic.put(FloatType::get(Context, 8));
 
