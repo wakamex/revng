@@ -1,0 +1,23 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+# A program importing `f`, declared without its return value
+---
+Architecture: x86_64
+OperatingSystem: Linux
+ImportedDynamicFunctions:
+  - Name: f
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1-CABIFunctionDefinition"
+TypeDefinitions:
+  - ID: 1
+    Kind: CABIFunctionDefinition
+    ABI: SystemV_x86_64
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+...

@@ -3,10 +3,12 @@
 //
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/CommandLine.h"
 
 #include "revng/Model/Architecture.h"
 #include "revng/Model/Binary.h"
@@ -21,6 +23,12 @@
 #include "revng/Support/SQLite.h"
 
 static Logger Log("import-prototypes-from-db");
+
+static llvm::cl::opt<std::string>
+  PrototypesDatabase("prototypes-database",
+                     llvm::cl::desc("Read prototypes from this database "
+                                    "instead of share/revng/prototypes.sqlite"),
+                     llvm::cl::init(""));
 
 /// Turn a TypeDefinition body (flat YAML mapping) into a YAML list item
 /// indented for inclusion under a top-level key.
@@ -197,7 +205,8 @@ public:
   /// library must be imported independently.
   void importLibrary(const LibraryInfo &Library,
                      const std::vector<std::string> &SymbolNames,
-                     TupleTree<model::Binary> &Binary) {
+                     TupleTree<model::Binary> &Binary,
+                     bool DefinitionsOnly) {
     std::string SymbolPlaceholders = sqlite::buildInClause(SymbolNames.size());
     int LibraryParamIndex = SymbolNames.size() + 1;
 
@@ -278,6 +287,7 @@ public:
              << LibraryParamIndex << R"(
           AND s.Name IN ()"
              << SymbolPlaceholders << R"()
+          )" << (DefinitionsOnly ? "AND s.Kind = 'Function'" : "") << R"(
         ORDER BY s.SymbolID
       )";
     }
@@ -431,7 +441,11 @@ public:
 
     // Find the database
     using revng::ResourceFinder;
-    auto MaybeDbPath = ResourceFinder.findFile("share/revng/prototypes.sqlite");
+    std::optional<std::string> MaybeDbPath;
+    if (not PrototypesDatabase.empty())
+      MaybeDbPath = PrototypesDatabase.getValue();
+    else
+      MaybeDbPath = ResourceFinder.findFile("share/revng/prototypes.sqlite");
     if (not MaybeDbPath) {
       revng_log(Log, "Database not found, skipping");
       return;
@@ -503,11 +517,21 @@ public:
 
     revng_log(Log, "Found " << Libraries.size() << " libraries to import");
 
-    // Phase 3: import each library independently
-    for (const auto &Library : Libraries) {
-      revng_log(Log, "Importing library " << Library.LibraryID);
-      LoggerIndent LibraryIndent(Log);
-      Database.importLibrary(Library, SymbolNames, Binary);
+    // Phase 3: import each library independently. The first library that has
+    // a symbol gives its prototype, so the libraries that define a symbol go
+    // first: a program importing it records the declaration it was compiled
+    // against, which can lack what the definition has, such as the return type
+    // of a C++ function whose debug information puts it on a separate
+    // declaration. The imports then give the symbols no library defines.
+    for (bool DefinitionsOnly : { true, false }) {
+      for (const auto &Library : Libraries) {
+        revng_log(Log,
+                  "Importing library " << Library.LibraryID
+                                       << (DefinitionsOnly ? ", definitions" :
+                                                             ""));
+        LoggerIndent LibraryIndent(Log);
+        Database.importLibrary(Library, SymbolNames, Binary, DefinitionsOnly);
+      }
     }
 
     model::flattenPrimitiveTypedefs(Binary);

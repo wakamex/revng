@@ -490,6 +490,7 @@ set(FILECHECK_TESTS
     detect-abi/relocated-code-pointer.S
     detect-abi/trap-kinds.S
     import/dwarf-specification-return-type.S
+    import/prefer-definitions.test
     lift/added-function-relift.S
     lift/cpu-state-initializers-layout.S
     lift/cpuid.S

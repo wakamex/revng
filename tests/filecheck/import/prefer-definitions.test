@@ -1,0 +1,23 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+# The prototypes database has `f` twice on one platform: as a program imports
+# it, declared without its return value, and as the library defining it
+# declares it, returning an int. A program's declaration can lack what the
+# definition has, as C++ functions whose return type the debug information
+# puts on a separate declaration did, so the definition gives the prototype
+# even though the program comes first in the database.
+#
+# RUN: rm -f %t.db
+# RUN: %root/bin/revng model export sqlite --db %t.db --platform test-platform --operating-system Linux --library program %S/Inputs/prototypes-program.yml
+# RUN: %root/bin/revng model export sqlite --db %t.db --platform test-platform --operating-system Linux --library library %S/Inputs/prototypes-library.yml
+# RUN: REVNG_OPTIONS=--prototypes-database=%t.db %root/bin/revng pipeline run-analysis import-prototypes-from-db %S/Inputs/prototypes-importer.yml | FileCheck %s
+#
+# CHECK: - Name:{{ *}}f
+# CHECK-NEXT: Prototype:
+# CHECK-NEXT: Kind:{{ *}}DefinedType
+# CHECK-NEXT: Definition:{{ *}}"/TypeDefinitions/[[ID:[0-9]+]]-CABIFunctionDefinition"
+# CHECK: - ID:{{ *}}[[ID]]
+# CHECK-NEXT: Kind:{{ *}}CABIFunctionDefinition
+# CHECK-NEXT: ABI:{{ *}}SystemV_x86_64
+# CHECK-NEXT: ReturnType:

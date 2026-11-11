@@ -1,0 +1,30 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+# The library defining `f`, which returns an int
+---
+Architecture: x86_64
+OperatingSystem: Linux
+Functions:
+  - Entry: "0x1000:Code_x86_64"
+    Name: f
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1-CABIFunctionDefinition"
+    ExportedNames:
+      - f
+TypeDefinitions:
+  - ID: 1
+    Kind: CABIFunctionDefinition
+    ABI: SystemV_x86_64
+    ReturnType:
+      Kind: PrimitiveType
+      PrimitiveKind: Signed
+      Size: 4
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Signed
+          Size: 4
+...

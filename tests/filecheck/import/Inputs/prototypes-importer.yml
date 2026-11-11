@@ -1,0 +1,11 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+# A binary importing `f`, on the platform of the test database
+---
+Architecture: x86_64
+OperatingSystem: Linux
+PlatformName: test-platform
+ImportedDynamicFunctions:
+  - Name: f
+...
