@@ -843,6 +843,19 @@ private:
     if (not SourceT)
       return Value;
 
+    // An integer of one size where the prototype has an integer of another, as
+    // where a call-site prototype guessed for a call the CFG later found to
+    // reach an imported function disagrees with that function's, is extended
+    // or truncated first: a bitcast is only between values of the same size
+    if (getUnderlyingIntegerType(SourceType)
+        and getUnderlyingIntegerType(TargetType)) {
+      Value = extendOrTruncate<ZeroExtendOp>(Loc,
+                                             Value,
+                                             getObjectSize(TargetType));
+      if (Value.getType() == TargetType)
+        return Value;
+    }
+
     return Builder.create<BitCastOp>(Loc, TargetType, Value);
   }
 

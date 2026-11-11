@@ -461,6 +461,7 @@ set(FILECHECK_TESTS
     clift/types/struct-with-recursion.mlir
     clift/types/union-with-large-tree.mlir
     clift/types/union-with-pointer-recursion.mlir
+    clifter/call-site-prototype-integer-sizes.S
     detect-abi/indirect-call-site-prototype.S
     detect-abi/indirect-call-vector-scratch.S
     detect-abi/loop-computed-return.S
