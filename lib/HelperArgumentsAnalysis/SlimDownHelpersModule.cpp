@@ -2,9 +2,12 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/Pass.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
@@ -24,6 +27,30 @@ static bool isInterchangeableConstant(const GlobalVariable &GV) {
          and (GV.hasLinkOnceODRLinkage() or GV.hasGlobalUnnamedAddr());
 }
 
+/// Whether every use of \p GV, a global no other module can write, reads it:
+/// loads, directly or through getelementptr. QEMU declares some tables a
+/// helper only reads without const, such as the rounding modes
+/// `helper_ldmxcsr` looks up, so that the compiler leaves them writable.
+static bool isReadOnlyInternal(const GlobalVariable &GV) {
+  if (not GV.hasLocalLinkage() or not GV.hasInitializer() or GV.isConstant())
+    return false;
+
+  SmallVector<const User *, 8> Worklist(GV.users());
+  while (not Worklist.empty()) {
+    const User *U = Worklist.pop_back_val();
+    if (auto *Load = dyn_cast<LoadInst>(U)) {
+      if (Load->isVolatile())
+        return false;
+    } else if (isa<GEPOperator>(U)) {
+      for (const User *Next : U->users())
+        Worklist.push_back(Next);
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 class SlimDownHelpersModule : public llvm::ModulePass {
 public:
   static char ID;
@@ -33,6 +60,13 @@ public:
 
   bool runOnModule(llvm::Module &M) override {
     LLVMContext &Context = M.getContext();
+
+    // Decided before any body is deleted, so that a write from a helper that is
+    // not inlined counts
+    SmallPtrSet<GlobalVariable *, 8> ReadOnly;
+    for (GlobalVariable &GV : M.globals())
+      if (isReadOnlyInternal(GV))
+        ReadOnly.insert(&GV);
 
     for (Function &F : M) {
       if (F.isDeclaration() or F.isIntrinsic())
@@ -62,7 +96,8 @@ public:
     //   functions, so we set their linkage temporarily to internal, run
     //   `globaldce` and then restore them to their original linkage
     // * Constants whose copies are interchangeable keep their initializer and
-    //   linkage: the `linkonce_odr` strings `getUniqueString` makes, such as
+    //   linkage, as do internal tables that are only read, which become such
+    //   constants: the `linkonce_odr` strings `getUniqueString` makes, such as
     //   the message an `emitAbort` in a helper passes to `revng_abort`, and the
     //   compiler's `unnamed_addr` constants, such as the strings of an
     //   `assert`. An inlined helper passes their address on, and the C emitted
@@ -76,6 +111,13 @@ public:
       GV.eraseMetadata(LLVMContext::MD_dbg);
       if (GV.isDeclaration() or isSpecialGV(GV))
         continue;
+
+      // A table nothing writes is a constant whose copies are interchangeable,
+      // as nothing compares its address either
+      if (ReadOnly.contains(&GV)) {
+        GV.setConstant(true);
+        GV.setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+      }
 
       if (FunctionTags::CSV.isTagOf(&GV)) {
         // Save linkage to be restored after we run globaldce

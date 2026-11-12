@@ -10,6 +10,7 @@
 #include <system_error>
 
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/AssumptionCache.h"
@@ -21,9 +22,11 @@
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CommandLine.h"
@@ -633,6 +636,94 @@ bool InlineHelpers::doInline(Function *F) const {
   return ToInline.size() > 0;
 }
 
+using namespace llvm::PatternMatch;
+
+/// If \p GEP indexes a small constant table of the helper module and is only
+/// loaded from, replace each load with the entry it reads, chosen by the index,
+/// and erase the GEP. The table has no counterpart in the model, so a reference
+/// to it could not be emitted.
+static bool foldConstantTableLoads(GetElementPtrInst *GEP) {
+  auto *Table = dyn_cast<GlobalVariable>(GEP->getPointerOperand());
+  if (Table == nullptr or not Table->isConstant()
+      or not Table->hasDefinitiveInitializer())
+    return false;
+
+  auto *Entries = dyn_cast<ConstantDataSequential>(Table->getInitializer());
+  if (Entries == nullptr or Entries->getNumElements() > 16
+      or GEP->getNumIndices() != 2
+      or not match(GEP->getOperand(1), m_Zero())
+      or GEP->getSourceElementType() != Table->getValueType())
+    return false;
+
+  for (User *U : GEP->users()) {
+    auto *Load = dyn_cast<LoadInst>(U);
+    if (Load == nullptr or Load->getType() != Entries->getElementType())
+      return false;
+  }
+
+  Value *Index = GEP->getOperand(2);
+  for (User *U : llvm::make_early_inc_range(GEP->users())) {
+    auto *Load = cast<LoadInst>(U);
+    IRBuilder<> Builder(Load);
+    // An index past the table is undefined behavior in the helper; the last
+    // entry stands for it
+    unsigned Last = Entries->getNumElements() - 1;
+    Value *Result = Entries->getElementAsConstant(Last);
+    for (unsigned I = Last; I-- > 0;) {
+      Value *Is = Builder.CreateICmpEQ(Index,
+                                       ConstantInt::get(Index->getType(), I));
+      Result = Builder.CreateSelect(Is, Entries->getElementAsConstant(I),
+                                    Result);
+    }
+    Load->replaceAllUsesWith(Result);
+    Load->eraseFromParent();
+  }
+  GEP->eraseFromParent();
+  return true;
+}
+
+/// Remove each getelementptr from \p F: loads from a small constant table
+/// become a choice among its entries, and any other getelementptr becomes the
+/// address arithmetic it stands for. Isolated functions must hold no
+/// getelementptr (see PostInlineHelpersVerifyPass), and an inlined helper can
+/// leave one whose index is not constant: `helper_ldmxcsr` reads the rounding
+/// mode from a table.
+static void lowerGetElementPtrs(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  SmallVector<GetElementPtrInst *, 4> ToLower;
+  for (Instruction &I : instructions(F))
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      ToLower.push_back(GEP);
+
+  for (GetElementPtrInst *GEP : ToLower) {
+    if (foldConstantTableLoads(GEP))
+      continue;
+
+    unsigned Bits = DL.getIndexSizeInBits(GEP->getPointerAddressSpace());
+    MapVector<Value *, APInt> Variable;
+    APInt Constant(Bits, 0);
+    if (GEP->getType()->isVectorTy()
+        or not GEP->collectOffset(DL, Bits, Variable, Constant))
+      continue;
+
+    IRBuilder<> Builder(GEP);
+    Type *IntegerType = Builder.getIntNTy(Bits);
+    Value *Address = Builder.CreatePtrToInt(GEP->getPointerOperand(),
+                                            IntegerType);
+    for (auto &[Index, Scale] : Variable) {
+      Value *Wide = Builder.CreateSExtOrTrunc(Index, IntegerType);
+      Address = Builder.CreateAdd(Address,
+                                  Builder.CreateMul(Wide,
+                                                    Builder.getInt(Scale)));
+    }
+    if (not Constant.isZero())
+      Address = Builder.CreateAdd(Address, Builder.getInt(Constant));
+
+    GEP->replaceAllUsesWith(Builder.CreateIntToPtr(Address, GEP->getType()));
+    GEP->eraseFromParent();
+  }
+}
+
 static void dropDebugOrPseudoInst(Function *F) {
   SmallVector<Instruction *, 16> ToErase;
   for (BasicBlock &BB : *F) {
@@ -664,6 +755,8 @@ void InlineHelpers::run(Function *F) {
   // traverse and inline as well.
   while (doInline(F)) {
   }
+
+  lowerGetElementPtrs(*F);
   dropDebugOrPseudoInst(F);
 
   // Dump the IR of the function after inlining has taken place

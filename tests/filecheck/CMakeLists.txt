@@ -512,6 +512,7 @@ set(FILECHECK_TESTS
     lift/branch-to-copied-entry.S
     lift/gvec-equality.S
     lift/helper-abort-message.S
+    lift/ldmxcsr-rounding-table.S
     lift/helper-written-csv-passthrough.S
     lift/hoisted-import-call.S
     lift/int3-no-fallthrough.S

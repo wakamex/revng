@@ -3,9 +3,10 @@
 ;
 ; Check that `slim-down-helpers-module` keeps the initializer of the constants
 ; an inline helper uses whose copies are interchangeable: the `linkonce_odr`
-; message of an abort that `fix-helpers` emits and an `unnamed_addr` string.
-; Other globals still lose their initializer, and the globals no inline helper
-; uses are removed.
+; message of an abort that `fix-helpers` emits, an `unnamed_addr` string, and an
+; internal table the module only reads, which becomes such a constant. Other
+; globals still lose their initializer, as does an internal table a helper
+; writes, and the globals no inline helper uses are removed.
 ;
 ; RUN: %root/bin/revng opt -slim-down-helpers-module %s -S -o - | FileCheck %s
 
@@ -18,8 +19,11 @@
 ; CHECK-DAG: @table = external constant [2 x i8]
 @table = constant [2 x i8] c"\01\02"
 
-; CHECK-DAG: @state = external {{.*}}global [4 x i8]
+; CHECK-DAG: @state = internal unnamed_addr constant [4 x i8] c"\00\01\02\03"
 @state = internal global [4 x i8] c"\00\01\02\03"
+
+; CHECK-DAG: @written = external {{.*}}global [4 x i8]
+@written = internal global [4 x i8] c"\00\01\02\03"
 
 ; CHECK-NOT: @unused_constant
 @unused_constant = private unnamed_addr constant [2 x i8] c"ab"
@@ -39,6 +43,8 @@ valid:
   %state_address = getelementptr [4 x i8], ptr @state, i64 0, i64 %index
   %state_value = load i8, ptr %state_address
   %sum = add i8 %entry_value, %state_value
+  %written_address = getelementptr [4 x i8], ptr @written, i64 0, i64 %index
+  store i8 %sum, ptr %written_address
   ret i8 %sum
 invalid:
   call void @revng_abort(ptr @message)
