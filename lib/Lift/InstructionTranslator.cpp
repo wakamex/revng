@@ -40,6 +40,7 @@
 using namespace llvm;
 
 static Logger Log("instruction-translator");
+static Logger PruneLog("prune-decided-branches");
 
 using IT = InstructionTranslator;
 
@@ -732,6 +733,19 @@ void IT::registerDirectJumps(std::optional<MetaAddress> DeadSuccessor) {
         Dead = ExitBB;
       else
         Live = ExitBB;
+    }
+
+    // An exit block that holds the start of an instruction is code another
+    // jump may enter, as where junk overlaps real code: leave it be
+    auto StartsInstruction = [this](Instruction &I) {
+      auto *Call = dyn_cast<CallInst>(&I);
+      return Call != nullptr and Call->getCalledFunction() == NewPCMarker;
+    };
+    if (Dead != nullptr and llvm::any_of(*Dead, StartsInstruction)) {
+      revng_log(PruneLog,
+                "The dead exit of the jump to " << DeadSuccessor->toString()
+                                                << " holds an instruction");
+      Dead = nullptr;
     }
 
     if (Dead != nullptr) {
