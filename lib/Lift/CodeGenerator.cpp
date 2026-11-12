@@ -87,6 +87,15 @@ static cl::opt<bool> RecordTCG("record-tcg",
                                cl::desc("create metadata for TCG"),
                                cl::cat(MainCategory));
 
+static cl::opt<bool> PruneDecidedBranches("prune-decided-branches",
+                                          cl::desc("Leave out the successor "
+                                                   "of an x86-64 conditional "
+                                                   "jump that no path of its "
+                                                   "function takes, as the "
+                                                   "junk branches a protector "
+                                                   "settles with constants"),
+                                          cl::init(false));
+
 static Logger LibTcgLog("libtcg");
 static Logger Log("lift");
 
@@ -667,7 +676,13 @@ void CodeGenerator::translate(LibTcg &LibTcg,
       }
     }
 
-    Translator.registerDirectJumps();
+    // A conditional jump at the end of the block whose outcome the paths of
+    // its function decide: its other successor is junk
+    std::optional<MetaAddress> DeadSuccessor;
+    if (PruneDecidedBranches and PC.type() == MetaAddressType::Code_x86_64)
+      DeadSuccessor = JumpTargets.unwindRanges().deadSuccessor(PC);
+
+    Translator.registerDirectJumps(DeadSuccessor);
     // Obtain a new program counter to translate
     TranslateTask.complete();
     LiftTask.advance("Peek new address", true);

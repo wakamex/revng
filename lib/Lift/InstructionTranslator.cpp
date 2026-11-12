@@ -25,6 +25,7 @@
 #include "revng/Lift/Lift.h"
 #include "revng/Lift/VariableManager.h"
 #include "revng/Model/FunctionTags.h"
+#include "revng/Support/EmitAbort.h"
 #include "revng/Support/Assert.h"
 #include "revng/Support/IRBuilder.h"
 #include "revng/Support/IRHelpers.h"
@@ -716,10 +717,37 @@ IT::TranslationResult IT::translate(LibTcgInstruction *Instr,
   return Success;
 }
 
-void IT::registerDirectJumps() {
+void IT::registerDirectJumps(std::optional<MetaAddress> DeadSuccessor) {
+
+  // The exit to the successor no path takes goes where the other exit does,
+  // so the condition between them disappears; without another exit, it aborts
+  if (DeadSuccessor) {
+    BasicBlock *Dead = nullptr;
+    BasicBlock *Live = nullptr;
+    for (BasicBlock *ExitBB : ExitBlocks) {
+      auto &&[Result, NextPC] = PCH->getUniqueJumpTarget(ExitBB);
+      if (Result != NextJumpTarget::Unique)
+        continue;
+      if (NextPC == *DeadSuccessor)
+        Dead = ExitBB;
+      else
+        Live = ExitBB;
+    }
+
+    if (Dead != nullptr) {
+      while (not Dead->empty())
+        Dead->back().eraseFromParent();
+      if (Live != nullptr)
+        BranchInst::Create(Live, Dead);
+      else
+        emitAbort(Dead, "");
+      ExitBlocks.erase(llvm::find(ExitBlocks, Dead));
+    }
+  }
 
   for (BasicBlock *ExitBB : ExitBlocks) {
     auto &&[Result, NextPC] = PCH->getUniqueJumpTarget(ExitBB);
+
     if (Result == NextJumpTarget::Unique and JumpTargets.isPC(NextPC)
         and not JumpTargets.hasJT(NextPC)) {
       JumpTargets.registerJT(NextPC, JumpTargetReason::DirectJump);

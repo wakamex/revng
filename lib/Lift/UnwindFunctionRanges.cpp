@@ -450,6 +450,58 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
   return Groups[Index] = std::move(Result);
 }
 
+std::optional<MetaAddress>
+UnwindFunctionRanges::deadSuccessor(MetaAddress Jump) {
+  if (Ranges.empty() or Jump.type() != CodeType
+      or Architecture != model::Architecture::x86_64)
+    return std::nullopt;
+
+  auto Index = find(Jump.address());
+  if (not Index)
+    return std::nullopt;
+
+  // Walk the function from the part that begins at a call's state; a
+  // function whose parts all begin mid-frame is walked from the jump's part
+  const std::vector<unsigned> &Parts = group(*Index);
+  unsigned Entry = *Index;
+  for (unsigned Part : Parts) {
+    if (not Ranges[Part].StartsMidFrame) {
+      Entry = Part;
+      break;
+    }
+  }
+
+  auto It = DecisionsByEntry.find(Entry);
+  if (It == DecisionsByEntry.end()) {
+    std::vector<std::pair<uint64_t, uint64_t>> Code;
+    for (unsigned Part : Parts)
+      Code.push_back({ Ranges[Part].Start, Ranges[Part].End });
+    DecidedBranches Walk(*Disassembler,
+                         *InstrInfo,
+                         *RegisterInfo,
+                         [this](uint64_t Address) -> ArrayRef<uint8_t> {
+                           auto Bytes = BinaryView.getFromAddressOn(
+                             MetaAddress::fromPC(Architecture, Address));
+                           return Bytes ? *Bytes : ArrayRef<uint8_t>();
+                         });
+    auto Decisions = Walk.walk(Ranges[Entry].Start, Code);
+    if (Log.isEnabled()) {
+      Log << "Function at 0x" << Twine::utohexstr(Ranges[Entry].Start).str()
+          << " has " << Decisions.size() << " decided jumps:";
+      for (auto &[Address, D] : Decisions)
+        Log << " 0x" << Twine::utohexstr(Address).str()
+            << (D.Taken ? "+" : "-");
+      Log << DoLog;
+    }
+    It = DecisionsByEntry.emplace(Entry, std::move(Decisions)).first;
+  }
+
+  auto Decision = It->second.find(Jump.address());
+  if (Decision == It->second.end())
+    return std::nullopt;
+  return MetaAddress::fromPC(Architecture, Decision->second.DeadSuccessor);
+}
+
 std::optional<std::pair<SmallVector<MetaAddress>, SmallVector<uint64_t>>>
 UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
   if (Ranges.empty() or Jump.type() != CodeType or

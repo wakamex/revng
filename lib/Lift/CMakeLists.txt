@@ -18,6 +18,7 @@ revng_add_library_internal(
   PostLiftVerifyPass.cpp
   RootAnalyzer.cpp
   SelfReferencingDbgAnnotationWriter.cpp
+  DecidedBranches.cpp
   UnwindFunctionRanges.cpp
   ValueMaterializerPass.cpp
   VariableManager.cpp)

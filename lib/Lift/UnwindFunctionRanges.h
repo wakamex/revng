@@ -5,6 +5,7 @@
 //
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include "revng/Lift/DecidedBranches.h"
 #include "revng/Model/Architecture.h"
 #include "revng/Model/RawBinaryView.h"
 #include "revng/Support/MetaAddress.h"
@@ -76,6 +78,8 @@ private:
   bool PartsIndexed = false;
 
   llvm::DenseMap<unsigned, std::vector<unsigned>> Groups;
+  /// The decided jumps of each function walked, by the range of its entry
+  std::map<unsigned, DecidedBranches::Decisions> DecisionsByEntry;
 
   std::unique_ptr<llvm::MCRegisterInfo> RegisterInfo;
   std::unique_ptr<llvm::MCAsmInfo> AsmInfo;
@@ -136,6 +140,11 @@ public:
   std::optional<
       std::pair<llvm::SmallVector<MetaAddress>, llvm::SmallVector<uint64_t>>>
   relativeJumpTable(MetaAddress Jump);
+
+  /// The successor of the conditional jump at \p Jump that no path of its
+  /// function takes, when the values on those paths decide it: see
+  /// DecidedBranches. x86-64 only.
+  std::optional<MetaAddress> deadSuccessor(MetaAddress Jump);
 
 private:
   std::optional<unsigned> find(uint64_t Address) const;

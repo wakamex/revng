@@ -620,3 +620,11 @@ target_link_libraries(test_control_flow_graph revngEarlyFunctionAnalysis
                       Boost::unit_test_framework ${LLVM_LIBRARIES})
 revng_add_test(NAME test_control_flow_graph COMMAND test_control_flow_graph)
 set_tests_properties(test_control_flow_graph PROPERTIES LABELS "unit")
+
+revng_add_test_executable(test_decided_branches "${SRC}/DecidedBranches.cpp")
+target_compile_definitions(test_decided_branches PRIVATE "BOOST_TEST_DYN_LINK=1")
+target_include_directories(test_decided_branches PRIVATE "${CMAKE_SOURCE_DIR}"
+                                                         "${Boost_INCLUDE_DIRS}")
+target_link_libraries(test_decided_branches revngLift revngUnitTestHelpers
+                      Boost::unit_test_framework ${LLVM_LIBRARIES})
+add_test(NAME test_decided_branches COMMAND test_decided_branches)

@@ -124,7 +124,9 @@ public:
   /// ignored to merge the delay slot into the branch instruction.
   llvm::SmallSet<unsigned, 1> preprocess(const LibTcgTranslationBlock &TB);
 
-  void registerDirectJumps();
+  /// Register the destination of each exit of the block just translated;
+  /// an exit to \p DeadSuccessor, which no path takes, aborts instead
+  void registerDirectJumps(std::optional<MetaAddress> DeadSuccessor);
 
 private:
   std::optional<std::vector<llvm::Value *>>
