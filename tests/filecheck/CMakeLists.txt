@@ -537,6 +537,7 @@ set(FILECHECK_TESTS
     lift/trap-check-kept.S
     lift/trace-type-shrinking.S
     lift/unbounded-relative-jump-table.S
+    lift/image-base-relative-jump-table.S
     lift/wide-division-quotient-bit.S
     clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-then.mlir

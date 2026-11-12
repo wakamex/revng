@@ -523,21 +523,9 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
   if (not Index or not isInstructionStart(*Index, Jump.address()))
     return std::nullopt;
 
-  // Decode up to the last few instructions up to and including the jump
   const Range &R = Ranges[*Index];
   const Sweep &S = sweep(*Index);
-  if (Jump.address() >= S.DecodedEnd)
-    return std::nullopt;
-
-  constexpr unsigned Window = 8;
-  SmallVector<uint64_t, Window> Starts;
-  for (uint64_t Offset = Jump.address() - R.Start + 1;
-       Offset > 0 and Starts.size() < Window;) {
-    --Offset;
-    if (S.InstructionStarts.test(Offset))
-      Starts.push_back(R.Start + Offset);
-  }
-  std::reverse(Starts.begin(), Starts.end());
+  uint64_t JumpAddress = Jump.address();
 
   struct Decoded {
     uint64_t Address;
@@ -545,8 +533,7 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     MCInst Instruction;
     StringRef Name;
   };
-  SmallVector<Decoded, Window> Instructions;
-  for (uint64_t Address : Starts) {
+  auto Decode = [&](uint64_t Address) -> std::optional<Decoded> {
     auto Bytes =
         BinaryView.getByAddress(MetaAddress::fromPC(Architecture, Address),
                                 std::min<uint64_t>(15, R.End - Address));
@@ -558,70 +545,129 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     if (Status != MCDisassembler::Success)
       return std::nullopt;
     D.Name = InstrInfo->getName(D.Instruction.getOpcode());
-    Instructions.push_back(std::move(D));
-  }
-
-  if (Instructions.empty() or Instructions.back().Name != "JMP64r")
-    return std::nullopt;
-  unsigned Target = Instructions.back().Instruction.getOperand(0).getReg();
-
-  // Walking back from the jump: X += B, then X = sext(load32(B + I * 4)), then
-  // B = address of the table. Nothing else in between may write X or B.
-  auto Writes = [this](const MCInst &I, unsigned Register) {
-    const MCInstrDesc &Description = InstrInfo->get(I.getOpcode());
-    for (unsigned Def = 0; Def < Description.getNumDefs(); ++Def)
-      if (I.getOperand(Def).isReg() and
-          RegisterInfo->isSubRegisterEq(I.getOperand(Def).getReg(), Register))
-        return true;
-    return false;
+    return D;
   };
 
-  // GCC's entries are signed offsets from the table, which the lea addresses;
-  // MSVC's are offsets from the image base, which the lea addresses, and the
-  // load adds the table's offset from it
-  unsigned Base = 0;
-  std::optional<uint64_t> Table;
-  bool FromImageBase = false;
-  int64_t TableOffset = 0;
-  enum { WantAdd, WantLoad, WantTable } State = WantAdd;
-  for (auto It = std::next(Instructions.rbegin()); It != Instructions.rend();
-       ++It) {
-    const MCInst &I = It->Instruction;
-    if (State == WantAdd and It->Name == "ADD64rr" and
-        I.getOperand(0).getReg() == Target and
-        I.getOperand(1).getReg() == Target) {
-      Base = I.getOperand(2).getReg();
-      State = WantLoad;
-    } else if (State == WantLoad and It->Name == "MOVSX64rm32" and
-               I.getOperand(0).getReg() == Target and
-               I.getOperand(1).getReg() == Base and
-               I.getOperand(2).getImm() == 4 and
-               I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
-               I.getOperand(4).getImm() == 0 and
-               I.getOperand(5).getReg() == 0) {
-      State = WantTable;
-    } else if (State == WantLoad and It->Name == "MOV32rm" and
-               RegisterInfo->isSubRegisterEq(Target, I.getOperand(0).getReg())
-               and I.getOperand(1).getReg() == Base and
-               I.getOperand(2).getImm() == 4 and
-               I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
-               I.getOperand(5).getReg() == 0) {
-      FromImageBase = true;
-      TableOffset = I.getOperand(4).getImm();
-      State = WantTable;
-    } else if (State == WantTable and It->Name == "LEA64r" and
-               I.getOperand(0).getReg() == Base and
-               RegisterInfo->getName(I.getOperand(1).getReg()) ==
-                   StringRef("RIP") and
-               I.getOperand(3).getReg() == 0 and I.getOperand(4).isImm()) {
-      Table = It->Address + It->Size + I.getOperand(4).getImm() + TableOffset;
-      break;
-    } else if (Writes(I, Target) or (Base != 0 and Writes(I, Base))) {
+  // The table's address and the form of its entries, matched on the
+  // instructions that end at the jump. GCC's entries are signed offsets from
+  // the table, which the lea addresses; MSVC's are offsets from the image
+  // base, which the lea addresses, and the load adds the table's offset from it
+  struct Dispatch {
+    uint64_t Table;
+    bool FromImageBase;
+    int64_t TableOffset;
+  };
+  auto Match = [&](ArrayRef<Decoded> Instructions) -> std::optional<Dispatch> {
+    if (Instructions.empty() or Instructions.back().Name != "JMP64r")
       return std::nullopt;
+    unsigned Target = Instructions.back().Instruction.getOperand(0).getReg();
+
+    // Walking back from the jump: X += B, then X = load32(B + I * 4 + D),
+    // then B = address of the table or of the image. Nothing else in between
+    // may write X or B.
+    auto Writes = [this](const MCInst &I, unsigned Register) {
+      const MCInstrDesc &Description = InstrInfo->get(I.getOpcode());
+      for (unsigned Def = 0; Def < Description.getNumDefs(); ++Def)
+        if (I.getOperand(Def).isReg() and
+            RegisterInfo->isSubRegisterEq(I.getOperand(Def).getReg(), Register))
+          return true;
+      return false;
+    };
+
+    unsigned Base = 0;
+    bool FromImageBase = false;
+    int64_t TableOffset = 0;
+    enum { WantAdd, WantLoad, WantTable } State = WantAdd;
+    for (auto It = std::next(Instructions.rbegin()); It != Instructions.rend();
+         ++It) {
+      const MCInst &I = It->Instruction;
+      if (State == WantAdd and
+          (It->Name == "ADD64rr" or It->Name == "ADD64rr_REV") and
+          I.getOperand(0).getReg() == Target and
+          I.getOperand(1).getReg() == Target) {
+        Base = I.getOperand(2).getReg();
+        State = WantLoad;
+      } else if (State == WantLoad and It->Name == "MOVSX64rm32" and
+                 I.getOperand(0).getReg() == Target and
+                 I.getOperand(1).getReg() == Base and
+                 I.getOperand(2).getImm() == 4 and
+                 I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
+                 I.getOperand(4).getImm() == 0 and
+                 I.getOperand(5).getReg() == 0) {
+        State = WantTable;
+      } else if (State == WantLoad and It->Name == "MOV32rm" and
+                 RegisterInfo->isSubRegisterEq(Target, I.getOperand(0).getReg())
+                 and I.getOperand(1).getReg() == Base and
+                 I.getOperand(2).getImm() == 4 and
+                 I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
+                 I.getOperand(5).getReg() == 0) {
+        FromImageBase = true;
+        TableOffset = I.getOperand(4).getImm();
+        State = WantTable;
+      } else if (State == WantTable and It->Name == "LEA64r" and
+                 I.getOperand(0).getReg() == Base and
+                 RegisterInfo->getName(I.getOperand(1).getReg()) ==
+                     StringRef("RIP") and
+                 I.getOperand(3).getReg() == 0 and I.getOperand(4).isImm()) {
+        return Dispatch{ It->Address + It->Size + I.getOperand(4).getImm()
+                           + TableOffset,
+                         FromImageBase,
+                         TableOffset };
+      } else if (Writes(I, Target) or (Base != 0 and Writes(I, Base))) {
+        return std::nullopt;
+      }
+    }
+    return std::nullopt;
+  };
+
+  // The last few instructions up to and including the jump, as the sweep of
+  // its range decoded them, or, past a byte the sweep could not decode, as in
+  // protected code, from each of the addresses shortly before the jump from
+  // which decoding lands on it
+  constexpr unsigned Window = 8;
+  std::optional<Dispatch> Found;
+  if (JumpAddress < S.DecodedEnd) {
+    SmallVector<Decoded, Window> Instructions;
+    for (uint64_t Offset = JumpAddress - R.Start + 1;
+         Offset > 0 and Instructions.size() < Window;) {
+      --Offset;
+      if (not S.InstructionStarts.test(Offset))
+        continue;
+      auto D = Decode(R.Start + Offset);
+      if (not D)
+        return std::nullopt;
+      Instructions.push_back(std::move(*D));
+    }
+    std::reverse(Instructions.begin(), Instructions.end());
+    Found = Match(Instructions);
+  } else {
+    constexpr uint64_t MaxBack = 40;
+    for (uint64_t Back = 1; Back <= std::min(MaxBack, JumpAddress - R.Start)
+                            and not Found;
+         ++Back) {
+      SmallVector<Decoded, 16> Instructions;
+      uint64_t Address = JumpAddress - Back;
+      while (Address < JumpAddress) {
+        auto D = Decode(Address);
+        if (not D)
+          break;
+        Address += D->Size;
+        Instructions.push_back(std::move(*D));
+      }
+      if (Address != JumpAddress)
+        continue;
+      auto D = Decode(JumpAddress);
+      if (not D)
+        return std::nullopt;
+      Instructions.push_back(std::move(*D));
+      Found = Match(Instructions);
     }
   }
-  if (not Table)
+  if (not Found)
     return std::nullopt;
+  std::optional<uint64_t> Table = Found->Table;
+  bool FromImageBase = Found->FromImageBase;
+  int64_t TableOffset = Found->TableOffset;
 
   // Read the entries the function's unwind range bounds
   constexpr unsigned MaxEntries = 4096;
