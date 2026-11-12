@@ -102,6 +102,12 @@ public:
   hasNaturalAlignment(const model::TypeDefinition &Definition,
                       AlignmentCache &Cache) const;
 
+  /// Whether the alignment of \p Definition can be computed, which `alignment`
+  /// and `hasNaturalAlignment` assume: it cannot for a primitive no type of
+  /// the ABI has the size of, such as the 64 bytes of an AVX-512 register
+  bool hasKnownAlignment(const model::TypeDefinition &Definition,
+                         AlignmentCache &Cache) const;
+
   [[nodiscard]] CDataModel getDataModel() const;
 
 public:

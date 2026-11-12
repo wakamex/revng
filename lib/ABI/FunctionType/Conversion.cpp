@@ -605,6 +605,13 @@ TCC::tryConvertingStackArguments(const model::UpcastableType &StackStruct,
   }
   auto &Stack = StackStruct->toStruct();
 
+  // Laying the arguments out needs their alignment: without it, leave the
+  // function raw
+  if (not ABI.hasKnownAlignment(Stack, AlignmentCache)) {
+    revng_log(Log, "The alignment of the stack arguments is not known.");
+    return std::nullopt;
+  }
+
   // Data layout analysis can merge what the callee reads and its callers write
   // on the stack into a union at the start of the area, with one struct of the
   // whole area for each. When every struct has fields of the same sizes at the
