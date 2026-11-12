@@ -11,6 +11,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstrDesc.h"
@@ -20,8 +21,11 @@
 
 #include "revng/Lift/DecidedBranches.h"
 #include "revng/Support/Assert.h"
+#include "revng/Support/Debug.h"
 
 using namespace llvm;
+
+static Logger Log("decided-branches");
 
 namespace {
 
@@ -976,8 +980,13 @@ DecidedBranches::walk(uint64_t Entry,
   constexpr unsigned MaxPaths = 200000;
   unsigned Paths = 0;
   while (not Work.empty()) {
-    if (++Paths > MaxPaths)
+    if (++Paths > MaxPaths) {
+      revng_log(Log,
+                "The walk from 0x" << Twine::utohexstr(Entry).str()
+                                   << " took more than " << MaxPaths
+                                   << " paths");
       return {};
+    }
     auto [Address, S] = std::move(Work.back());
     Work.pop_back();
     if (not Inside(Address))
@@ -1030,19 +1039,22 @@ DecidedBranches::walk(uint64_t Entry,
           Work.push_back({ Address + Size + Instruction.getOperand(0).getImm(),
                            S });
         } else if (Desc.isIndirectBranch()) {
-          bool ThroughSlot = Name == "JMP64m"
-                             and Instruction.getOperand(0).isReg()
-                             and RegisterInfo.getName(Instruction.getOperand(0)
-                                                        .getReg())
-                                   == StringRef("RIP");
+          // A jump through memory reads a function pointer, as from an
+          // import slot or a vtable: a tail call. A switch jumps through a
+          // register
+          bool ThroughMemory = Name == "JMP64m" or Name == "JMP32m";
           std::optional<std::vector<uint64_t>> Targets;
-          if (Indirect and not ThroughSlot)
+          if (Indirect and not ThroughMemory)
             Targets = Indirect(Address);
           if (Targets)
             for (uint64_t Target : *Targets)
               Work.push_back({ Target, S });
-          else if (not ThroughSlot)
+          else if (not ThroughMemory) {
+            revng_log(Log,
+                      "The destinations of the jump at 0x"
+                        << Twine::utohexstr(Address).str() << " are unknown");
             Incomplete = true;
+          }
         }
         break;
       }

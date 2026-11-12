@@ -198,6 +198,13 @@ BOOST_AUTO_TEST_CASE(JumpThroughSlotIsATailCall) {
               == Decisions{ { 1, true } }));
 }
 
+BOOST_AUTO_TEST_CASE(JumpThroughVtableIsATailCall) {
+  // stc; jb +1; int3; jmp [rax + 0x10]
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0x48, 0xff, 0x60, 0x10 })
+              == Decisions{ { 1, true } }));
+}
+
 BOOST_AUTO_TEST_CASE(IcebpEndsThePath) {
   // test eax, eax; je +3; int1; stc; nop; jb +1; int3; ret: past int1 nothing
   // runs, so the stc that would disagree with the carry test clears is not

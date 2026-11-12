@@ -40,9 +40,9 @@ class MCRegisterInfo;
 /// decided only when every path that reaches it decides it the same way, and
 /// only when its target is not the next instruction, which both outcomes
 /// reach. An indirect jump continues at the destinations IndirectTargets
-/// gives; a jump through a rip-relative slot, a tail call, ends the path; and
-/// any other indirect jump leaves paths unwalked, so no jump of the function
-/// counts as decided.
+/// gives; a jump through memory, such as an import slot or a vtable entry, is
+/// a tail call and ends the path; and any other jump through a register leaves
+/// paths unwalked, so no jump of the function counts as decided.
 class DecidedBranches {
 public:
   /// The bytes from an address on, empty when there are none
