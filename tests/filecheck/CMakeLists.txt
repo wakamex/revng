@@ -516,6 +516,7 @@ set(FILECHECK_TESTS
     lift/helper-written-csv-passthrough.S
     lift/hoisted-import-call.S
     lift/int3-no-fallthrough.S
+    lift/fastfail-icebp-no-fallthrough.S
     lift/stack-pointer-truncation-ends-path.S
     lift/hoisted-relro-got-call.S
     lift/import-tail-call.S

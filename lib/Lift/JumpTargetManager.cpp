@@ -512,6 +512,10 @@ static bool isFaultingX86Instruction(ArrayRef<uint8_t> Bytes,
   if (Exception == GeneralProtection)
     return Bytes.front() == 0xf4;
 
+  // libtcg raises an invalid opcode for icebp (`int1`)
+  if (Exception == InvalidOpcode and Bytes.front() == 0xf1)
+    return true;
+
   if (Exception == InvalidOpcode and Bytes.size() >= 2 and Bytes[0] == 0x0f) {
     switch (Bytes[1]) {
     case 0x0b:
@@ -567,10 +571,12 @@ static bool isPossiblyReturningHelper(const JumpTargetManager &JTM,
   case MetaAddressType::Code_x86:
   case MetaAddressType::Code_x86_64: {
     // int3 and `int 3` raise the breakpoint exception. A debugger can resume
-    // after it, the program itself cannot.
-    if (CalleeName == "helper_raise_interrupt"
-        and GetArgument(1).value_or(0) == 3) {
-      return false;
+    // after it, the program itself cannot. `int 0x29` is the __fastfail of
+    // Windows programs, which ends the process.
+    if (CalleeName == "helper_raise_interrupt") {
+      uint64_t Vector = GetArgument(1).value_or(0);
+      if (Vector == 3 or Vector == 0x29)
+        return false;
     }
 
     // Only read the exception number of the helper that takes one

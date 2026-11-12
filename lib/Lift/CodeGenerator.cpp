@@ -590,18 +590,22 @@ void CodeGenerator::translate(LibTcg &LibTcg,
                                           SinceInstructionStart);
 
         // Sometimes libtinycode terminates a basic block with a call, in this
-        // case force a fallthrough, unless the instruction is int3 or `int 3`:
-        // the breakpoint exception they raise does not return to the program,
-        // and padding of int3 would otherwise be lifted one byte at a time
+        // case force a fallthrough, unless the instruction raises an exception
+        // that does not return to the program: int3 or `int 3`, icebp (`int1`)
+        // and `int 0x29`, the __fastfail of Windows programs. Padding of int3
+        // would otherwise be lifted one byte at a time
         auto IsBreakpoint = [&]() {
           if (PC.type() != MetaAddressType::Code_x86
               and PC.type() != MetaAddressType::Code_x86_64)
             return false;
           auto Bytes = JumpTargets.binaryView().getByAddress(PC, 2);
-          return Bytes and not Bytes->empty()
-                 and ((*Bytes)[0] == 0xcc
-                      or (Bytes->size() == 2 and (*Bytes)[0] == 0xcd
-                          and (*Bytes)[1] == 0x03));
+          if (not Bytes or Bytes->empty())
+            return false;
+          uint8_t First = (*Bytes)[0];
+          if (First == 0xcc or First == 0xf1)
+            return true;
+          return Bytes->size() == 2 and First == 0xcd
+                 and ((*Bytes)[1] == 0x03 or (*Bytes)[1] == 0x29);
         };
         if (J == TranslationBlock->instruction_count - 1) {
           BasicBlock *Target = nullptr;
