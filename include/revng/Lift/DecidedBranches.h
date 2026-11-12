@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
@@ -38,11 +39,19 @@ class MCRegisterInfo;
 /// arm of a conditional jump learns what its outcome implies. A jump counts as
 /// decided only when every path that reaches it decides it the same way, and
 /// only when its target is not the next instruction, which both outcomes
-/// reach.
+/// reach. An indirect jump continues at the destinations IndirectTargets
+/// gives; a jump through a rip-relative slot, a tail call, ends the path; and
+/// any other indirect jump leaves paths unwalked, so no jump of the function
+/// counts as decided.
 class DecidedBranches {
 public:
   /// The bytes from an address on, empty when there are none
   using BytesAt = std::function<llvm::ArrayRef<uint8_t>(uint64_t)>;
+
+  /// The destinations of the indirect jump at an address, such as a switch's
+  /// through its table, when known
+  using IndirectTargets =
+    std::function<std::optional<std::vector<uint64_t>>(uint64_t)>;
 
   /// A decided jump: its outcome and the successor no path takes
   struct Decision {
@@ -59,6 +68,7 @@ private:
   const llvm::MCInstrInfo &InstrInfo;
   const llvm::MCRegisterInfo &RegisterInfo;
   BytesAt Bytes;
+  IndirectTargets Indirect;
 
   /// For each LLVM register, its 64-bit register, the offset of its bits in
   /// it and their number; registers not listed are not tracked
@@ -77,7 +87,8 @@ public:
   DecidedBranches(const llvm::MCDisassembler &Disassembler,
                   const llvm::MCInstrInfo &InstrInfo,
                   const llvm::MCRegisterInfo &RegisterInfo,
-                  BytesAt Bytes);
+                  BytesAt Bytes,
+                  IndirectTargets Indirect = {});
 
   /// The decided jumps of the function entered at \p Entry, whose code lies
   /// in \p Parts, half-open address ranges

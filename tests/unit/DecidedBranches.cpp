@@ -182,3 +182,28 @@ BOOST_AUTO_TEST_CASE(JumpToTheNextInstructionHasNoDeadSuccessor) {
   Fixture F;
   BOOST_TEST((F.decided({ 0xf9, 0x72, 0x00, 0xc3 }) == Decisions{}));
 }
+
+BOOST_AUTO_TEST_CASE(UnknownIndirectJumpLeavesTheFunctionUndecided) {
+  // stc; jb +1; int3; jmp rax: the jump's destinations are unknown, so paths
+  // could reach jb with other flags
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0xff, 0xe0 }) == Decisions{}));
+}
+
+BOOST_AUTO_TEST_CASE(JumpThroughSlotIsATailCall) {
+  // stc; jb +1; int3; jmp [rip + 0]: a tail call through an import slot
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0xff, 0x25, 0x00, 0x00, 0x00,
+                          0x00 })
+              == Decisions{ { 1, true } }));
+}
+
+BOOST_AUTO_TEST_CASE(IcebpEndsThePath) {
+  // test eax, eax; je +3; int1; stc; nop; jb +1; int3; ret: past int1 nothing
+  // runs, so the stc that would disagree with the carry test clears is not
+  // reached, and jb is never taken
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x85, 0xc0, 0x74, 0x03, 0xf1, 0xf9, 0x90, 0x72, 0x01,
+                          0xcc, 0xc3 })
+              == Decisions{ { 7, false } }));
+}

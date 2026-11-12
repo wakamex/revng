@@ -202,11 +202,13 @@ struct Operand {
 DecidedBranches::DecidedBranches(const MCDisassembler &Disassembler,
                                  const MCInstrInfo &InstrInfo,
                                  const MCRegisterInfo &RegisterInfo,
-                                 BytesAt Bytes) :
+                                 BytesAt Bytes,
+                                 IndirectTargets Indirect) :
   Disassembler(Disassembler),
   InstrInfo(InstrInfo),
   RegisterInfo(RegisterInfo),
-  Bytes(std::move(Bytes)) {
+  Bytes(std::move(Bytes)),
+  Indirect(std::move(Indirect)) {
 
   // Name the 64-bit registers and the parts of them the walk tracks
   StringMap<unsigned> ByName;
@@ -746,8 +748,11 @@ bool DecidedBranches::Interpreter::run() {
   StringRef F = Name.Family;
   StringRef Opcode = D.InstrInfo.getName(I.getOpcode());
 
-  if (Desc.isReturn() or Opcode == "INT3" or Opcode == "TRAP" or Opcode == "HLT"
-      or Opcode == "INT" or Opcode.starts_with("UD"))
+  // Exceptions end the path: int3, icebp (int1), any int, such as the
+  // `int 0x29` of __fastfail, ud2 and hlt
+  if (Desc.isReturn() or Opcode == "INT3" or Opcode == "INT1"
+      or Opcode == "TRAP" or Opcode == "HLT" or Opcode == "INT"
+      or Opcode.starts_with("UD"))
     return false;
 
   // A write of the 32-bit ESP, which no real path does
@@ -959,13 +964,20 @@ DecidedBranches::walk(uint64_t Entry,
   };
 
   Decisions Decided;
+  bool Incomplete = false;
   std::set<uint64_t> Undecided;
   std::set<uint64_t> Contradicted;
   std::map<uint64_t, State> Seen;
   std::vector<std::pair<uint64_t, State>> Work;
   Work.push_back({ Entry, State() });
 
+  // A function whose walk takes this many paths is left undecided rather than
+  // walked without bound
+  constexpr unsigned MaxPaths = 200000;
+  unsigned Paths = 0;
   while (not Work.empty()) {
+    if (++Paths > MaxPaths)
+      return {};
     auto [Address, S] = std::move(Work.back());
     Work.pop_back();
     if (not Inside(Address))
@@ -1014,9 +1026,24 @@ DecidedBranches::walk(uint64_t Entry,
 
       if (Desc.isBranch() and not Desc.isCall()) {
         if (Desc.isUnconditionalBranch() and not Desc.isIndirectBranch()
-            and Instruction.getOperand(0).isImm())
+            and Instruction.getOperand(0).isImm()) {
           Work.push_back({ Address + Size + Instruction.getOperand(0).getImm(),
                            S });
+        } else if (Desc.isIndirectBranch()) {
+          bool ThroughSlot = Name == "JMP64m"
+                             and Instruction.getOperand(0).isReg()
+                             and RegisterInfo.getName(Instruction.getOperand(0)
+                                                        .getReg())
+                                   == StringRef("RIP");
+          std::optional<std::vector<uint64_t>> Targets;
+          if (Indirect and not ThroughSlot)
+            Targets = Indirect(Address);
+          if (Targets)
+            for (uint64_t Target : *Targets)
+              Work.push_back({ Target, S });
+          else if (not ThroughSlot)
+            Incomplete = true;
+        }
         break;
       }
 
@@ -1036,6 +1063,10 @@ DecidedBranches::walk(uint64_t Entry,
       Address += Size;
     }
   }
+
+  // Paths the walk could not follow could reach any jump with other flags
+  if (Incomplete)
+    return {};
 
   for (uint64_t Address : Undecided)
     Decided.erase(Address);

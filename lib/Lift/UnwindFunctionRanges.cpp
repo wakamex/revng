@@ -483,6 +483,17 @@ UnwindFunctionRanges::deadSuccessor(MetaAddress Jump) {
                            auto Bytes = BinaryView.getFromAddressOn(
                              MetaAddress::fromPC(Architecture, Address));
                            return Bytes ? *Bytes : ArrayRef<uint8_t>();
+                         },
+                         [this](uint64_t Jump)
+                           -> std::optional<std::vector<uint64_t>> {
+                           auto Table = relativeJumpTable(
+                             MetaAddress::fromPC(Architecture, Jump));
+                           if (not Table)
+                             return std::nullopt;
+                           std::vector<uint64_t> Result;
+                           for (const MetaAddress &Target : Table->first)
+                             Result.push_back(Target.address());
+                           return Result;
                          });
     auto Decisions = Walk.walk(Ranges[Entry].Start, Code);
     if (Log.isEnabled()) {
@@ -565,8 +576,13 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     return false;
   };
 
+  // GCC's entries are signed offsets from the table, which the lea addresses;
+  // MSVC's are offsets from the image base, which the lea addresses, and the
+  // load adds the table's offset from it
   unsigned Base = 0;
   std::optional<uint64_t> Table;
+  bool FromImageBase = false;
+  int64_t TableOffset = 0;
   enum { WantAdd, WantLoad, WantTable } State = WantAdd;
   for (auto It = std::next(Instructions.rbegin()); It != Instructions.rend();
        ++It) {
@@ -584,12 +600,21 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
                I.getOperand(4).getImm() == 0 and
                I.getOperand(5).getReg() == 0) {
       State = WantTable;
+    } else if (State == WantLoad and It->Name == "MOV32rm" and
+               RegisterInfo->isSubRegisterEq(Target, I.getOperand(0).getReg())
+               and I.getOperand(1).getReg() == Base and
+               I.getOperand(2).getImm() == 4 and
+               I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
+               I.getOperand(5).getReg() == 0) {
+      FromImageBase = true;
+      TableOffset = I.getOperand(4).getImm();
+      State = WantTable;
     } else if (State == WantTable and It->Name == "LEA64r" and
                I.getOperand(0).getReg() == Base and
                RegisterInfo->getName(I.getOperand(1).getReg()) ==
                    StringRef("RIP") and
                I.getOperand(3).getReg() == 0 and I.getOperand(4).isImm()) {
-      Table = It->Address + It->Size + I.getOperand(4).getImm();
+      Table = It->Address + It->Size + I.getOperand(4).getImm() + TableOffset;
       break;
     } else if (Writes(I, Target) or (Base != 0 and Writes(I, Base))) {
       return std::nullopt;
@@ -608,9 +633,11 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
         MetaAddress::fromGeneric(Architecture, EntryAddress), 4);
     if (not Bytes)
       break;
-    int32_t Offset =
-        static_cast<int32_t>(llvm::support::endian::read32le(Bytes->data()));
-    Targets.push_back(MetaAddress::fromPC(Architecture, *Table + Offset));
+    uint32_t Raw = llvm::support::endian::read32le(Bytes->data());
+    uint64_t Destination = FromImageBase ?
+                             *Table - TableOffset + Raw :
+                             *Table + static_cast<int32_t>(Raw);
+    Targets.push_back(MetaAddress::fromPC(Architecture, Destination));
     Entries.push_back(EntryAddress);
   }
 
