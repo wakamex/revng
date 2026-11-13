@@ -13,6 +13,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include "revng/Lift/DecidedBranches.h"
@@ -97,6 +98,18 @@ private:
   /// Each function walked, by the range of its entry
   std::map<unsigned, Walked> WalkedByEntry;
 
+  /// The gap code walked from roots: the starts of the instructions their
+  /// paths reach, the extents of roots whose walk did not follow every path,
+  /// the roots walked, and the gap addresses the paths of any walk continue
+  /// at
+  llvm::DenseSet<uint64_t> GapStarts;
+  std::vector<std::pair<uint64_t, uint64_t>> GapExtents;
+  llvm::DenseSet<uint64_t> GapRoots;
+  llvm::DenseSet<uint64_t> GapExits;
+
+  DecidedBranches makeWalk();
+  void recordExits(const DecidedBranches::Coverage &Covered);
+
   std::unique_ptr<llvm::MCRegisterInfo> RegisterInfo;
   std::unique_ptr<llvm::MCAsmInfo> AsmInfo;
   std::unique_ptr<llvm::MCSubtargetInfo> SubtargetInfo;
@@ -175,6 +188,22 @@ public:
   /// there: code that never runs, such as junk in obfuscated programs. x86-64
   /// only.
   bool isDeadCode(MetaAddress Address);
+
+  /// Whether \p Address lies in a PE program's code outside every unwind
+  /// range: in the leaf functions and padding between functions, or junk.
+  bool isGapCode(MetaAddress Address) const;
+
+  /// Whether \p Address, gap code, is reached from a root. A root is an
+  /// address \p IsRoot says is, such as the target of a call or a pointer in
+  /// data, or one a walk's path continues at, such as a tail jump's
+  /// destination; it is walked up to the next unwind range. Other gap code
+  /// counts only when such a walk reaches it. x86-64 only.
+  bool isReachedGapCode(MetaAddress Address, bool IsRoot);
+
+  /// Whether a walked path continues at \p Address, gap code
+  bool isGapExit(MetaAddress Address) const {
+    return GapExits.contains(Address.address());
+  }
 
 private:
   std::optional<unsigned> find(uint64_t Address) const;

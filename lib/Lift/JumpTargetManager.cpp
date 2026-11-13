@@ -1336,6 +1336,32 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
     return nullptr;
   }
 
+  // Code between the functions the unwind information describes runs only
+  // when reached from a root: the target of a call, a pointer in data or
+  // stored to memory, a literal in a function's code, or where a walked path
+  // continues.
+  // Everything else there, such as junk reached by jumps from other junk, is
+  // not code to translate
+  if (TranslateOnlyLiveCode and unwindRanges().isGapCode(PC)) {
+    using namespace JumpTargetReason;
+    bool IsRoot = Reason == Callee or Reason == GlobalData
+                  or Reason == UnusedGlobalData or Reason == MemoryStore
+                  or Reason == FunctionSymbol
+                  or (Reason == SimpleLiteral
+                      and LiteralsFromFunctionCode.contains(PC));
+    if (IsRoot or unwindRanges().isGapExit(PC))
+      revng_log(DeadCodeLog,
+                "Gap root " << PC.toString() << " for "
+                            << JumpTargetReason::getName(Reason));
+    if (not unwindRanges().isReachedGapCode(PC, IsRoot)) {
+      revng_log(DeadCodeLog,
+                "Not translating " << PC.toString() << ", reached for "
+                                   << JumpTargetReason::getName(Reason)
+                                   << ": no root reaches it");
+      return nullptr;
+    }
+  }
+
   // Do we already have a BasicBlock for this PC?
   BlockMap::iterator TargetIt = JumpTargets.find(PC);
   if (TargetIt != JumpTargets.end()) {

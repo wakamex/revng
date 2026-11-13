@@ -71,6 +71,9 @@ public:
     bool Complete = false;
     /// The starts of the instructions the paths reach, when Complete
     std::set<uint64_t> Starts;
+    /// The addresses outside the function's parts that its paths continue
+    /// at, such as the destination of a tail jump
+    std::set<uint64_t> Exits;
   };
 
 private:

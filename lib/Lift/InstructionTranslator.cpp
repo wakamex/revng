@@ -710,7 +710,7 @@ IT::TranslationResult IT::translate(LibTcgInstruction *Instr,
       MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
       if (Address.isValid() and PC != Address and JumpTargets.isPC(Address)
           and not JumpTargets.hasJT(Address)) {
-        JumpTargets.registerSimpleLiteral(Address);
+        JumpTargets.registerSimpleLiteral(Address, LastPC);
       }
     }
   }
@@ -965,7 +965,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
         MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
         if (Address.isValid() and JumpTargets.isPC(Address)
             and not JumpTargets.hasJT(Address)) {
-          JumpTargets.registerSimpleLiteral(Address);
+          JumpTargets.registerSimpleLiteral(Address, LastPC);
         }
       }
 

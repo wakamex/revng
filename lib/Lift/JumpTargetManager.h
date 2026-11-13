@@ -564,8 +564,14 @@ public:
   ///
   /// Simple literals are registered as possible jump targets before attempting
   /// more expensive techniques.
-  void registerSimpleLiteral(MetaAddress Address) {
+  ///
+  /// \p Source is the instruction the literal comes from: one in code between
+  /// the functions the unwind information describes, such as junk, does not
+  /// make the literal a root of that code.
+  void registerSimpleLiteral(MetaAddress Address, MetaAddress Source) {
     SimpleLiterals.insert(Address);
+    if (not unwindRanges().isGapCode(Source))
+      LiteralsFromFunctionCode.insert(Address);
   }
 
   ProgramCounterHandler *programCounterHandler() { return PCH; }
@@ -640,6 +646,8 @@ private:
   CFGForm::Values CurrentCFGForm;
   std::set<llvm::BasicBlock *> ToPurge;
   std::set<MetaAddress> SimpleLiterals;
+  /// The simple literals that code of a function, not gap code, holds
+  std::set<MetaAddress> LiteralsFromFunctionCode;
 
   ProgramCounterHandler *PCH = nullptr;
 

@@ -499,6 +499,35 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
   return Groups[Index] = std::move(Result);
 }
 
+DecidedBranches UnwindFunctionRanges::makeWalk() {
+  return DecidedBranches(*Disassembler,
+                         *InstrInfo,
+                         *RegisterInfo,
+                         [this](uint64_t Address) -> ArrayRef<uint8_t> {
+                           auto Bytes = BinaryView.getFromAddressOn(
+                             MetaAddress::fromPC(Architecture, Address));
+                           return Bytes ? *Bytes : ArrayRef<uint8_t>();
+                         },
+                         [this](uint64_t Jump)
+                           -> std::optional<std::vector<uint64_t>> {
+                           auto Table = relativeJumpTable(
+                             MetaAddress::fromPC(Architecture, Jump));
+                           if (not Table)
+                             return std::nullopt;
+                           std::vector<uint64_t> Result;
+                           for (const MetaAddress &Target : Table->first)
+                             Result.push_back(Target.address());
+                           return Result;
+                         });
+}
+
+void UnwindFunctionRanges::recordExits(
+  const DecidedBranches::Coverage &Covered) {
+  for (uint64_t Exit : Covered.Exits)
+    if (not find(Exit))
+      GapExits.insert(Exit);
+}
+
 const UnwindFunctionRanges::Walked &
 UnwindFunctionRanges::walked(unsigned Index) {
   // Walk the function from the part that begins at a call's state; a
@@ -519,30 +548,13 @@ UnwindFunctionRanges::walked(unsigned Index) {
   std::vector<std::pair<uint64_t, uint64_t>> Code;
   for (unsigned Part : Parts)
     Code.push_back({ Ranges[Part].Start, Ranges[Part].End });
-  DecidedBranches Walk(*Disassembler,
-                       *InstrInfo,
-                       *RegisterInfo,
-                       [this](uint64_t Address) -> ArrayRef<uint8_t> {
-                         auto Bytes = BinaryView.getFromAddressOn(
-                           MetaAddress::fromPC(Architecture, Address));
-                         return Bytes ? *Bytes : ArrayRef<uint8_t>();
-                       },
-                       [this](uint64_t Jump)
-                         -> std::optional<std::vector<uint64_t>> {
-                         auto Table = relativeJumpTable(
-                           MetaAddress::fromPC(Architecture, Jump));
-                         if (not Table)
-                           return std::nullopt;
-                         std::vector<uint64_t> Result;
-                         for (const MetaAddress &Target : Table->first)
-                           Result.push_back(Target.address());
-                         return Result;
-                       });
+  DecidedBranches Walk = makeWalk();
   Walked Result;
   DecidedBranches::Coverage Covered;
   Result.Decisions = Walk.walk(Ranges[Entry].Start, Code, &Covered);
   Result.Complete = Covered.Complete;
   Result.Starts.assign(Covered.Starts.begin(), Covered.Starts.end());
+  recordExits(Covered);
   if (Log.isEnabled()) {
     Log << "Function at 0x" << Twine::utohexstr(Ranges[Entry].Start).str()
         << " has " << Result.Decisions.size() << " decided jumps:";
@@ -814,4 +826,46 @@ UnwindFunctionRanges::tableExtent(MetaAddress Jump,
   }
 
   return Extent;
+}
+
+bool UnwindFunctionRanges::isGapCode(MetaAddress Address) const {
+  return FromPData and Architecture == model::Architecture::x86_64
+         and Address.type() == CodeType and not find(Address.address());
+}
+
+bool UnwindFunctionRanges::isReachedGapCode(MetaAddress Address,
+                                            bool IsRoot) {
+  uint64_t A = Address.address();
+  if (GapStarts.contains(A))
+    return true;
+  for (auto [Begin, End] : GapExtents)
+    if (Begin <= A and A < End)
+      return true;
+  if (not IsRoot and not GapExits.contains(A))
+    return false;
+  if (not GapRoots.insert(A).second)
+    return true;
+
+  // The root's code ends where the next function the unwind information
+  // describes starts
+  auto Next = llvm::upper_bound(Ranges, A, [](uint64_t X, const Range &R) {
+    return X < R.Start;
+  });
+  uint64_t End = Next != Ranges.end() ? Next->Start : A + 0x10000;
+  std::pair<uint64_t, uint64_t> Part{ A, End };
+  DecidedBranches::Coverage Covered;
+  makeWalk().walk(A, Part, &Covered);
+  recordExits(Covered);
+  if (Covered.Complete)
+    GapStarts.insert(Covered.Starts.begin(), Covered.Starts.end());
+  else
+    GapExtents.push_back(Part);
+  revng_log(Log,
+            "Gap root 0x" << Twine::utohexstr(A).str() << " reaches "
+                          << (Covered.Complete ?
+                                std::to_string(Covered.Starts.size())
+                                  + " instructions" :
+                                "all of its " + std::to_string(End - A)
+                                  + " bytes"));
+  return true;
 }

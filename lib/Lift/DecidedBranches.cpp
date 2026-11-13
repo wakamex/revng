@@ -995,8 +995,11 @@ DecidedBranches::walk(uint64_t Entry,
     }
     auto [Address, S] = std::move(Work.back());
     Work.pop_back();
-    if (not Inside(Address))
+    if (not Inside(Address)) {
+      if (Covered != nullptr)
+        Covered->Exits.insert(Address);
       continue;
+    }
     if (auto It = Seen.find(Address); It != Seen.end()) {
       State Joined = It->second.join(S);
       if (Joined == It->second)
