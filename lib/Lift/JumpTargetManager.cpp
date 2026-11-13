@@ -1380,6 +1380,9 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
   if (AftedAddingFunctionEntries)
     NewJumpTarget.setReason(JumpTargetReason::DependsOnModelFunction);
 
+  if (unwindRanges().isInsideFunction(PC))
+    NewJumpTarget.setReason(JumpTargetReason::InsideFunction);
+
   // PC was not a jump target, record it as new
   if (ValueMaterializerPCWhiteList.insert(PC).second)
     ++WhitelistOrigins.NewTargets;

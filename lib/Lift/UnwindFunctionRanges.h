@@ -66,6 +66,8 @@ private:
 private:
   const RawBinaryView &BinaryView;
   model::Architecture::Values Architecture;
+  /// The ranges come from a PE program's `.pdata`
+  bool FromPData = false;
   MetaAddressType::Values CodeType = MetaAddressType::Invalid;
 
   /// Sorted by start
@@ -109,6 +111,14 @@ public:
   /// one whose unwind entry describes the state at a call, not a split-off part
   /// of another function entered by a jump.
   bool isFunctionEntry(MetaAddress Address) const;
+
+  /// Whether Address lies in a PE program's unwind range other than at the
+  /// start of a function: in the middle of a function or in a split-off part
+  /// of one. Every PE function that is not a leaf has unwind information, and
+  /// code does not call into the middle of another function, so no function
+  /// starts there. The rule does not hold for `.eh_frame`, whose hand-written
+  /// functions can have several entry points.
+  bool isInsideFunction(MetaAddress Address) const;
 
   /// Return how many of \p Targets, the destinations an indirect jump at
   /// \p Jump reads from the table entries at \p Entries (in ascending address

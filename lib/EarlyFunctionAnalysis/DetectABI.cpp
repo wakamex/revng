@@ -1992,6 +1992,14 @@ static void collectFunctionsFromCallees(Module &M, model::Binary &Binary) {
     uint32_t Reasons = JumpTargetReason::getReasons(&BB);
     bool IsCallee = hasReason(Reasons, JumpTargetReason::Callee);
 
+    // A call into the middle of another function is junk that never runs,
+    // such as one decoded from bytes that overlap real instructions
+    if (hasReason(Reasons, JumpTargetReason::InsideFunction)) {
+      revng_log(FunctionFromCalleesLog,
+                "Not a function, inside another: " << BB.getName().str());
+      continue;
+    }
+
     if (IsCallee and Entries.insert(Entry).second) {
       revng_log(FunctionFromCalleesLog,
                 "Found function from callee: " << BB.getName().str());
@@ -2041,6 +2049,16 @@ static auto zeroOrOne(const T &Range, const F &Predicate)
   return Result;
 }
 
+/// A call whose target is no function, such as one into the middle of another
+/// function, calls something unknown
+static void forgetNonFunctionCallees(efa::RUAResults &Results,
+                                     const model::Binary &Binary) {
+  for (auto &[BlockID, CallSite] : Results.CallSites)
+    if (CallSite.CalleeAddress.isValid()
+        and not Binary.Functions().contains(CallSite.CalleeAddress))
+      CallSite.CalleeAddress = MetaAddress::invalid();
+}
+
 Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                                OutlinedFunction &OutlinedFunction) {
   using namespace llvm;
@@ -2070,6 +2088,8 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                                     Analyzer.postCallHook(),
                                     Analyzer.retHook(),
                                     ReadReturnValues);
+
+  forgetNonFunctionCallees(ABIResults, *Binary);
 
   // We say that a register is callee-saved when, besides being preserved by
   // the callee, there is at least a write onto this register.
@@ -2260,6 +2280,7 @@ Changes DetectABI::runAnalyses(MetaAddress EntryAddress,
                                              Analyzer.retHook(),
                                              Seed,
                                              /*CalleeWritesReach=*/true);
+    forgetNonFunctionCallees(Seeded, *Binary);
     for (auto &[BlockID, CallSite] : Seeded.CallSites) {
       if (CallSite.CalleeAddress.isValid()) {
         const CSVSet &CalleeReturns = Oracle

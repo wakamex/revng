@@ -51,7 +51,10 @@ enum Values {
   /// The start of a function in the binary's unwind information, other than a
   /// split-off part of another function
   UnwindEntry = DependsOnModelFunction << 1,
-  LastReason = UnwindEntry
+  /// In a PE program's unwind information, inside a function rather than at
+  /// the start of one: never a function entry
+  InsideFunction = UnwindEntry << 1,
+  LastReason = InsideFunction
 };
 
 inline const char *getName(Values Reason) {
@@ -84,6 +87,8 @@ inline const char *getName(Values Reason) {
     return "DependsOnModelFunction";
   case UnwindEntry:
     return "UnwindEntry";
+  case InsideFunction:
+    return "InsideFunction";
   }
 
   revng_abort();
@@ -118,6 +123,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return DependsOnModelFunction;
   else if (ReasonName == "UnwindEntry")
     return UnwindEntry;
+  else if (ReasonName == "InsideFunction")
+    return InsideFunction;
   else
     revng_abort();
 }

@@ -203,9 +203,11 @@ UnwindFunctionRanges::UnwindFunctionRanges(
        readEHFrame(BinaryView, File, Architecture))
     Ranges.push_back({ Start, End, StartsMidFrame });
 
-  if (Ranges.empty() and Architecture == model::Architecture::x86_64)
+  if (Ranges.empty() and Architecture == model::Architecture::x86_64) {
     for (auto [Start, End, StartsMidFrame] : readPData(BinaryView, File))
       Ranges.push_back({ Start, End, StartsMidFrame });
+    FromPData = not Ranges.empty();
+  }
 
   llvm::sort(Ranges, [](const Range &LHS, const Range &RHS) {
     return std::tie(LHS.Start, LHS.End) < std::tie(RHS.Start, RHS.End);
@@ -353,6 +355,12 @@ bool UnwindFunctionRanges::isFunctionEntry(MetaAddress Address) const {
   auto Index = find(Address.address());
   return Index and Ranges[*Index].Start == Address.address() and
          not Ranges[*Index].StartsMidFrame;
+}
+
+bool UnwindFunctionRanges::isInsideFunction(MetaAddress Address) const {
+  if (not FromPData or Address.type() != CodeType)
+    return false;
+  return find(Address.address()).has_value() and not isFunctionEntry(Address);
 }
 
 bool UnwindFunctionRanges::isInstructionStart(unsigned Index,

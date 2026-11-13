@@ -62,6 +62,11 @@ private:
         continue;
 
       uint32_t Reasons = JumpTargetReason::getReasons(&BB);
+
+      // No function starts inside another one
+      if (hasReason(Reasons, JumpTargetReason::InsideFunction))
+        continue;
+
       bool IsSimpleLiteral = hasReason(Reasons,
                                        JumpTargetReason::SimpleLiteral);
       bool IsGlobalData = hasReason(Reasons, JumpTargetReason::GlobalData);
