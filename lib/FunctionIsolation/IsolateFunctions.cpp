@@ -258,19 +258,16 @@ private:
       return;
     }
 
-    // Identify call edge
-    auto IsCallEdge = [](const UpcastablePointer<efa::FunctionEdgeBase> &E) {
-      return isa<efa::CallEdge>(E.get());
-    };
-    auto ZeroOrOneCallEdge = [](const auto &Range,
-                                const auto &Callable) -> const efa::CallEdge * {
-      auto *Result = zeroOrOne(Range, Callable);
-      if (Result == nullptr)
-        return nullptr;
-      else
-        return dyn_cast<efa::CallEdge>(Result->get());
-    };
-    const auto *CallEdge = ZeroOrOneCallEdge(Caller->Successors(), IsCallEdge);
+    // Identify call edge. A block whose bytes overlap other instructions can make calls to two
+    // functions: take the edge to the callee of this call
+    const efa::CallEdge *CallEdge = nullptr;
+    for (const auto &Edge : Caller->Successors()) {
+      if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get())) {
+        if (CallEdge == nullptr
+            or Call->Destination().notInlinedAddress() == Callee)
+          CallEdge = Call;
+      }
+    }
 
     if (CallEdge == nullptr) {
       // There's no CallEdge, this is likely a LongJmp
