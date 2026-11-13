@@ -5,9 +5,11 @@
 #define BOOST_TEST_MODULE DecidedBranches
 bool init_unit_test();
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDisassembler/MCDisassembler.h"
@@ -77,6 +79,28 @@ public:
     for (auto &[Address, D] : Walk.walk(0x1000, Part))
       Result[Address - 0x1000] = D.Taken;
     return Result;
+  }
+
+  /// Whether the walk of \p Code follows every path, and the offsets of the
+  /// instructions its paths reach
+  std::pair<bool, std::set<uint64_t>> coverage(std::vector<uint8_t> Code) {
+    Code.insert(Code.end(), 16, 0xcc);
+    DecidedBranches Walk(*Disassembler,
+                         *InstrInfo,
+                         *RegisterInfo,
+                         [&Code](uint64_t Address) -> ArrayRef<uint8_t> {
+                           if (Address < 0x1000
+                               or Address >= 0x1000 + Code.size())
+                             return {};
+                           return ArrayRef(Code).drop_front(Address - 0x1000);
+                         });
+    std::pair<uint64_t, uint64_t> Part{ 0x1000, 0x1000 + Code.size() };
+    DecidedBranches::Coverage Covered;
+    Walk.walk(0x1000, Part, &Covered);
+    std::set<uint64_t> Starts;
+    for (uint64_t Address : Covered.Starts)
+      Starts.insert(Address - 0x1000);
+    return { Covered.Complete, Starts };
   }
 };
 
@@ -213,4 +237,58 @@ BOOST_AUTO_TEST_CASE(IcebpEndsThePath) {
   BOOST_TEST((F.decided({ 0x85, 0xc0, 0x74, 0x03, 0xf1, 0xf9, 0x90, 0x72, 0x01,
                           0xcc, 0xc3 })
               == Decisions{ { 7, false } }));
+}
+
+BOOST_AUTO_TEST_CASE(CompareSameRegister) {
+  // cmp eax, eax; je +1; nop; ret: comparing a register with itself sets ZF
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x39, 0xc0, 0x74, 0x01, 0x90, 0xc3 })
+              == Decisions{ { 2, true } }));
+}
+
+namespace {
+
+struct FlowCleanCase {
+  const char *Name;
+  const char *Hex;
+  Decisions Expected;
+};
+
+const FlowCleanCase FlowCleanFixtures[] = {
+#include "DecidedBranchesFlowCleanCases.inc"
+};
+
+std::vector<uint8_t> hexBytes(llvm::StringRef Hex) {
+  std::vector<uint8_t> Result;
+  for (size_t I = 0; I + 1 < Hex.size(); I += 2)
+    Result.push_back(std::stoi(Hex.substr(I, 2).str(), nullptr, 16));
+  return Result;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(FlowCleanCases) {
+  Fixture F;
+  for (const FlowCleanCase &Case : FlowCleanFixtures) {
+    BOOST_TEST_CONTEXT(Case.Name) {
+      BOOST_TEST((F.decided(hexBytes(Case.Hex)) == Case.Expected));
+    }
+  }
+}
+
+BOOST_AUTO_TEST_CASE(IndexedMemoryJumpIsUnknown) {
+  // stc; jb +1; int3; jmp [rax * 8 + 0x1000]: a jump through memory indexed
+  // by a register, as a switch's, has unknown destinations
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0xff, 0x24, 0xc5, 0x00, 0x10,
+                          0x00, 0x00 })
+              == Decisions{}));
+}
+
+BOOST_AUTO_TEST_CASE(CoverageIsTheLiveInstructions) {
+  // stc; jb +1; int3; ret: the int3 is on no path
+  Fixture F;
+  auto [Complete, Starts] = F.coverage({ 0xf9, 0x72, 0x01, 0xcc, 0xc3 });
+  BOOST_TEST(Complete);
+  BOOST_TEST((Starts == std::set<uint64_t>{ 0, 1, 4 }));
 }

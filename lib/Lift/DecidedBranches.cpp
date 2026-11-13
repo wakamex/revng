@@ -552,7 +552,8 @@ bool DecidedBranches::Interpreter::arithmetic() {
 
   auto [A, AMask] = read(Destination, Bits);
   auto [B, BMask] = read(Source, Bits);
-  if ((F == "XOR" or F == "SUB") and Destination.K == Operand::Register
+  if ((F == "XOR" or F == "SUB" or F == "CMP")
+      and Destination.K == Operand::Register
       and Source.K == Operand::Register and Destination.Reg == Source.Reg) {
     A = B = 0;
     AMask = BMask = Width;
@@ -959,7 +960,10 @@ static bool decode(const MCDisassembler &Disassembler,
 
 DecidedBranches::Decisions
 DecidedBranches::walk(uint64_t Entry,
-                      ArrayRef<std::pair<uint64_t, uint64_t>> Parts) const {
+                      ArrayRef<std::pair<uint64_t, uint64_t>> Parts,
+                      Coverage *Covered) const {
+  if (Covered != nullptr)
+    *Covered = Coverage();
   auto Inside = [&](uint64_t A) {
     for (auto [Begin, End] : Parts)
       if (Begin <= A and A < End)
@@ -985,6 +989,8 @@ DecidedBranches::walk(uint64_t Entry,
                 "The walk from 0x" << Twine::utohexstr(Entry).str()
                                    << " took more than " << MaxPaths
                                    << " paths");
+      if (Covered != nullptr)
+        Covered->Starts.clear();
       return {};
     }
     auto [Address, S] = std::move(Work.back());
@@ -1007,6 +1013,8 @@ DecidedBranches::walk(uint64_t Entry,
       uint64_t Size = 0;
       if (not decode(Disassembler, Instruction, Size, Code, Address))
         break;
+      if (Covered != nullptr)
+        Covered->Starts.insert(Address);
 
       StringRef Name = InstrInfo.getName(Instruction.getOpcode());
       const MCInstrDesc &Desc = InstrInfo.get(Instruction.getOpcode());
@@ -1041,8 +1049,10 @@ DecidedBranches::walk(uint64_t Entry,
         } else if (Desc.isIndirectBranch()) {
           // A jump through memory reads a function pointer, as from an
           // import slot or a vtable: a tail call. A switch jumps through a
-          // register
-          bool ThroughMemory = Name == "JMP64m" or Name == "JMP32m";
+          // register, or through memory indexed by a register, as in
+          // `jmp [table + rcx * 8]`, whose destinations are unknown
+          bool ThroughMemory = (Name == "JMP64m" or Name == "JMP32m")
+                               and Instruction.getOperand(2).getReg() == 0;
           std::optional<std::vector<uint64_t>> Targets;
           if (Indirect and not ThroughMemory)
             Targets = Indirect(Address);
@@ -1077,8 +1087,13 @@ DecidedBranches::walk(uint64_t Entry,
   }
 
   // Paths the walk could not follow could reach any jump with other flags
-  if (Incomplete)
+  if (Incomplete) {
+    if (Covered != nullptr)
+      Covered->Starts.clear();
     return {};
+  }
+  if (Covered != nullptr)
+    Covered->Complete = true;
 
   for (uint64_t Address : Undecided)
     Decided.erase(Address);

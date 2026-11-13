@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,15 @@ public:
   /// The decided jumps, by address
   using Decisions = std::map<uint64_t, Decision>;
 
+  /// The code a walk reaches
+  struct Coverage {
+    /// Every path was followed to its end: no code of the function outside
+    /// Starts runs when it is entered at its entry
+    bool Complete = false;
+    /// The starts of the instructions the paths reach, when Complete
+    std::set<uint64_t> Starts;
+  };
+
 private:
   const llvm::MCDisassembler &Disassembler;
   const llvm::MCInstrInfo &InstrInfo;
@@ -92,9 +102,10 @@ public:
 
   /// The decided jumps of the function entered at \p Entry, whose code lies
   /// in \p Parts, half-open address ranges
-  Decisions
-  walk(uint64_t Entry,
-       llvm::ArrayRef<std::pair<uint64_t, uint64_t>> Parts) const;
+  /// \p Covered, when given, receives the code the walk reaches.
+  Decisions walk(uint64_t Entry,
+                 llvm::ArrayRef<std::pair<uint64_t, uint64_t>> Parts,
+                 Coverage *Covered = nullptr) const;
 
 private:
   class Interpreter;
