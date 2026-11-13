@@ -113,9 +113,11 @@ const efa::BasicBlock *ControlFlowGraph::findBlock(llvm::BasicBlock *BB) const {
         PredecessorJumpTargetBB = NewJT;
       }
     }
+    // A block the CFG does not describe, as where bytes that overlap other
+    // instructions were decoded differently when the CFG was built
+    if (PredecessorJumpTargetBB == nullptr)
+      return nullptr;
     JumpTargetBB = PredecessorJumpTargetBB;
-
-    revng_assert(JumpTargetBB != nullptr);
     CallerBlockID = getBasicBlockID(JumpTargetBB);
     revng_assert(CallerBlockID.isValid());
     It = Blocks().find(CallerBlockID);

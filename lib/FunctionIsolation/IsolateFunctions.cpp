@@ -249,6 +249,14 @@ private:
                   llvm::Value *SymbolNamePointer) {
     // Identify caller block
     const auto *Caller = FM.findBlock(Builder.GetInsertBlock());
+    if (Caller == nullptr) {
+      // The CFG has no call here, as for a longjmp below
+      revng_log(TheLogger,
+                "The CFG of " << FM.Entry().toString() << " has no block for "
+                              << Builder.GetInsertBlock()->getName().str()
+                              << ": its call is left out");
+      return;
+    }
 
     // Identify call edge
     auto IsCallEdge = [](const UpcastablePointer<efa::FunctionEdgeBase> &E) {
