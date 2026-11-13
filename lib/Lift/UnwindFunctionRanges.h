@@ -47,6 +47,9 @@ private:
     /// The unwind entry describes a frame already set up at Start: this is a
     /// part of a function entered by a jump, not a function of its own
     bool StartsMidFrame = false;
+    /// From .pdata, the start of the function's first entry, which the
+    /// unwind chain ends at
+    uint64_t Primary = 0;
   };
 
   /// The decoding of one range from its start, one instruction after another
@@ -80,8 +83,19 @@ private:
   bool PartsIndexed = false;
 
   llvm::DenseMap<unsigned, std::vector<unsigned>> Groups;
-  /// The decided jumps of each function walked, by the range of its entry
-  std::map<unsigned, DecidedBranches::Decisions> DecisionsByEntry;
+  /// The .pdata parts of each function, by the start of its first entry
+  llvm::DenseMap<uint64_t, std::vector<unsigned>> PartsByPrimary;
+  /// What the walk of a function found
+  struct Walked {
+    DecidedBranches::Decisions Decisions;
+    /// Every path of the function was followed to its end
+    bool Complete = false;
+    /// The starts of the instructions its paths reach, sorted, when Complete
+    std::vector<uint64_t> Starts;
+  };
+
+  /// Each function walked, by the range of its entry
+  std::map<unsigned, Walked> WalkedByEntry;
 
   std::unique_ptr<llvm::MCRegisterInfo> RegisterInfo;
   std::unique_ptr<llvm::MCAsmInfo> AsmInfo;
@@ -156,10 +170,18 @@ public:
   /// DecidedBranches. x86-64 only.
   std::optional<MetaAddress> deadSuccessor(MetaAddress Jump);
 
+  /// Whether \p Address lies in a function whose every path the walk of
+  /// DecidedBranches follows, and no path reaches an instruction starting
+  /// there: code that never runs, such as junk in obfuscated programs. x86-64
+  /// only.
+  bool isDeadCode(MetaAddress Address);
+
 private:
   std::optional<unsigned> find(uint64_t Address) const;
   const Sweep &sweep(unsigned Index);
   const std::vector<unsigned> &group(unsigned Index);
+  /// The walk of the function containing the range \p Index
+  const Walked &walked(unsigned Index);
   void indexParts();
   bool isInstructionStart(unsigned Index, uint64_t Address);
   bool initializeDisassembler(model::Architecture::Values Architecture);

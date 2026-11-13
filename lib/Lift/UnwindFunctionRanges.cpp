@@ -124,10 +124,12 @@ readEHFrame(const RawBinaryView &BinaryView,
 /// Collect the ranges of the `RUNTIME_FUNCTION` entries in the exception
 /// directory (`.pdata`) of an x86-64 PE file, in the addresses of
 /// \p BinaryView. An entry whose unwind information chains to another entry
-/// describes a part of that entry's function, entered with its frame set up.
-static std::vector<std::tuple<uint64_t, uint64_t, bool>>
+/// describes a part of that entry's function, entered with its frame set up;
+/// the last element of each tuple is the start of the function's first entry,
+/// which the chain ends at.
+static std::vector<std::tuple<uint64_t, uint64_t, bool, uint64_t>>
 readPData(const RawBinaryView &BinaryView, ArrayRef<uint8_t> File) {
-  std::vector<std::tuple<uint64_t, uint64_t, bool>> Result;
+  std::vector<std::tuple<uint64_t, uint64_t, bool, uint64_t>> Result;
 
   StringRef Buffer(reinterpret_cast<const char *>(File.data()), File.size());
   auto MaybeObject = object::ObjectFile::createObjectFile({ Buffer, "" });
@@ -187,7 +189,30 @@ readPData(const RawBinaryView &BinaryView, ArrayRef<uint8_t> File) {
         StartsMidFrame = ((File[*UnwindOffset] >> 3) & UNW_FLAG_CHAININFO) != 0;
     }
 
-    Result.emplace_back(Begin + Bias, End + Bias, StartsMidFrame);
+    // Follow the chain to the function's first entry: an entry pointing to
+    // another, or unwind information whose chained entry follows its codes
+    uint32_t Primary = Begin;
+    uint32_t Link = UnwindInfo;
+    for (unsigned Hops = 0; Hops < 32; ++Hops) {
+      std::optional<uint64_t> Chained;
+      if (Link & 1) {
+        Chained = ToOffset(Link & ~1u);
+      } else {
+        auto UnwindOffset = ToOffset(Link);
+        if (not UnwindOffset or *UnwindOffset + 4 > File.size()
+            or not((File[*UnwindOffset] >> 3) & UNW_FLAG_CHAININFO))
+          break;
+        unsigned Codes = File[*UnwindOffset + 2];
+        Chained = *UnwindOffset + 4 + 2 * ((Codes + 1) & ~1u);
+      }
+      if (not Chained or *Chained + EntrySize > File.size())
+        break;
+      Primary = read32le(File.data() + *Chained);
+      Link = read32le(File.data() + *Chained + 8);
+    }
+
+    Result.emplace_back(Begin + Bias, End + Bias, StartsMidFrame,
+                        Primary + Bias);
   }
 
   return Result;
@@ -204,8 +229,9 @@ UnwindFunctionRanges::UnwindFunctionRanges(
     Ranges.push_back({ Start, End, StartsMidFrame });
 
   if (Ranges.empty() and Architecture == model::Architecture::x86_64) {
-    for (auto [Start, End, StartsMidFrame] : readPData(BinaryView, File))
-      Ranges.push_back({ Start, End, StartsMidFrame });
+    for (auto [Start, End, StartsMidFrame, Primary] :
+         readPData(BinaryView, File))
+      Ranges.push_back({ Start, End, StartsMidFrame, Primary });
     FromPData = not Ranges.empty();
   }
 
@@ -416,6 +442,21 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
   if (It != Groups.end())
     return It->second;
 
+  // A .pdata part belongs to the function its unwind chain ends at
+  if (FromPData) {
+    if (PartsByPrimary.empty())
+      for (unsigned I = 0; I < Ranges.size(); ++I)
+        PartsByPrimary[Ranges[I].Primary].push_back(I);
+    std::vector<unsigned> Result = PartsByPrimary.lookup(Ranges[Index].Primary);
+    if (llvm::find(Result, Index) == Result.end())
+      Result.push_back(Index);
+    // The part that begins at a call's state first, as callers expect
+    std::stable_partition(Result.begin(), Result.end(), [this](unsigned Part) {
+      return not Ranges[Part].StartsMidFrame;
+    });
+    return Groups[Index] = std::move(Result);
+  }
+
   indexParts();
 
   std::vector<unsigned> Result = { Index };
@@ -458,6 +499,60 @@ const std::vector<unsigned> &UnwindFunctionRanges::group(unsigned Index) {
   return Groups[Index] = std::move(Result);
 }
 
+const UnwindFunctionRanges::Walked &
+UnwindFunctionRanges::walked(unsigned Index) {
+  // Walk the function from the part that begins at a call's state; a
+  // function whose parts all begin mid-frame is walked from the first part
+  const std::vector<unsigned> &Parts = group(Index);
+  unsigned Entry = Index;
+  for (unsigned Part : Parts) {
+    if (not Ranges[Part].StartsMidFrame) {
+      Entry = Part;
+      break;
+    }
+  }
+
+  auto It = WalkedByEntry.find(Entry);
+  if (It != WalkedByEntry.end())
+    return It->second;
+
+  std::vector<std::pair<uint64_t, uint64_t>> Code;
+  for (unsigned Part : Parts)
+    Code.push_back({ Ranges[Part].Start, Ranges[Part].End });
+  DecidedBranches Walk(*Disassembler,
+                       *InstrInfo,
+                       *RegisterInfo,
+                       [this](uint64_t Address) -> ArrayRef<uint8_t> {
+                         auto Bytes = BinaryView.getFromAddressOn(
+                           MetaAddress::fromPC(Architecture, Address));
+                         return Bytes ? *Bytes : ArrayRef<uint8_t>();
+                       },
+                       [this](uint64_t Jump)
+                         -> std::optional<std::vector<uint64_t>> {
+                         auto Table = relativeJumpTable(
+                           MetaAddress::fromPC(Architecture, Jump));
+                         if (not Table)
+                           return std::nullopt;
+                         std::vector<uint64_t> Result;
+                         for (const MetaAddress &Target : Table->first)
+                           Result.push_back(Target.address());
+                         return Result;
+                       });
+  Walked Result;
+  DecidedBranches::Coverage Covered;
+  Result.Decisions = Walk.walk(Ranges[Entry].Start, Code, &Covered);
+  Result.Complete = Covered.Complete;
+  Result.Starts.assign(Covered.Starts.begin(), Covered.Starts.end());
+  if (Log.isEnabled()) {
+    Log << "Function at 0x" << Twine::utohexstr(Ranges[Entry].Start).str()
+        << " has " << Result.Decisions.size() << " decided jumps:";
+    for (auto &[Address, D] : Result.Decisions)
+      Log << " 0x" << Twine::utohexstr(Address).str() << (D.Taken ? "+" : "-");
+    Log << DoLog;
+  }
+  return WalkedByEntry.emplace(Entry, std::move(Result)).first->second;
+}
+
 std::optional<MetaAddress>
 UnwindFunctionRanges::deadSuccessor(MetaAddress Jump) {
   if (Ranges.empty() or Jump.type() != CodeType
@@ -468,57 +563,27 @@ UnwindFunctionRanges::deadSuccessor(MetaAddress Jump) {
   if (not Index)
     return std::nullopt;
 
-  // Walk the function from the part that begins at a call's state; a
-  // function whose parts all begin mid-frame is walked from the jump's part
-  const std::vector<unsigned> &Parts = group(*Index);
-  unsigned Entry = *Index;
-  for (unsigned Part : Parts) {
-    if (not Ranges[Part].StartsMidFrame) {
-      Entry = Part;
-      break;
-    }
-  }
-
-  auto It = DecisionsByEntry.find(Entry);
-  if (It == DecisionsByEntry.end()) {
-    std::vector<std::pair<uint64_t, uint64_t>> Code;
-    for (unsigned Part : Parts)
-      Code.push_back({ Ranges[Part].Start, Ranges[Part].End });
-    DecidedBranches Walk(*Disassembler,
-                         *InstrInfo,
-                         *RegisterInfo,
-                         [this](uint64_t Address) -> ArrayRef<uint8_t> {
-                           auto Bytes = BinaryView.getFromAddressOn(
-                             MetaAddress::fromPC(Architecture, Address));
-                           return Bytes ? *Bytes : ArrayRef<uint8_t>();
-                         },
-                         [this](uint64_t Jump)
-                           -> std::optional<std::vector<uint64_t>> {
-                           auto Table = relativeJumpTable(
-                             MetaAddress::fromPC(Architecture, Jump));
-                           if (not Table)
-                             return std::nullopt;
-                           std::vector<uint64_t> Result;
-                           for (const MetaAddress &Target : Table->first)
-                             Result.push_back(Target.address());
-                           return Result;
-                         });
-    auto Decisions = Walk.walk(Ranges[Entry].Start, Code);
-    if (Log.isEnabled()) {
-      Log << "Function at 0x" << Twine::utohexstr(Ranges[Entry].Start).str()
-          << " has " << Decisions.size() << " decided jumps:";
-      for (auto &[Address, D] : Decisions)
-        Log << " 0x" << Twine::utohexstr(Address).str()
-            << (D.Taken ? "+" : "-");
-      Log << DoLog;
-    }
-    It = DecisionsByEntry.emplace(Entry, std::move(Decisions)).first;
-  }
-
-  auto Decision = It->second.find(Jump.address());
-  if (Decision == It->second.end())
+  const Walked &W = walked(*Index);
+  auto Decision = W.Decisions.find(Jump.address());
+  if (Decision == W.Decisions.end())
     return std::nullopt;
   return MetaAddress::fromPC(Architecture, Decision->second.DeadSuccessor);
+}
+
+bool UnwindFunctionRanges::isDeadCode(MetaAddress Address) {
+  if (Ranges.empty() or Address.type() != CodeType
+      or Architecture != model::Architecture::x86_64)
+    return false;
+
+  auto Index = find(Address.address());
+  if (not Index)
+    return false;
+
+  const Walked &W = walked(*Index);
+  return W.Complete
+         and not std::binary_search(W.Starts.begin(),
+                                    W.Starts.end(),
+                                    Address.address());
 }
 
 std::optional<std::pair<SmallVector<MetaAddress>, SmallVector<uint64_t>>>

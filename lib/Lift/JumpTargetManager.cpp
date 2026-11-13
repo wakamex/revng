@@ -8,6 +8,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Progress.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
@@ -179,6 +180,15 @@ static std::optional<uint64_t> constantAddress(Value *V) {
 }
 
 static Logger DirectCallLog("pin-direct-calls");
+
+static cl::opt<bool> TranslateOnlyLiveCode("translate-only-live-code",
+                                           cl::desc("With "
+                                                    "-prune-decided-branches, "
+                                                    "translate no x86-64 code "
+                                                    "of a function that no "
+                                                    "path of it reaches"),
+                                           cl::init(false));
+static Logger DeadCodeLog("dead-code");
 
 bool TDBP::hasFixedTarget(CallInst *Marker) const {
   GlobalVariable *AddressCSV = PCH->pcCSVs()[3];
@@ -1314,6 +1324,16 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
     if (auto It = JumpTargets.find(PC); It != JumpTargets.end())
       It->second.setReason(Reason);
     return Result;
+  }
+
+  // Code of a function that no path of it reaches never runs, as junk in
+  // obfuscated programs does not: it is not code to translate
+  if (TranslateOnlyLiveCode and unwindRanges().isDeadCode(PC)) {
+    revng_log(DeadCodeLog,
+              "Not translating " << PC.toString() << ", reached for "
+                                 << JumpTargetReason::getName(Reason)
+                                 << ": no path of its function reaches it");
+    return nullptr;
   }
 
   // Do we already have a BasicBlock for this PC?

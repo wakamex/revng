@@ -510,6 +510,8 @@ set(FILECHECK_TESTS
     lift/unwind-entry-after-call.S
     lift/unwind-entry-after-call-pe.S
     lift/call-inside-function-pe.S
+    lift/translate-only-live-code-pe.S
+    lift/translate-only-live-code-chained-pe.S
     lift/branch-to-copied-entry.S
     lift/gvec-equality.S
     lift/helper-abort-message.S
