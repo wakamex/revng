@@ -46,10 +46,23 @@ struct CallSite {
 
   MetaAddress Callee;
 
+  /// Two calls to different functions share this call site's address, as
+  /// where code that overlaps other instructions is inlined: the callee is
+  /// unknown
+  bool Conflicting = false;
+
   void setCallee(MetaAddress Callee) {
-    if (this->Callee.isValid()) {
-      revng_assert(this->Callee == Callee);
-    } else {
+    if (Conflicting)
+      return;
+
+    if (this->Callee.isValid() and this->Callee != Callee) {
+      revng_log(Log,
+                "Calls to " << this->Callee.toString() << " and "
+                            << Callee.toString()
+                            << " share a call site: its callee is unknown");
+      this->Callee = MetaAddress::invalid();
+      Conflicting = true;
+    } else if (not this->Callee.isValid()) {
       this->Callee = Callee;
     }
   }
