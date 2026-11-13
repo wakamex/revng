@@ -211,7 +211,16 @@ static bool layoutMatches(const abi::Definition &ABI,
       }
     }
     for (const model::NamedTypedRegister &Register : RawRegisters) {
-      if (Widths.at(Register.Location()) < *Register.Type()->size()) {
+      // Deduction may leave out a register the raw prototype has
+      auto It = Widths.find(Register.Location());
+      if (It == Widths.end()) {
+        Reason = (What + " register "
+                  + model::Register::getName(Register.Location())
+                  + " is not used by the C prototype")
+                   .str();
+        return false;
+      }
+      if (It->second < *Register.Type()->size()) {
         Reason = (What + " register "
                   + model::Register::getName(Register.Location())
                   + " is narrower in the C prototype")
