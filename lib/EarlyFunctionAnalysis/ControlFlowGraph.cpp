@@ -113,10 +113,14 @@ const efa::BasicBlock *ControlFlowGraph::findBlock(llvm::BasicBlock *BB) const {
         PredecessorJumpTargetBB = NewJT;
       }
     }
-    // A block the CFG does not describe, as where bytes that overlap other
-    // instructions were decoded differently when the CFG was built
-    if (PredecessorJumpTargetBB == nullptr)
-      return nullptr;
+    // A block the CFG does not describe comes from bytes that overlap other
+    // instructions decoded differently than when the CFG was built: code that
+    // should not have been translated
+    if (PredecessorJumpTargetBB == nullptr) {
+      std::string Message = "The CFG of " + Entry().toString()
+                            + " has no block for " + BB->getName().str();
+      revng_abort(Message.c_str());
+    }
     JumpTargetBB = PredecessorJumpTargetBB;
     CallerBlockID = getBasicBlockID(JumpTargetBB);
     revng_assert(CallerBlockID.isValid());

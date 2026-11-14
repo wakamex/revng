@@ -249,23 +249,20 @@ private:
                   llvm::Value *SymbolNamePointer) {
     // Identify caller block
     const auto *Caller = FM.findBlock(Builder.GetInsertBlock());
-    if (Caller == nullptr) {
-      // The CFG has no call here, as for a longjmp below
-      revng_log(TheLogger,
-                "The CFG of " << FM.Entry().toString() << " has no block for "
-                              << Builder.GetInsertBlock()->getName().str()
-                              << ": its call is left out");
-      return;
-    }
 
-    // Identify call edge. A block whose bytes overlap other instructions can make calls to two
-    // functions: take the edge to the callee of this call
+    // Identify call edge. A block holds at most one call: two come from bytes
+    // that overlap other instructions, code that should not have been
+    // translated
     const efa::CallEdge *CallEdge = nullptr;
     for (const auto &Edge : Caller->Successors()) {
       if (auto *Call = dyn_cast<efa::CallEdge>(Edge.get())) {
-        if (CallEdge == nullptr
-            or Call->Destination().notInlinedAddress() == Callee)
-          CallEdge = Call;
+        if (CallEdge != nullptr) {
+          std::string Message = "The block " + Caller->ID().toString()
+                                + " of " + FM.Entry().toString()
+                                + " has two call edges";
+          revng_abort(Message.c_str());
+        }
+        CallEdge = Call;
       }
     }
 

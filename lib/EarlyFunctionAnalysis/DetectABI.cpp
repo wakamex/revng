@@ -163,7 +163,6 @@ static opt<unsigned> WorkerDelay("detect-abi-worker-delay",
 
 static Logger Log("detect-abi");
 static Logger ReuseLog("detect-abi-reuse");
-static Logger MissingCallSiteLog("missing-call-site");
 
 struct Changes {
   bool Function = false;
@@ -1895,12 +1894,13 @@ DetectABI::buildPrototypeForIndirectCall(const FunctionSummary &CallerSummary,
     AsWideAsTargets(ReturnValues, &RUAResults::ReturnValuesRegisters);
     recordRegisters(ReturnValues, Prototype.ReturnValues().batch_insert());
   }
-  // A call edge of the CFG that the register usage analysis met no call at,
-  // as where the two decode bytes that overlap other instructions
-  // differently, passes and returns nothing either observed
-  if (not Found)
-    revng_log(MissingCallSiteLog,
-              "No call site at " << CallerBlock.ID().toString());
+  // A call edge of the CFG that the register usage analysis met no call at
+  // comes from bytes that overlap other instructions, decoded differently by
+  // the two: code that should not have been translated
+  if (not Found) {
+    std::string Message = "No call site at " + CallerBlock.ID().toString();
+    revng_abort(Message.c_str());
+  }
 
   // Import FinalStackOffset and CalleeSavedRegisters from the default
   // prototype
