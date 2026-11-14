@@ -773,6 +773,9 @@ bool DecidedBranches::Interpreter::run() {
       for (auto &[Reg, Slice] : D.Slices)
         if (D.RegisterInfo.getName(Reg) == Volatile)
           S.Registers.erase(Slice.Base);
+    // The callee can write any slot whose address the function passed on, as
+    // to an out-parameter
+    S.Stack.clear();
     allFlagsUnknown();
     return true;
   }

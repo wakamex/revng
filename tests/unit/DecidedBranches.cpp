@@ -292,3 +292,13 @@ BOOST_AUTO_TEST_CASE(CoverageIsTheLiveInstructions) {
   BOOST_TEST(Complete);
   BOOST_TEST((Starts == std::set<uint64_t>{ 0, 1, 4 }));
 }
+
+BOOST_AUTO_TEST_CASE(CallForgetsTheStack) {
+  // mov qword [rsp + 8], 0; call +0; cmp qword [rsp + 8], 0; je +1; int3; ret:
+  // the callee may write the slot, whose address may have been passed on
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x48, 0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00,
+                          0xe8, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0x7c, 0x24,
+                          0x08, 0x00, 0x74, 0x01, 0xcc, 0xc3 })
+              == Decisions{}));
+}
