@@ -383,6 +383,14 @@ bool UnwindFunctionRanges::isFunctionEntry(MetaAddress Address) const {
          not Ranges[*Index].StartsMidFrame;
 }
 
+std::vector<MetaAddress> UnwindFunctionRanges::functionEntries() const {
+  std::vector<MetaAddress> Result;
+  for (const Range &R : Ranges)
+    if (not R.StartsMidFrame)
+      Result.push_back(MetaAddress::fromPC(Architecture, R.Start));
+  return Result;
+}
+
 bool UnwindFunctionRanges::isInsideFunction(MetaAddress Address) const {
   if (not FromPData or Address.type() != CodeType)
     return false;

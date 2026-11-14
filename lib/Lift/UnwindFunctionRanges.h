@@ -139,6 +139,9 @@ public:
   /// of another function entered by a jump.
   bool isFunctionEntry(MetaAddress Address) const;
 
+  /// The start of every range that begins a function
+  std::vector<MetaAddress> functionEntries() const;
+
   /// Whether Address lies in a PE program's unwind range other than at the
   /// start of a function: in the middle of a function or in a split-off part
   /// of one. Every PE function that is not a leaf has unwind information, and

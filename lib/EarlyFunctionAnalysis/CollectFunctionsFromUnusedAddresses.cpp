@@ -79,6 +79,7 @@ private:
                                        JumpTargetReason::ReturnAddress);
       bool IsLoadAddress = hasReason(Reasons, JumpTargetReason::LoadAddress);
       bool IsUnwindEntry = hasReason(Reasons, JumpTargetReason::UnwindEntry);
+      bool IsUnwindSeed = hasReason(Reasons, JumpTargetReason::UnwindSeed);
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
       revng_log(Log, Entry.toString()
@@ -105,7 +106,8 @@ private:
       // reached.
       bool Interesting = (IsSimpleLiteral or IsUnusedGlobalData
                           or (IsMemoryStore and not IsPCStore)
-                          or ((IsGlobalData or IsDirectJump) and IsUnwindEntry));
+                          or ((IsGlobalData or IsDirectJump) and IsUnwindEntry)
+                          or IsUnwindSeed);
       // A pointer to the start of a function in the unwind information is a
       // function entry even when another function's CFG reaches it by falling
       // through, as one does past a call it does not know to be no-return, or

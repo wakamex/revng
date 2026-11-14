@@ -512,6 +512,7 @@ set(FILECHECK_TESTS
     lift/call-inside-function-pe.S
     lift/translate-only-live-code-pe.S
     lift/translate-only-live-code-chained-pe.S
+    lift/functions-from-unwind-entries-pe.S
     lift/branch-to-copied-entry.S
     lift/gvec-equality.S
     lift/helper-abort-message.S

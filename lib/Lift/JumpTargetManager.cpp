@@ -190,6 +190,16 @@ static cl::opt<bool> TranslateOnlyLiveCode("translate-only-live-code",
                                            cl::init(false));
 static Logger DeadCodeLog("dead-code");
 
+static cl::opt<bool> FunctionsFromUnwindEntries("functions-from-unwind-entries",
+                                                cl::desc("Make a function of "
+                                                         "every function "
+                                                         "entry of the unwind "
+                                                         "information, "
+                                                         "whether or not "
+                                                         "anything refers to "
+                                                         "it"),
+                                                cl::init(false));
+
 bool TDBP::hasFixedTarget(CallInst *Marker) const {
   GlobalVariable *AddressCSV = PCH->pcCSVs()[3];
   StoreInst *PCStore = nullptr;
@@ -1758,6 +1768,13 @@ void JumpTargetManager::harvest() {
       DisableTracking Guard(*Model);
       for (const model::Function &Function : Model->Functions())
         registerJT(Function.Entry(), JumpTargetReason::FunctionSymbol);
+
+      // A compiler emits unwind information only for functions, so every
+      // function entry it describes is one, even when the program reaches it
+      // only through pointers built at run time
+      if (FunctionsFromUnwindEntries)
+        for (const MetaAddress &Entry : unwindRanges().functionEntries())
+          registerJT(Entry, JumpTargetReason::UnwindSeed);
     }
 
     // TODO: eventually, `setCFGForm` should be replaced by using a CustomCFG
