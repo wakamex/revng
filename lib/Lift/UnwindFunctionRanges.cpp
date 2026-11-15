@@ -128,7 +128,9 @@ readEHFrame(const RawBinaryView &BinaryView,
 /// the last element of each tuple is the start of the function's first entry,
 /// which the chain ends at.
 static std::vector<std::tuple<uint64_t, uint64_t, bool, uint64_t>>
-readPData(const RawBinaryView &BinaryView, ArrayRef<uint8_t> File) {
+readPData(const RawBinaryView &BinaryView,
+          ArrayRef<uint8_t> File,
+          uint64_t &ImageBase) {
   std::vector<std::tuple<uint64_t, uint64_t, bool, uint64_t>> Result;
 
   StringRef Buffer(reinterpret_cast<const char *>(File.data()), File.size());
@@ -169,6 +171,7 @@ readPData(const RawBinaryView &BinaryView, ArrayRef<uint8_t> File) {
     return Result;
   }
   uint64_t Bias = Mapped.address() - Directory->RelativeVirtualAddress;
+  ImageBase = Bias;
 
   using namespace llvm::support::endian;
   const uint8_t UNW_FLAG_CHAININFO = 4;
@@ -230,7 +233,7 @@ UnwindFunctionRanges::UnwindFunctionRanges(
 
   if (Ranges.empty() and Architecture == model::Architecture::x86_64) {
     for (auto [Start, End, StartsMidFrame, Primary] :
-         readPData(BinaryView, File))
+         readPData(BinaryView, File, ImageBase))
       Ranges.push_back({ Start, End, StartsMidFrame, Primary });
     FromPData = not Ranges.empty();
   }
@@ -656,8 +659,9 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     unsigned Target = Instructions.back().Instruction.getOperand(0).getReg();
 
     // Walking back from the jump: X += B, then X = load32(B + I * 4 + D),
-    // then B = address of the table or of the image. Nothing else in between
-    // may write X or B.
+    // then B = address of the table or of the image, which MSVC may load once
+    // early in the function. Nothing in between may write B, nor X between
+    // the load and the jump.
     auto Writes = [this](const MCInst &I, unsigned Register) {
       const MCInstrDesc &Description = InstrInfo->get(I.getOpcode());
       for (unsigned Def = 0; Def < Description.getNumDefs(); ++Def)
@@ -706,18 +710,26 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
                            + TableOffset,
                          FromImageBase,
                          TableOffset };
-      } else if (Writes(I, Target) or (Base != 0 and Writes(I, Base))) {
+      } else if ((State != WantTable and Writes(I, Target))
+                 or (Base != 0 and Writes(I, Base))) {
         return std::nullopt;
       }
     }
+    // Adding the register the offset was loaded through is MSVC's dispatch
+    // through the image base, which a PE program's relative addresses give:
+    // its lea may lie in another part of the function or past bytes that do
+    // not decode
+    if (State == WantTable and FromImageBase and FromPData)
+      return Dispatch{ ImageBase + TableOffset, true, TableOffset };
     return std::nullopt;
   };
 
-  // The last few instructions up to and including the jump, as the sweep of
-  // its range decoded them, or, past a byte the sweep could not decode, as in
-  // protected code, from each of the addresses shortly before the jump from
-  // which decoding lands on it
-  constexpr unsigned Window = 8;
+  // The instructions up to and including the jump, as the sweep of its range
+  // decoded them, back far enough to find a base loaded early in the
+  // function, or, past a byte the sweep could not decode, as in protected
+  // code, from each of the addresses shortly before the jump from which
+  // decoding lands on it
+  constexpr unsigned Window = 128;
   std::optional<Dispatch> Found;
   if (JumpAddress < S.DecodedEnd) {
     SmallVector<Decoded, Window> Instructions;

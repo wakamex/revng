@@ -72,6 +72,9 @@ private:
   model::Architecture::Values Architecture;
   /// The ranges come from a PE program's `.pdata`
   bool FromPData = false;
+  /// For ranges from .pdata, the address the program's relative addresses
+  /// are relative to
+  uint64_t ImageBase = 0;
   MetaAddressType::Values CodeType = MetaAddressType::Invalid;
 
   /// Sorted by start
