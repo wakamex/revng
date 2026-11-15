@@ -26,6 +26,9 @@
 using namespace llvm;
 
 static Logger Log("decided-branches");
+/// Every step, decision and arm fact of the walk with its states, for a
+/// symbolic check of each one (verify_walk.py --cpp-log)
+static Logger StatesLog("decided-branches-states");
 
 namespace {
 
@@ -974,6 +977,29 @@ DecidedBranches::walk(uint64_t Entry,
     return false;
   };
 
+  // A state as "F=flags D=facts R=reg:value:mask,... P=rsp offset S=offset:byte,...",
+  // each flag and fact 0, 1 or - when unknown
+  auto Describe = [&](const State &S) {
+    std::string Text = "F=";
+    for (Tri Flag : S.Flags)
+      Text += Flag ? (*Flag ? '1' : '0') : '-';
+    Text += " D=";
+    for (Tri Fact : S.Facts)
+      Text += Fact ? (*Fact ? '1' : '0') : '-';
+    Text += " R=";
+    for (auto &[Register, Known] : S.Registers)
+      Text += StringRef(RegisterInfo.getName(Register)).lower() + ":"
+              + Twine::utohexstr(Known.first).str() + ":"
+              + Twine::utohexstr(Known.second).str() + ",";
+    Text += " P=";
+    Text += S.StackOffset ? std::to_string(*S.StackOffset) : "?";
+    Text += " S=";
+    for (auto &[Offset, Byte] : S.Stack)
+      Text += std::to_string(Offset) + ":" + std::to_string(Byte) + ",";
+    return Text;
+  };
+  auto Hex = [](uint64_t A) { return "0x" + Twine::utohexstr(A).str(); };
+
   Decisions Decided;
   bool Incomplete = false;
   std::set<uint64_t> Undecided;
@@ -1034,6 +1060,9 @@ DecidedBranches::walk(uint64_t Entry,
           // Both outcomes lead to the next instruction: no successor is dead
           Work.push_back({ Fallthrough, S });
         } else if (Outcome) {
+          revng_log(StatesLog,
+                    "decide " << Hex(Address) << " " << (*Outcome ? '+' : '-')
+                              << " " << Describe(S));
           auto It = Decided.find(Address);
           if (It != Decided.end() and It->second.Taken != *Outcome)
             Contradicted.insert(Address);
@@ -1041,6 +1070,11 @@ DecidedBranches::walk(uint64_t Entry,
           Work.push_back({ *Outcome ? Target : Fallthrough, S });
         } else {
           Undecided.insert(Address);
+          for (bool Taken : { true, false })
+            revng_log(StatesLog,
+                      "arm " << Hex(Address) << " " << (Taken ? '+' : '-')
+                             << " " << Describe(S) << " | "
+                             << Describe(implied(S, Code, Taken)));
           Work.push_back({ Target, implied(S, Code, true) });
           Work.push_back({ Fallthrough, implied(S, Code, false) });
         }
@@ -1075,6 +1109,9 @@ DecidedBranches::walk(uint64_t Entry,
         break;
       }
 
+      std::optional<State> Before;
+      if (StatesLog.isEnabled())
+        Before = S;
       Interpreter Step(*this, Instruction, Address, Size, S);
       if (not Step.run())
         break;
@@ -1088,6 +1125,10 @@ DecidedBranches::walk(uint64_t Entry,
       if (Step.touched(ZF) or Step.touched(SF) or Step.touched(OF))
         S.Facts[LE] = triOr(S.Flags[ZF], S.Facts[L]);
 
+      if (Before)
+        revng_log(StatesLog,
+                  "step " << Hex(Address) << " " << Describe(*Before) << " | "
+                          << Describe(S));
       Address += Size;
     }
   }

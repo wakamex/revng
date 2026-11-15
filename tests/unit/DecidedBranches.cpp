@@ -302,3 +302,21 @@ BOOST_AUTO_TEST_CASE(CallForgetsTheStack) {
                           0x08, 0x00, 0x74, 0x01, 0xcc, 0xc3 })
               == Decisions{}));
 }
+
+BOOST_AUTO_TEST_CASE(ShortStackPointerWritesForgetTheStack) {
+  // mov qword [rsp + 8], 0; WRITE; cmp qword [rsp + 8], 0; je +1; int3; ret:
+  // a write to esp, as `xchg esp, eax` or `add esp, 0`, which zeroes rsp's
+  // upper half, leaves rsp's offset from its value at entry unknown
+  for (std::vector<uint8_t> Write : { std::vector<uint8_t>{ 0x94 },
+                                      std::vector<uint8_t>{ 0x83, 0xc4, 0x00 },
+                                      std::vector<uint8_t>{ 0xd3, 0xfc } }) {
+    std::vector<uint8_t> Code = { 0x48, 0xc7, 0x44, 0x24, 0x08,
+                                  0x00, 0x00, 0x00, 0x00 };
+    Code.insert(Code.end(), Write.begin(), Write.end());
+    for (uint8_t Byte : { 0x48, 0x83, 0x7c, 0x24, 0x08, 0x00, 0x74, 0x01, 0xcc,
+                          0xc3 })
+      Code.push_back(Byte);
+    Fixture F;
+    BOOST_TEST((F.decided(Code) == Decisions{}));
+  }
+}
