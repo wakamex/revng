@@ -545,6 +545,8 @@ set(FILECHECK_TESTS
     lift/image-base-relative-jump-table.S
     lift/image-base-early-jump-table.S
     lift/image-base-unseen-jump-table-pe.S
+    lift/image-base-two-registers-jump-table.S
+    lift/image-base-jumped-to-jump-table-pe.S
     lift/wide-division-quotient-bit.S
     clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
     clift/unique-fallthrough-branch-hoisting/hoist-then.mlir

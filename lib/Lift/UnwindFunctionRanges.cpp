@@ -661,7 +661,10 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     // Walking back from the jump: X += B, then X = load32(B + I * 4 + D),
     // then B = address of the table or of the image, which MSVC may load once
     // early in the function. Nothing in between may write B, nor X between
-    // the load and the jump.
+    // the load and the jump. MSVC may also load the image base into two
+    // registers, one for the load and one for the add: then the add's
+    // register is the lea of an address between the load and the add, and the
+    // load's base is a lea of the same address.
     auto Writes = [this](const MCInst &I, unsigned Register) {
       const MCInstrDesc &Description = InstrInfo->get(I.getOpcode());
       for (unsigned Def = 0; Def < Description.getNumDefs(); ++Def)
@@ -670,21 +673,41 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
           return true;
       return false;
     };
+    auto RIPAddress = [&](const Decoded &D,
+                          unsigned Register) -> std::optional<uint64_t> {
+      const MCInst &I = D.Instruction;
+      if (D.Name != "LEA64r" or I.getOperand(0).getReg() != Register
+          or RegisterInfo->getName(I.getOperand(1).getReg()) != StringRef("RIP")
+          or I.getOperand(3).getReg() != 0 or not I.getOperand(4).isImm())
+        return std::nullopt;
+      return D.Address + D.Size + I.getOperand(4).getImm();
+    };
 
     unsigned Base = 0;
+    unsigned AddBase = 0;
+    std::optional<uint64_t> AddBaseAddress;
     bool FromImageBase = false;
     int64_t TableOffset = 0;
     enum { WantAdd, WantLoad, WantTable } State = WantAdd;
     for (auto It = std::next(Instructions.rbegin()); It != Instructions.rend();
          ++It) {
       const MCInst &I = It->Instruction;
+      // Control does not fall through a ret or jmp into the dispatch, which
+      // only jumps reach: MSVC's base is the image base they bring
+      if (State == WantTable and FromImageBase
+          and InstrInfo->get(I.getOpcode()).isBarrier())
+        break;
       if (State == WantAdd and
           (It->Name == "ADD64rr" or It->Name == "ADD64rr_REV") and
           I.getOperand(0).getReg() == Target and
           I.getOperand(1).getReg() == Target) {
-        Base = I.getOperand(2).getReg();
+        Base = AddBase = I.getOperand(2).getReg();
         State = WantLoad;
+      } else if (State == WantLoad and not AddBaseAddress
+                 and (AddBaseAddress = RIPAddress(*It, AddBase))) {
+        Base = 0;
       } else if (State == WantLoad and It->Name == "MOVSX64rm32" and
+                 not AddBaseAddress and
                  I.getOperand(0).getReg() == Target and
                  I.getOperand(1).getReg() == Base and
                  I.getOperand(2).getImm() == 4 and
@@ -694,22 +717,20 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
         State = WantTable;
       } else if (State == WantLoad and It->Name == "MOV32rm" and
                  RegisterInfo->isSubRegisterEq(Target, I.getOperand(0).getReg())
-                 and I.getOperand(1).getReg() == Base and
+                 and (AddBaseAddress or I.getOperand(1).getReg() == Base) and
+                 I.getOperand(1).getReg() != 0 and
                  I.getOperand(2).getImm() == 4 and
                  I.getOperand(3).getReg() != 0 and I.getOperand(4).isImm() and
                  I.getOperand(5).getReg() == 0) {
+        Base = I.getOperand(1).getReg();
         FromImageBase = true;
         TableOffset = I.getOperand(4).getImm();
         State = WantTable;
-      } else if (State == WantTable and It->Name == "LEA64r" and
-                 I.getOperand(0).getReg() == Base and
-                 RegisterInfo->getName(I.getOperand(1).getReg()) ==
-                     StringRef("RIP") and
-                 I.getOperand(3).getReg() == 0 and I.getOperand(4).isImm()) {
-        return Dispatch{ It->Address + It->Size + I.getOperand(4).getImm()
-                           + TableOffset,
-                         FromImageBase,
-                         TableOffset };
+      } else if (auto Address = State == WantTable ? RIPAddress(*It, Base) :
+                                                     std::nullopt) {
+        if (AddBaseAddress and *AddBaseAddress != *Address)
+          return std::nullopt;
+        return Dispatch{ *Address + TableOffset, FromImageBase, TableOffset };
       } else if ((State != WantTable and Writes(I, Target))
                  or (Base != 0 and Writes(I, Base))) {
         return std::nullopt;
@@ -719,7 +740,8 @@ UnwindFunctionRanges::relativeJumpTable(MetaAddress Jump) {
     // through the image base, which a PE program's relative addresses give:
     // its lea may lie in another part of the function or past bytes that do
     // not decode
-    if (State == WantTable and FromImageBase and FromPData)
+    if (State == WantTable and FromImageBase and FromPData
+        and (not AddBaseAddress or *AddBaseAddress == ImageBase))
       return Dispatch{ ImageBase + TableOffset, true, TableOffset };
     return std::nullopt;
   };
