@@ -229,6 +229,27 @@ BOOST_AUTO_TEST_CASE(JumpThroughVtableIsATailCall) {
               == Decisions{ { 1, true } }));
 }
 
+BOOST_AUTO_TEST_CASE(CdqKeepsTheUpperHalfOfRax) {
+  // mov rax, -1; cdq; shr rax, 32; test rax, rax; je +1; int3; ret: LLVM
+  // lists EAX among cdq's writes, but rax keeps its upper half, which is not
+  // zero, so je is not decided taken
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x99, 0x48,
+                          0xc1, 0xe8, 0x20, 0x48, 0x85, 0xc0, 0x74, 0x01, 0xcc,
+                          0xc3 })
+              == Decisions{}));
+}
+
+BOOST_AUTO_TEST_CASE(BitScanOfZeroMayKeepTheUpperHalf) {
+  // bsr ecx, ecx; shr rcx, 32; test rcx, rcx; je +1; int3; ret: when ecx is
+  // zero some processors leave rcx as it was, so its unknown upper half stays
+  // unknown
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x0f, 0xbd, 0xc9, 0x48, 0xc1, 0xe9, 0x20, 0x48, 0x85,
+                          0xc9, 0x74, 0x01, 0xcc, 0xc3 })
+              == Decisions{}));
+}
+
 BOOST_AUTO_TEST_CASE(LeaIntoA32BitRegister) {
   // mov ecx, 0xed961135; lea eax, [rcx + 0x3c232685]; cmp eax, 0x29b937ba;
   // jne +1; int3; ret: eax is the low half of the sum

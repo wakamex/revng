@@ -493,10 +493,41 @@ private:
   /// Make unknown what an instruction this interpreter does not model
   /// writes: its explicit and implicit register definitions, the stack bytes
   /// it may store to, and every flag if it writes EFLAGS
+  /// Forget every bit of the 64-bit register \p Reg is part of
+  void forgetWholeRegister(unsigned Reg) {
+    auto It = D.Slices.find(Reg);
+    if (It != D.Slices.end())
+      S.Registers.erase(It->second.Base);
+  }
+
+  /// Make unknown what an instruction this interpreter does not model writes.
+  /// An explicit destination is written as its width says, so a 32-bit one
+  /// zeroes the upper half, except that bsf and bsr of a zero source leave
+  /// their destination as it was on some processors: its upper half is then
+  /// known only where it was known to be zero. The registers LLVM lists as
+  /// written implicitly are forgotten whole: it lists EAX for cdq and EDI and
+  /// ESI for the string instructions, which write none of them as 32 bits.
   void unmodeled() {
-    for (unsigned Index = 0; Index < Desc.getNumDefs(); ++Index)
-      if (I.getOperand(Index).isReg())
-        forgetRegister(I.getOperand(Index).getReg());
+    for (unsigned Index = 0; Index < Desc.getNumDefs(); ++Index) {
+      if (not I.getOperand(Index).isReg())
+        continue;
+      unsigned Reg = I.getOperand(Index).getReg();
+      auto It = D.Slices.find(Reg);
+      if ((Name.Family == "BSF" or Name.Family == "BSR")
+          and It != D.Slices.end() and It->second.Bits == 32) {
+        auto Old = S.Registers.find(It->second.Base);
+        uint64_t ZeroUpper = Old == S.Registers.end() ?
+                               0 :
+                               Old->second.second & ~Old->second.first
+                                 & ~widthMask(32);
+        if (ZeroUpper == 0)
+          S.Registers.erase(It->second.Base);
+        else
+          S.Registers[It->second.Base] = { 0, ZeroUpper };
+        continue;
+      }
+      forgetRegister(Reg);
+    }
     bool WritesFlags = false;
     for (MCPhysReg Reg : Desc.implicit_defs()) {
       if (D.RegisterInfo.getName(Reg) == StringRef("EFLAGS"))
@@ -504,7 +535,7 @@ private:
       else if (Reg == D.RSP)
         S.StackOffset.reset();
       else
-        forgetRegister(Reg);
+        forgetWholeRegister(Reg);
     }
     if (Desc.mayStore()) {
       bool Known = false;
