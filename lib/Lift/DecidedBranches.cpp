@@ -293,14 +293,17 @@ public:
 
 private:
   /// The logical operands: tied copies are left out and a memory reference's
-  /// five MC operands are one
+  /// five MC operands are one. The address of a lea into a 32-bit register
+  /// (LEA64_32r) is a memory reference LLVM does not mark as one.
   void collectOperands() {
     for (unsigned Index = 0; Index < I.getNumOperands(); ++Index) {
       if (Index < Desc.getNumOperands()) {
         if (Desc.getOperandConstraint(Index, MCOI::TIED_TO) != -1)
           continue;
-        if (Desc.operands()[Index].OperandType == MCOI::OPERAND_MEMORY
-            and Index + 4 < I.getNumOperands()) {
+        bool Memory = Desc.operands()[Index].OperandType
+                        == MCOI::OPERAND_MEMORY
+                      or (Name.Family == "LEA" and Index == 1);
+        if (Memory and Index + 4 < I.getNumOperands()) {
           Operand M;
           M.K = Operand::Memory;
           M.Base = I.getOperand(Index).getReg();

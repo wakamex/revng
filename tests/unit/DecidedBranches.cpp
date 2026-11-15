@@ -229,6 +229,16 @@ BOOST_AUTO_TEST_CASE(JumpThroughVtableIsATailCall) {
               == Decisions{ { 1, true } }));
 }
 
+BOOST_AUTO_TEST_CASE(LeaIntoA32BitRegister) {
+  // mov ecx, 0xed961135; lea eax, [rcx + 0x3c232685]; cmp eax, 0x29b937ba;
+  // jne +1; int3; ret: eax is the low half of the sum
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xb9, 0x35, 0x11, 0x96, 0xed, 0x8d, 0x81, 0x85, 0x26,
+                          0x23, 0x3c, 0x3d, 0xba, 0x37, 0xb9, 0x29, 0x75, 0x01,
+                          0xcc, 0xc3 })
+              == Decisions{ { 16, false } }));
+}
+
 BOOST_AUTO_TEST_CASE(RexWJumpThroughRegisterIsATailCall) {
   // stc; jb +1; int3; rex.WB jmp r9: MSVC's tail call at the end of an
   // epilogue; without REX.W, jmp r9 could be a switch
