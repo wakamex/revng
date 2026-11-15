@@ -57,7 +57,11 @@ enum Values {
   /// A function entry of the unwind information, registered with
   /// -functions-from-unwind-entries whether or not anything refers to it
   UnwindSeed = InsideFunction << 1,
-  LastReason = UnwindSeed
+  /// With -functions-from-unwind-entries, in a PE program's code outside every
+  /// unwind range, where leaf functions lie: a pointer in data to it is a
+  /// function entry
+  OutsideFunctions = UnwindSeed << 1,
+  LastReason = OutsideFunctions
 };
 
 inline const char *getName(Values Reason) {
@@ -94,6 +98,8 @@ inline const char *getName(Values Reason) {
     return "InsideFunction";
   case UnwindSeed:
     return "UnwindSeed";
+  case OutsideFunctions:
+    return "OutsideFunctions";
   }
 
   revng_abort();
@@ -132,6 +138,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return InsideFunction;
   else if (ReasonName == "UnwindSeed")
     return UnwindSeed;
+  else if (ReasonName == "OutsideFunctions")
+    return OutsideFunctions;
   else
     revng_abort();
 }

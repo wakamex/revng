@@ -80,6 +80,12 @@ private:
       bool IsLoadAddress = hasReason(Reasons, JumpTargetReason::LoadAddress);
       bool IsUnwindEntry = hasReason(Reasons, JumpTargetReason::UnwindEntry);
       bool IsUnwindSeed = hasReason(Reasons, JumpTargetReason::UnwindSeed);
+      // A pointer in data to code outside every unwind range, such as a
+      // vtable's to a leaf function, points to a function's start, even when
+      // code loads it or jumps to it as a tail call
+      bool IsLeafPointer = hasReason(Reasons,
+                                     JumpTargetReason::OutsideFunctions)
+                           and (IsGlobalData or IsUnusedGlobalData);
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
       revng_log(Log, Entry.toString()
@@ -107,14 +113,14 @@ private:
       bool Interesting = (IsSimpleLiteral or IsUnusedGlobalData
                           or (IsMemoryStore and not IsPCStore)
                           or ((IsGlobalData or IsDirectJump) and IsUnwindEntry)
-                          or IsUnwindSeed);
+                          or IsUnwindSeed or IsLeafPointer);
       // A pointer to the start of a function in the unwind information is a
       // function entry even when another function's CFG reaches it by falling
       // through, as one does past a call it does not know to be no-return, or
       // when a tail call jumps to it. For the same reason it is one when it
       // follows a call, which makes it look like a return address: a function
       // starting there means the call does not return.
-      bool Ignore = not IsUnwindEntry
+      bool Ignore = not IsUnwindEntry and not IsLeafPointer
                     and (IsReturnAddress or IsPartOfOtherCFG or IsDirectJump);
       if (Interesting and not Ignore) {
 

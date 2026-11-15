@@ -1438,6 +1438,8 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
 
   if (unwindRanges().isInsideFunction(PC))
     NewJumpTarget.setReason(JumpTargetReason::InsideFunction);
+  else if (FunctionsFromUnwindEntries and unwindRanges().isGapCode(PC))
+    NewJumpTarget.setReason(JumpTargetReason::OutsideFunctions);
 
   // PC was not a jump target, record it as new
   if (ValueMaterializerPCWhiteList.insert(PC).second)
