@@ -1088,18 +1088,24 @@ DecidedBranches::walk(uint64_t Entry,
                            S });
         } else if (Desc.isIndirectBranch()) {
           // A jump through memory reads a function pointer, as from an
-          // import slot or a vtable: a tail call. A switch jumps through a
-          // register, or through memory indexed by a register, as in
-          // `jmp [table + rcx * 8]`, whose destinations are unknown
+          // import slot or a vtable: a tail call. So is a jump through a
+          // register with a REX.W prefix, which does not change it and which
+          // MSVC writes only to end an epilogue, so that the x64 unwinder
+          // recognises the jump as leaving the function. A switch jumps
+          // through a register, or through memory indexed by a register, as
+          // in `jmp [table + rcx * 8]`, whose destinations are unknown
           bool ThroughMemory = (Name == "JMP64m" or Name == "JMP32m")
                                and Instruction.getOperand(2).getReg() == 0;
+          bool RexWRegister = Name == "JMP64r" and Size >= 3
+                              and (Code[Size - 3] & 0xF8) == 0x48;
+          bool TailCall = ThroughMemory or RexWRegister;
           std::optional<std::vector<uint64_t>> Targets;
-          if (Indirect and not ThroughMemory)
+          if (Indirect and not TailCall)
             Targets = Indirect(Address);
           if (Targets)
             for (uint64_t Target : *Targets)
               Work.push_back({ Target, S });
-          else if (not ThroughMemory) {
+          else if (not TailCall) {
             revng_log(Log,
                       "The destinations of the jump at 0x"
                         << Twine::utohexstr(Address).str() << " are unknown");

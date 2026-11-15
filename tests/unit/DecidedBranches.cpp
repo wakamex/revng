@@ -229,6 +229,16 @@ BOOST_AUTO_TEST_CASE(JumpThroughVtableIsATailCall) {
               == Decisions{ { 1, true } }));
 }
 
+BOOST_AUTO_TEST_CASE(RexWJumpThroughRegisterIsATailCall) {
+  // stc; jb +1; int3; rex.WB jmp r9: MSVC's tail call at the end of an
+  // epilogue; without REX.W, jmp r9 could be a switch
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0x49, 0xff, 0xe1 })
+              == Decisions{ { 1, true } }));
+  BOOST_TEST((F.decided({ 0xf9, 0x72, 0x01, 0xcc, 0x41, 0xff, 0xe1 })
+              == Decisions{}));
+}
+
 BOOST_AUTO_TEST_CASE(IcebpEndsThePath) {
   // test eax, eax; je +3; int1; stc; nop; jb +1; int3; ret: past int1 nothing
   // runs, so the stc that would disagree with the carry test clears is not
