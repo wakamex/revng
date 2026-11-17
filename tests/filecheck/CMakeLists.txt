@@ -514,6 +514,7 @@ set(FILECHECK_TESTS
     lift/translate-only-live-code-chained-pe.S
     lift/functions-from-unwind-entries-pe.S
     lift/functions-from-leaf-pointers-pe.S
+    lift/functions-from-leaf-literals-pe.S
     lift/branch-to-copied-entry.S
     lift/gvec-equality.S
     lift/helper-abort-message.S

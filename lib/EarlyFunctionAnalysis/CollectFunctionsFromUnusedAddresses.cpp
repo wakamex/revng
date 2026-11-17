@@ -80,12 +80,14 @@ private:
       bool IsLoadAddress = hasReason(Reasons, JumpTargetReason::LoadAddress);
       bool IsUnwindEntry = hasReason(Reasons, JumpTargetReason::UnwindEntry);
       bool IsUnwindSeed = hasReason(Reasons, JumpTargetReason::UnwindSeed);
-      // A pointer in data to code outside every unwind range, such as a
-      // vtable's to a leaf function, points to a function's start, even when
-      // code loads it or jumps to it as a tail call
+      // A pointer to code outside every unwind range, such as a vtable's to a
+      // leaf function or a callback's address that code computes, points to a
+      // function's start, even when code loads it or jumps to it as a tail
+      // call
       bool IsLeafPointer = hasReason(Reasons,
                                      JumpTargetReason::OutsideFunctions)
-                           and (IsGlobalData or IsUnusedGlobalData);
+                           and (IsGlobalData or IsUnusedGlobalData
+                                or IsSimpleLiteral);
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
       revng_log(Log, Entry.toString()
