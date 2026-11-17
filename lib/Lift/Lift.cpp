@@ -6,6 +6,7 @@
 #include "revng/Lift/LibTcg.h"
 #include "revng/Lift/Lift.h"
 #include "revng/Support/CommandLine.h"
+#include "revng/Support/Debug.h"
 #include "revng/Support/IRHelperRegistry.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/Support/NewPC.h"
@@ -148,11 +149,18 @@ static llvm::Error checkPrecondition(const model::Binary &Model) {
   return llvm::Error::success();
 }
 
+static Logger InvalidationLog("lift-invalidation");
+
+/// Whether a model change makes the lift stale: it adds a function whose entry
+/// is not a jump target of the lifted code, or removes one whose entry became a
+/// jump target only because it was a function. With the lift-invalidation log
+/// enabled, every such function is logged, not only the first.
 static bool shouldInvalidateRoot(const std::map<MetaAddress, bool> &JumpTargets,
                                  const TupleTreeDiff<model::Binary> &Diff) {
   // Inspect the diff looking for newly added model::Functions
   using Fields = TupleLikeTraits<model::Binary>::Fields;
   size_t FunctionsIndex = static_cast<size_t>(Fields::Functions);
+  bool Invalidate = false;
   for (const auto &Change : Diff.Changes) {
     bool IsAddition = not Change.Old.has_value() and Change.New.has_value();
     bool IsRemoval = Change.Old.has_value() and not Change.New.has_value();
@@ -173,17 +181,25 @@ static bool shouldInvalidateRoot(const std::map<MetaAddress, bool> &JumpTargets,
 
       if (IsAddition and not IsJumpTarget) {
         // We're adding a function that was not a jump target
-        return true;
+        revng_log(InvalidationLog,
+                  "added function " << ChangedAddress.toString()
+                                    << " is not a jump target");
+        Invalidate = true;
       } else if (IsRemoval and DependsOnModelFunction) {
         // We're removing a function whose address was not discovered *before*
         // starting to take into account the entry addresses of model
         // functions
-        return true;
+        revng_log(InvalidationLog,
+                  "removed function " << ChangedAddress.toString()
+                                      << " made its entry a jump target");
+        Invalidate = true;
       }
+      if (Invalidate and not InvalidationLog.isEnabled())
+        return true;
     }
   }
 
-  return false;
+  return Invalidate;
 }
 
 namespace revng::pypeline::piperuns {
