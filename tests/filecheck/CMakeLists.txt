@@ -140,6 +140,7 @@ set(FILECHECK_TESTS
     clift/emit-field-accesses/struct-nested-access.mlir
     clift/emit-field-accesses/struct-pointer-field-target.mlir
     clift/emit-field-accesses/struct-ptradd-access.mlir
+    clift/emit-field-accesses/struct-field-through-retyped-subscript.mlir
     clift/emit-field-accesses/struct-score-commonstrides.mlir
     clift/emit-field-accesses/struct-score-depth.mlir
     clift/emit-field-accesses/struct-score-sizerelation.mlir

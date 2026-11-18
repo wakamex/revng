@@ -156,6 +156,14 @@ private:
   RecursiveCoroutine<std::optional<PointerArithmetic>>
   composePtrAdd(PtrAddOp PtrAdd);
 
+  // `&P[I]`, the address of a subscript, is `P + I` in units of `P`'s pointee,
+  // as a `ptr_add` is
+  RecursiveCoroutine<std::optional<PointerArithmetic>>
+  composeAddressofSubscript(SubscriptOp Subscript);
+
+  RecursiveCoroutine<std::optional<PointerArithmetic>>
+  composePointerPlusIndex(mlir::Value Pointer, mlir::Value Index);
+
   RecursiveCoroutine<std::optional<PointerArithmetic>> composeMul(MulOp Mul);
   RecursiveCoroutine<std::optional<PointerArithmetic>> composeShl(ShlOp Shl);
 
@@ -270,6 +278,25 @@ PointerArithmeticBuilder::computePointerArithmetic(ExpressionOpInterface
   return Result;
 }
 
+/// Whether `Addressof` takes the address of a subscript of a pointer cast from
+/// a pointer to another type, as `&((char *) P)[I]` once type refinement has
+/// given `P` a struct type after the access was rewritten as a byte subscript.
+/// A subscript of a pointer of its own type is what field access emission
+/// writes for an array element, and is left alone so that the rewrite stays
+/// idempotent.
+static bool isSubscriptOfRetypedPointer(AddressofOp Addressof) {
+  auto Subscript = Addressof.getObject().getDefiningOp<SubscriptOp>();
+  if (not Subscript)
+    return false;
+  auto Cast = Subscript.getPointer().getDefiningOp<BitCastOp>();
+  if (not Cast)
+    return false;
+  auto From = clift::unwrapped_dyn_cast<clift::PointerType>(Cast->getOperand(0)
+                                                              .getType());
+  auto To = clift::unwrapped_dyn_cast<clift::PointerType>(Cast.getType());
+  return From and To and From.getPointeeType() != To.getPointeeType();
+}
+
 RecursiveCoroutine<std::optional<PointerArithmetic>>
 PointerArithmeticBuilder::traverse(mlir::Value V) {
 
@@ -282,6 +309,10 @@ PointerArithmeticBuilder::traverse(mlir::Value V) {
       rc_return rc_recur composeAdd(Add);
     } else if (auto PtrAdd = mlir::dyn_cast<PtrAddOp>(Expr.getOperation())) {
       rc_return rc_recur composePtrAdd(PtrAdd);
+    } else if (auto Addressof = mlir::dyn_cast<AddressofOp>(Expr.getOperation());
+               Addressof and isSubscriptOfRetypedPointer(Addressof)) {
+      auto Subscript = Addressof.getObject().getDefiningOp<SubscriptOp>();
+      rc_return rc_recur composeAddressofSubscript(Subscript);
     } else if (auto Mul = mlir::dyn_cast<MulOp>(Expr.getOperation())) {
       rc_return rc_recur composeMul(Mul);
     } else if (auto Shl = mlir::dyn_cast<ShlOp>(Expr.getOperation())) {
@@ -419,9 +450,22 @@ PointerArithmeticBuilder::composeAdd(AddOp Add) {
 
 RecursiveCoroutine<std::optional<PointerArithmetic>>
 PointerArithmeticBuilder::composePtrAdd(PtrAddOp PtrAdd) {
+  rc_return rc_recur composePointerPlusIndex(PtrAdd.getPointer(),
+                                             PtrAdd.getOffset());
+}
 
-  auto PointerOperandPA = rc_recur traverse(PtrAdd.getPointer());
-  auto OffsetOperandPA = rc_recur traverse(PtrAdd.getOffset());
+RecursiveCoroutine<std::optional<PointerArithmetic>>
+PointerArithmeticBuilder::composeAddressofSubscript(SubscriptOp Subscript) {
+  rc_return rc_recur composePointerPlusIndex(Subscript.getPointer(),
+                                             Subscript.getIndex());
+}
+
+RecursiveCoroutine<std::optional<PointerArithmetic>>
+PointerArithmeticBuilder::composePointerPlusIndex(mlir::Value Pointer,
+                                                  mlir::Value Index) {
+
+  auto PointerOperandPA = rc_recur traverse(Pointer);
+  auto OffsetOperandPA = rc_recur traverse(Index);
 
   auto Result = combineAddOperands(PointerOperandPA, OffsetOperandPA);
   if (not Result) {
@@ -430,8 +474,7 @@ PointerArithmeticBuilder::composePtrAdd(PtrAddOp PtrAdd) {
 
   // For `ptr_add`, the offset is in units of the pointee type, so we scale
   // the `OffsetOperand` contributions by the `PointeeType` size
-  auto PointerType = clift::unwrapped_cast<clift::PointerType>(PtrAdd
-                                                                 .getPointer()
+  auto PointerType = clift::unwrapped_cast<clift::PointerType>(Pointer
                                                                  .getType());
   auto PointeeSize = getObjectSize(PointerType.getPointeeType());
 
