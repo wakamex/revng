@@ -11,6 +11,7 @@ revng_add_analyses_library_internal(
   FoldMagicDivisionPass.cpp
   FixPointerSize.cpp
   SplitStructPhis.cpp
+  LegalizeIntegerWidthsPass.cpp
   LoopRewriteWithCanonicalIV.cpp
   PeepholeOptimizationPass.cpp
   RemoveConstantArrayReturnsPass.cpp
