@@ -311,7 +311,30 @@ public:
     rc_return;
   }
 
+  // Whether a null pointer constant must be printed with its type: `NULL` is a
+  // `void *` in C, which cannot be dereferenced, indexed, or offset in units of
+  // the pointee.
+  static bool isTypedNullPointer(NullOp E) {
+    auto Pointer = E.getPointerType();
+    if (clift::unwrapped_isa<VoidType>(Pointer.getPointeeType()))
+      return false;
+
+    return llvm::any_of(E->getUses(), [](mlir::OpOperand &Use) {
+      mlir::Operation *User = Use.getOwner();
+      if (mlir::isa<PtrAddOp, PtrSubOp, PtrDiffOp>(User))
+        return true;
+      return mlir::isa<IndirectionOp, IndirectAccessOp, SubscriptOp>(User)
+             and Use.getOperandNumber() == 0;
+    });
+  }
+
   RecursiveCoroutine<void> emitNullPointerConstant(mlir::Value V) {
+    Tokens.emitMacro("NULL");
+    rc_return;
+  }
+
+  RecursiveCoroutine<void> emitTypedNullPointerConstant(mlir::Value V) {
+    emitCStyleCast(V.getType());
     Tokens.emitMacro("NULL");
     rc_return;
   }
@@ -702,6 +725,13 @@ public:
     }
 
     if (auto Null = mlir::dyn_cast<NullOp>(E.getOperation())) {
+      if (isTypedNullPointer(Null)) {
+        return {
+          .Precedence = OperatorPrecedence::UnaryPrefix,
+          .Emit = &CliftToCEmitter::emitTypedNullPointerConstant,
+        };
+      }
+
       return {
         .Precedence = OperatorPrecedence::Primary,
         .Emit = &CliftToCEmitter::emitNullPointerConstant,

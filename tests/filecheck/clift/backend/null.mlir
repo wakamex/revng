@@ -23,6 +23,22 @@ module attributes {clift.module} {
       %1 = clift.bitcast %0 : !clift.ptr<8 to !clift.void> -> !clift.ptr<8 to !int64_t>
       clift.yield %1 : !clift.ptr<8 to !int64_t>
     }
+
+    // A dereferenced null pointer keeps its type, since NULL is a void *.
+    // CHECK: *(int64_t *) NULL;
+    clift.expr {
+      %0 = clift.null : !clift.ptr<8 to !int64_t>
+      %1 = clift.indirection %0 : !clift.ptr<8 to !int64_t>
+      clift.yield %1 : !int64_t
+    }
+
+    // CHECK: ((int64_t *) NULL)[1L];
+    clift.expr {
+      %0 = clift.null : !clift.ptr<8 to !int64_t>
+      %1 = clift.imm 1 : !int64_t
+      %2 = clift.subscript %0, %1 : (!clift.ptr<8 to !int64_t>, !int64_t)
+      clift.yield %2 : !int64_t
+    }
   }
   // CHECK: }
 }
