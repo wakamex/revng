@@ -61,7 +61,11 @@ enum Values {
   /// unwind range, where leaf functions lie: a pointer in data to it is a
   /// function entry
   OutsideFunctions = UnwindSeed << 1,
-  LastReason = OutsideFunctions
+  /// A code address that code inside an unwind range computes as a constant
+  /// and keeps in a register or in memory, as it does a callback's, rather
+  /// than branching to it
+  CodeAddressLiteral = OutsideFunctions << 1,
+  LastReason = CodeAddressLiteral
 };
 
 inline const char *getName(Values Reason) {
@@ -100,6 +104,8 @@ inline const char *getName(Values Reason) {
     return "UnwindSeed";
   case OutsideFunctions:
     return "OutsideFunctions";
+  case CodeAddressLiteral:
+    return "CodeAddressLiteral";
   }
 
   revng_abort();
@@ -140,6 +146,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return UnwindSeed;
   else if (ReasonName == "OutsideFunctions")
     return OutsideFunctions;
+  else if (ReasonName == "CodeAddressLiteral")
+    return CodeAddressLiteral;
   else
     revng_abort();
 }

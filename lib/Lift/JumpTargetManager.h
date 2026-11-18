@@ -568,10 +568,18 @@ public:
   /// \p Source is the instruction the literal comes from: one in code between
   /// the functions the unwind information describes, such as junk, does not
   /// make the literal a root of that code.
-  void registerSimpleLiteral(MetaAddress Address, MetaAddress Source) {
+  /// \p Computed tells a constant code address an instruction keeps in a
+  /// register or in memory from the target of a branch, a constant stored to
+  /// the program counter
+  void registerSimpleLiteral(MetaAddress Address,
+                             MetaAddress Source,
+                             bool Computed) {
     SimpleLiterals.insert(Address);
-    if (not unwindRanges().isGapCode(Source))
+    if (not unwindRanges().isGapCode(Source)) {
       LiteralsFromFunctionCode.insert(Address);
+      if (Computed)
+        CodeAddressLiterals.insert(Address);
+    }
   }
 
   ProgramCounterHandler *programCounterHandler() { return PCH; }
@@ -648,6 +656,7 @@ private:
   std::set<MetaAddress> SimpleLiterals;
   /// The simple literals that code of a function, not gap code, holds
   std::set<MetaAddress> LiteralsFromFunctionCode;
+  std::set<MetaAddress> CodeAddressLiterals;
 
   ProgramCounterHandler *PCH = nullptr;
 

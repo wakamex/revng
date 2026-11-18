@@ -80,14 +80,17 @@ private:
       bool IsLoadAddress = hasReason(Reasons, JumpTargetReason::LoadAddress);
       bool IsUnwindEntry = hasReason(Reasons, JumpTargetReason::UnwindEntry);
       bool IsUnwindSeed = hasReason(Reasons, JumpTargetReason::UnwindSeed);
+      bool IsCodeAddressLiteral = hasReason(Reasons,
+                                            JumpTargetReason::CodeAddressLiteral);
       // A pointer to code outside every unwind range, such as a vtable's to a
-      // leaf function or a callback's address that code computes, points to a
-      // function's start, even when code loads it or jumps to it as a tail
-      // call
+      // leaf function or a callback's address that a function computes,
+      // points to a function's start, even when code loads it or jumps to it
+      // as a tail call. A branch's target is a constant too, but not one that
+      // code keeps: it is not a pointer.
       bool IsLeafPointer = hasReason(Reasons,
                                      JumpTargetReason::OutsideFunctions)
                            and (IsGlobalData or IsUnusedGlobalData
-                                or IsSimpleLiteral);
+                                or IsCodeAddressLiteral);
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
       revng_log(Log, Entry.toString()

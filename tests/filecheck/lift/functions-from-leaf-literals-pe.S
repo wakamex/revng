@@ -6,7 +6,8 @@
 # functions lie, that code computes as a constant, as it does a callback's, is
 # a function entry, even when code also jumps to it as a tail call. `start`
 # passes `leaf1`'s address to `register` in a register, without storing it, and
-# jumps to it.
+# jumps to it. The blocks `leaf1` branches to are not functions: their addresses
+# are constants too, but they lie in `leaf1`'s control flow graph.
 #
 # RUN: clang --target=x86_64-pc-windows-msvc -c %s -o %t.obj
 # RUN: lld-link /entry:start /subsystem:console /nodefaultlib /out:%t.exe %t.obj
@@ -15,6 +16,7 @@
 # CHECK-LABEL: {{^}}Functions:
 # CHECK: Entry: "0x140001000:Code_x86_64"
 # CHECK: Entry: "0x140001040:Code_x86_64"
+# CHECK-NOT: Entry: "0x14000104{{[1-9a-f]}}:Code_x86_64"
 # CHECK: Entry: "0x140001080:Code_x86_64"
 # CHECK: {{^}}TypeDefinitions:
 
@@ -35,6 +37,11 @@ start:
 .p2align 6, 0xcc
 leaf1:
   mov $1, %eax
+  test %ecx, %ecx
+  jne leaf1_inner
+  ret
+leaf1_inner:
+  mov $2, %eax
   ret
 
 .p2align 6, 0xcc

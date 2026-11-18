@@ -1693,8 +1693,12 @@ void JumpTargetManager::harvest() {
     T.advance("Simple literals");
     HarvestingStats.push("harvest 1: SimpleLiterals");
     revng_log(JTCountLog, "Collecting simple literals");
-    for (MetaAddress PC : SimpleLiterals)
+    for (MetaAddress PC : SimpleLiterals) {
       registerJT(PC, JumpTargetReason::SimpleLiteral);
+      if (CodeAddressLiterals.contains(PC))
+        if (auto It = JumpTargets.find(PC); It != JumpTargets.end())
+          It->second.setReason(JumpTargetReason::CodeAddressLiteral);
+    }
     SimpleLiterals.clear();
   }
 

@@ -690,7 +690,8 @@ IT::TranslationResult IT::translate(LibTcgInstruction *Instr,
 
     auto *Store = Builder.CreateStore(Result[I], Destination);
 
-    if (PCH->affectsPC(Store)) {
+    bool IsPCStore = PCH->affectsPC(Store);
+    if (IsPCStore) {
       // This is a PC-related store
       PCH->handleStore(Builder, Store);
     }
@@ -710,7 +711,7 @@ IT::TranslationResult IT::translate(LibTcgInstruction *Instr,
       MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
       if (Address.isValid() and PC != Address and JumpTargets.isPC(Address)
           and not JumpTargets.hasJT(Address)) {
-        JumpTargets.registerSimpleLiteral(Address, LastPC);
+        JumpTargets.registerSimpleLiteral(Address, LastPC, not IsPCStore);
       }
     }
   }
@@ -965,7 +966,7 @@ IT::translateOpcode(LibTcgOpcode Opcode,
         MetaAddress Address = JumpTargets.fromPC(Constant->getLimitedValue());
         if (Address.isValid() and JumpTargets.isPC(Address)
             and not JumpTargets.hasJT(Address)) {
-          JumpTargets.registerSimpleLiteral(Address, LastPC);
+          JumpTargets.registerSimpleLiteral(Address, LastPC, true);
         }
       }
 
