@@ -1072,9 +1072,23 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
   // A jump through a table whose index the analysis cannot bound gets no
   // values. When its instructions are the usual switch dispatch, read the table
   // and keep the entries that lead into the jump's function.
-  for (auto &[ID, Operands] : MaterializedValuesById)
-    if (Operands.empty())
+  // So does a jump with several values some of which are not code: without a
+  // bound on the index, the analysis reads past the end of the table, and a
+  // jump keeps its values only if all of them are good.
+  auto LeadsToCode = [&](const Entry &Operand) {
+    if (Operand.SymbolName.size() != 0)
+      return true;
+    MetaAddress Target = MetaAddress::decomposeIntegerPC(Operand.Value);
+    return Target.isValid() and JTM.isPC(Target);
+  };
+  for (auto &[ID, Operands] : MaterializedValuesById) {
+    auto TV = AR.rootInstructionById(ID);
+    if (Operands.empty()
+        or (TV.Type == TrackedInstructionType::WrittenInPC
+            and Operands.size() > 1
+            and not llvm::all_of(Operands, LeadsToCode)))
       Unmaterialized.insert(ID);
+  }
   for (uint32_t ValueMaterializerID : Unmaterialized) {
     auto TV = AR.rootInstructionById(ValueMaterializerID);
     if (TV.Type != TrackedInstructionType::WrittenInPC)
@@ -1086,8 +1100,8 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
     revng_log(JumpTableExtentLog,
               "Jump at " << TV.Address.toString() << ": " << Table->first.size()
                          << " destinations read from its table");
-    revng_assert(MaterializedValuesById[ValueMaterializerID].empty());
     auto &Operands = MaterializedValuesById[ValueMaterializerID];
+    Operands.clear();
     for (auto [Target, TableEntry] : llvm::zip(Table->first, Table->second)) {
       APInt Composed(128, Target.address());
       Composed |= APInt(128, Target.epoch()) << 64;
