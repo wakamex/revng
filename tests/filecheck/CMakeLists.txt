@@ -557,6 +557,7 @@ set(FILECHECK_TESTS
     llvm-passes/dagify.ll
     llvm-passes/detect-uninlinable-helpers.ll
     llvm-passes/early-type-shrinking.ll
+    llvm-passes/loop-rewrite-with-canonical-iv-odd-width.ll
     llvm-passes/enforce-single-exit.ll
     llvm-passes/example.ll
     llvm-passes/exit-ssa-live-incoming.ll
