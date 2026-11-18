@@ -116,6 +116,9 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 | 99 | Clift refines pointers to unknown pointees | correctness (type quality) | Clift type refinement | 70 | 80 |
 | 100 | Inlining `ldmxcsr` keeps the helper's read-only rounding table | correctness (crash) | helper bitcode, enforce-abi | 70 | 85 |
 | 101 | Reverted: tolerate CFGs that disagree with the IR where decodings overlap | correctness | isolate, detect-abi | 0 | n/a |
+| 117 | A null pointer that is dereferenced, indexed or offset prints with its type, `*(T *) NULL` | correctness | C backend | 80 | 95 |
+| 118 | A loop induction rewrite that would insert an integer of no whole-byte width is discarded | correctness (crash) | LLVM passes (loop-rewrite-with-canonical-induction-variable) | 85 | 95 |
+| 119 | Struct fields reached through a pointer typed after its accesses became byte subscripts are named | correctness (type quality) | Clift field access emission | 80 | 90 |
 
 1. [`27c2e06f3`](https://github.com/wakamex/revng/commit/27c2e06f3899a5b3909cdb5833cddc682651a841): one-line regression from upstream [`48f2956fa`](https://github.com/revng/revng/commit/48f2956fa518ba7e98e0f2b955faf368b472546a); still on `develop`; test `lift/dead-csv-out-arguments.S`
 2. [`dde06b0d0`](https://github.com/wakamex/revng/commit/dde06b0d0dc495c6ad039361630df6bd163c0e27): C silently dropped bounds checks after `div`; 40-line test; touches every wrapper's signature, so noisier calls to non-inlined helpers; test `lift/helper-written-csv-passthrough.S`
@@ -196,6 +199,9 @@ Kind says what a change fixes: correctness (wrong or crashing output, with the n
 99. [`e9f8a2aaf`](https://github.com/wakamex/revng/commit/e9f8a2aaf6acfdd8aedd970d31e9fa90153b8a71): a local copied from a struct pointer kept a byte pointer type; unit test `TypeRefinement`
 100. [`35ce2b990`](https://github.com/wakamex/revng/commit/35ce2b990748142a505306961809c162083fa540): the pipeline aborted on a getelementptr left by the helper; test `lift/ldmxcsr-rounding-table.S`
 101. [`f15b4098b`](https://github.com/wakamex/revng/commit/f15b4098b4d7b8b49055f4c9fa755a2e8fe0d501), [`008cf0200`](https://github.com/wakamex/revng/commit/008cf0200aee188d3d2e7450e9ea969999816dd0), [`f45d8ce7e`](https://github.com/wakamex/revng/commit/f45d8ce7e828881d459d5044ce103f917d10c062), [`bc292406d`](https://github.com/wakamex/revng/commit/bc292406db153e1920a1c850496e6b2c516477b0), [`e3e1f3e69`](https://github.com/wakamex/revng/commit/e3e1f3e690de7d6d999ea3078762808aaf538e72): the disagreements came from junk code overlapping real code; once the lift stopped translating junk (items 103 and 110) they no longer occurred, and tolerating them could hide real bugs, so `e3e1f3e69` makes them hard failures again
+117. [`b66006210`](https://github.com/wakamex/revng/commit/b660062105337ceff9cfba89dad6839900bc211d): with item 1, Fedora 44's `ldconfig` had six loads and stores through a null pointer printed as `*NULL`, which is not C; test `clift/backend/null.mlir`
+118. [`49a456ed1`](https://github.com/wakamex/revng/commit/49a456ed14959ed5771992ab379e16ca50623d4f): `x & 31` of a counter stepping by 32 became `trunc to i5` and the Clifter aborted; a Warcraft III 3.0.1 function stopped its whole-image C; test `llvm-passes/loop-rewrite-with-canonical-iv-odd-width.ll`
+119. [`316719992`](https://github.com/wakamex/revng/commit/3167199923939fe6d96cadb96da0950258d5d60f): hl-node's BTreeMap nodes read as `*(generic16_t *) &((generic8_t *) node)[98UL]` instead of `node->len`; test `clift/emit-field-accesses/struct-field-through-retyped-subscript.mlir`
 
 ## Protected and obfuscated PE programs
 
