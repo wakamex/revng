@@ -65,7 +65,10 @@ enum Values {
   /// and keeps in a register or in memory, as it does a callback's, rather
   /// than branching to it
   CodeAddressLiteral = OutsideFunctions << 1,
-  LastReason = CodeAddressLiteral
+  /// Code outside every unwind range that starts at a 16-byte boundary right
+  /// after int3 padding, the way compilers lay out the start of a function
+  PaddedEntry = CodeAddressLiteral << 1,
+  LastReason = PaddedEntry
 };
 
 inline const char *getName(Values Reason) {
@@ -106,6 +109,8 @@ inline const char *getName(Values Reason) {
     return "OutsideFunctions";
   case CodeAddressLiteral:
     return "CodeAddressLiteral";
+  case PaddedEntry:
+    return "PaddedEntry";
   }
 
   revng_abort();
@@ -148,6 +153,8 @@ inline Values fromName(llvm::StringRef ReasonName) {
     return OutsideFunctions;
   else if (ReasonName == "CodeAddressLiteral")
     return CodeAddressLiteral;
+  else if (ReasonName == "PaddedEntry")
+    return PaddedEntry;
   else
     revng_abort();
 }

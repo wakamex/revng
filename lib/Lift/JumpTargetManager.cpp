@@ -1438,8 +1438,13 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
 
   if (unwindRanges().isInsideFunction(PC))
     NewJumpTarget.setReason(JumpTargetReason::InsideFunction);
-  else if (FunctionsFromUnwindEntries and unwindRanges().isGapCode(PC))
+  else if (FunctionsFromUnwindEntries and unwindRanges().isGapCode(PC)) {
     NewJumpTarget.setReason(JumpTargetReason::OutsideFunctions);
+    MaterializedValue Previous = BinaryView.load(PC - 1, 1, true);
+    if (PC.address() % 16 == 0 and Previous.isValid()
+        and Previous.value() == 0xCC)
+      NewJumpTarget.setReason(JumpTargetReason::PaddedEntry);
+  }
 
   // PC was not a jump target, record it as new
   if (ValueMaterializerPCWhiteList.insert(PC).second)

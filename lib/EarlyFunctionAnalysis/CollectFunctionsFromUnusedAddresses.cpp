@@ -86,11 +86,15 @@ private:
       // leaf function or a callback's address that a function computes,
       // points to a function's start, even when code loads it or jumps to it
       // as a tail call. A branch's target is a constant too, but not one that
-      // code keeps: it is not a pointer.
+      // code keeps: it is not a pointer. A direct jump to code after int3
+      // padding is a tail call, since no function's own blocks are laid out
+      // that way.
+      bool IsPaddedEntry = hasReason(Reasons, JumpTargetReason::PaddedEntry);
       bool IsLeafPointer = hasReason(Reasons,
                                      JumpTargetReason::OutsideFunctions)
                            and (IsGlobalData or IsUnusedGlobalData
-                                or IsCodeAddressLiteral);
+                                or IsCodeAddressLiteral
+                                or (IsDirectJump and IsPaddedEntry));
       bool IsPartOfOtherCFG = UsedRanges.find(Entry) != UsedRanges.end();
 
       revng_log(Log, Entry.toString()
