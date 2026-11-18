@@ -458,6 +458,7 @@ branches:
             - materialize-trivial-goto
             - strip-dead-prototypes
             - defer-allocas
+            - legalize-integer-widths
         artifacts:
           - name: clifter-input
             container: llvm-functions

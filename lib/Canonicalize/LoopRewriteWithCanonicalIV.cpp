@@ -38,28 +38,15 @@ private:
   LoopInfo &LI;
 };
 
-// Return true when T is an integer type the backend cannot represent.
-static bool isUnsupportedInteger(Type *T) {
-  if (auto *IntTy = dyn_cast<llvm::IntegerType>(T)) {
-    auto IntSize = IntTy->getIntegerBitWidth();
-    return IntSize != 1 && IntSize != 8 && IntSize != 16 && IntSize != 32
-           && IntSize != 64 && IntSize != 128;
-  }
-  return false;
-}
-
-// Return true when I produces or uses an integer the backend cannot represent.
-static bool hasUnsupportedInteger(const Instruction *I) {
-  return isUnsupportedInteger(I->getType())
-         || llvm::any_of(I->operands(), [](const Use &Operand) {
-              return isUnsupportedInteger(Operand->getType());
-            });
-}
-
 // Return true when S contains a non-power-of-two sized integer.
 bool LoopRewriteIV::isIntWithPowerOfTwoByteSize(const SCEV *S) const {
   return SCEVExprContains(S, [](const SCEV *S) {
-    return isUnsupportedInteger(S->getType());
+    if (auto *IntTy = dyn_cast<llvm::IntegerType>(S->getType())) {
+      auto IntSize = IntTy->getIntegerBitWidth();
+      return IntSize != 1 && IntSize != 8 && IntSize != 16 && IntSize != 32
+             && IntSize != 64 && IntSize != 128;
+    }
+    return false;
   });
 }
 
@@ -115,20 +102,7 @@ bool LoopRewriteIV::run(Loop &L,
       continue;
     }
 
-    // The expansion can still introduce narrow integers the expression does
-    // not contain: ScalarEvolution folds a recurrence whose step is a multiple
-    // of 2^N into one whose low N bits come from (zext iN (trunc ...)). Such
-    // an expansion is discarded, together with what it inserted.
-    SCEVExpanderCleaner Cleaner(Rewriter);
     Value *NewVal = Rewriter.expandCodeFor(AR, UseTy, InsertPt);
-    if (llvm::any_of(Rewriter.getAllInsertedInstructions(),
-                     hasUnsupportedInteger)) {
-      revng_log(Log,
-                "The expansion has non-power-of-two integer: "
-                  << dumpToString(AR));
-      continue;
-    }
-    Cleaner.markResultUsed();
 
     revng_log(Log,
               "INDVARS: Rewrote IV `" << dumpToString(AR) << "` "
