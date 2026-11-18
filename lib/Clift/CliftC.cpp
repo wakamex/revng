@@ -121,5 +121,11 @@ bool clift::isImplicitConversionInC(CastOpInterface Cast) {
 
   mlir::Type Source = unwrapTypedefs(Cast.getValueType());
 
+  // A bitwise conversion between a floating point value and an integer keeps
+  // the bits, while the implicit conversion in C keeps the number.
+  if (mlir::isa<BitCastOp>(Cast)
+      and mlir::isa<FloatType>(Source) != mlir::isa<FloatType>(Target))
+    return false;
+
   return isImplicitlyConvertibleInC(Source, Target);
 }
