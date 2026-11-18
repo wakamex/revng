@@ -186,8 +186,8 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
                                          Helper->getParent());
   HelperWrapper->setSection(Helper->getSection());
 
-  // Dead CSVs get a null out-argument: mark null as valid so the optimizer
-  // does not reason about the out arguments as if null were impossible.
+  // Dead CSVs get a null out argument: mark null as valid so the optimizer
+  // does not treat accesses through it as undefined behavior.
   HelperWrapper->addFnAttr(Attribute::NullPointerIsValid);
 
   // Copy and extend tags
@@ -229,19 +229,22 @@ Function *PromoteCSVs::createWrapper(const WrapperKey &Key) {
   // Create the function call
   auto *HelperResult = Builder.CreateCall(Helper, HelperArguments);
 
-  // Update values of the out arguments. A dead CSV's out argument is null:
-  // skip its store, so that once the wrapper is inlined at a call site with a
-  // constant null the store is pruned instead of writing to address zero.
+  // Update values of the out arguments. Dead CSVs get a null out argument:
+  // skip their store, so that it goes away once the wrapper is inlined.
   unsigned OutArgument = FirstOutArgument;
   for (GlobalVariable *CSV : Written) {
-    Argument *Out = HelperWrapper->getArg(OutArgument);
-    auto *Store = BasicBlock::Create(Context, "", HelperWrapper);
-    auto *Next = BasicBlock::Create(Context, "", HelperWrapper);
-    Builder.CreateCondBr(Builder.CreateIsNull(Out), Next, Store);
-    Builder.SetInsertPoint(Store);
-    Builder.CreateStore(Builder.createLoad(CSV), Out);
-    Builder.CreateBr(Next);
-    Builder.SetInsertPoint(Next);
+    Value *Pointer = HelperWrapper->getArg(OutArgument);
+    auto *StoreBlock = BasicBlock::Create(Context, "", HelperWrapper);
+    auto *NextBlock = BasicBlock::Create(Context, "", HelperWrapper);
+    Builder.CreateCondBr(Builder.CreateIsNotNull(Pointer),
+                         StoreBlock,
+                         NextBlock);
+
+    Builder.SetInsertPoint(StoreBlock);
+    Builder.CreateStore(Builder.createLoad(CSV), Pointer);
+    Builder.CreateBr(NextBlock);
+
+    Builder.SetInsertPoint(NextBlock);
     ++OutArgument;
   }
 

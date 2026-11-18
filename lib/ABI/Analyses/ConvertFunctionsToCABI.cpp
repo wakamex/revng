@@ -13,9 +13,11 @@
 #include "revng/Model/Pass/PurgeUnnamedAndUnreachableTypes.h"
 #include "revng/Model/RawFunctionDefinition.h"
 #include "revng/Model/TypeDefinition.h"
-#include "revng/Model/VerifyHelper.h"
 #include "revng/Support/IRHelpers.h"
 #include "revng/TupleTree/TupleTree.h"
+
+// TODO: Also take advantage of `::edges()` helpers for traversing
+//       the file system.
 
 static Logger Log("function-type-conversion-to-cabi-analysis");
 
@@ -26,9 +28,8 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
   // Minimize the negative impact on binaries with ABI that is not fully
   // supported by disabling the conversion by default.
   //
-  // Use `--convert-functions-to-cabi-mode=unsafe` to force conversion even
-  // when ABI is not considered fully tested.
-  if (Mode == "safe") {
+  // Pass `Mode: unsafe` as a pipe configuration option to run on any ABI.
+  if (Mode != "unsafe") {
     // TODO: extend this list.
     static constexpr std::array ABIsTheConversionIsEnabledFor = {
       model::ABI::SystemV_x86_64,
@@ -46,12 +47,17 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
       model::ABI::Microsoft_x86_stdcall_gcc,
       model::ABI::Microsoft_x86_thiscall,
       model::ABI::Microsoft_x86_vectorcall,
-      model::ABI::AAPCS,
-      model::ABI::AAPCS64
+      model::ABI::AAPCS_hardfloat,
+      model::ABI::AAPCS_softfloat,
+      model::ABI::AAPCS64,
+      model::ABI::Apple_AAPCS64,
+      model::ABI::Microsoft_AAPCS64
 
       // There are known issues
-      // model::ABI::SystemV_MIPS_o32,
-      // model::ABI::SystemV_MIPSEL_o32
+      // model::ABI::SystemV_MIPS_o32_hardfloat,
+      // model::ABI::SystemV_MIPS_o32_softfloat,
+      // model::ABI::SystemV_MIPSEL_o32_hardfloat,
+      // model::ABI::SystemV_MIPSEL_o32_softfloat,
 
       // Unable to reliably test: QEMU aborts
       // model::ABI::SystemZ_s390x,
@@ -115,7 +121,6 @@ static void convertFunctionsToCABI(TupleTree<model::Binary> &Model,
     Replacements;
   for (model::RawFunctionDefinition *Old : ToConvert) {
     LogFunctionName(Old->key());
-
 
     namespace FT = abi::FunctionType;
     if (auto New = FT::tryMakeCABIFunction(*Old, Model, ABI, SoftDeductions)) {

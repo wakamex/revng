@@ -42,14 +42,12 @@ public:
     return std::views::keys(Modules) | revng::to<std::set<ObjectID>>();
   }
 
-  void
-  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+  void deserialize(const RawObjectMap Data) {
     deserialize(Data, /*Verify=*/true);
   }
 
 protected:
-  void deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data,
-                   bool Verify) {
+  void deserialize(const RawObjectMap Data, bool Verify) {
     const mlir::ParserConfig Config(Context.get(), Verify);
     for (auto const &[Object, Buffer] : Data) {
       revng_assert(Object->kind() == Kind);
@@ -129,8 +127,7 @@ public:
   /// Modules are not verified on reading: until `prepareFor` defines their
   /// model types they reach incomplete class types, which a Clift module
   /// cannot contain
-  void
-  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+  void deserialize(const RawObjectMap Data) {
     Base::deserialize(Data, /*Verify=*/false);
   }
 
@@ -179,8 +176,7 @@ public:
       return std::set{ ObjectID() };
   }
 
-  void
-  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+  void deserialize(const RawObjectMap Data) {
     if (Data.size() == 0)
       return;
 

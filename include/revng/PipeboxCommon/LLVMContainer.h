@@ -50,8 +50,7 @@ public:
       return std::set{ ObjectID() };
   }
 
-  void
-  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+  void deserialize(const RawObjectMap Data) {
     if (Data.size() == 0)
       return;
 
@@ -136,8 +135,7 @@ public:
     return Result;
   }
 
-  void
-  deserialize(const std::map<const ObjectID *, llvm::ArrayRef<char>> Data) {
+  void deserialize(const RawObjectMap Data) {
     for (auto const &[Object, Buffer] : Data) {
       Modules.erase(*Object);
       Unparsed[*Object].assign(Buffer.begin(), Buffer.end());

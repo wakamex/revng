@@ -31,6 +31,7 @@
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 
 #include "revng/ABI/FunctionType/Layout.h"
+#include "revng/ADT/Ordering.h"
 #include "revng/BasicAnalyses/RootFunction.h"
 #include "revng/BasicAnalyses/ShrinkInstructionOperandsPass.h"
 #include "revng/FunctionCallIdentification/FunctionCallIdentification.h"
@@ -971,21 +972,18 @@ void RootAnalyzer::collectMaterializedValues(AnalysisRegistry &AR) {
       return SymbolName == Other.SymbolName and Value == Other.Value;
     }
 
-    // Order by value, not by the address of the uniqued constant: the order
-    // decides the order in which new jump targets, and their blocks, are
-    // created
-    bool operator<(const Entry &Other) const {
-      if (SymbolName != Other.SymbolName)
-        return SymbolName < Other.SymbolName;
+    /// Implement deterministic comparison
+    std::strong_ordering operator<=>(const Entry &Other) const {
+      std::strong_ordering Comparison = compareStrings(SymbolName,
+                                                       Other.SymbolName);
+      if (Comparison != std::strong_ordering::equal)
+        return Comparison;
 
-      const APInt &LHS = Value->getValue();
-      const APInt &RHS = Other.Value->getValue();
-      if (LHS.getBitWidth() != RHS.getBitWidth())
-        return LHS.getBitWidth() < RHS.getBitWidth();
-
-      return LHS.ult(RHS);
+      return compareConstantInts(Value, Other.Value);
     }
   };
+  /// The entries are sorted below, so their order must not depend on
+  /// addresses: it decides the order jump targets are registered in
   std::map<uint32_t, SmallVector<Entry>> MaterializedValuesById;
   // The instructions value materialization produced nothing for
   std::set<uint32_t> Unmaterialized;

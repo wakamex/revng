@@ -4,6 +4,11 @@
 /// intended ABI no matter what kind of work was done on top of it. It works
 /// with both `RawFunctionDefinition` and `CABIFunctionDefinition`.
 ///
+/// The first positional argument is the expected type kind (either
+/// `CABIFunctionDefinition` or `RawFunctionDefinition`): an error is generated
+/// if *any* `test_` function has a prototype that does not match this
+/// expectation.
+///
 /// \note: This tool requires a runtime abi artifact. It can be obtained using
 /// revng-qa. For more information see the corresponding repository.
 
@@ -17,12 +22,16 @@
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/Signals.h"
 
 #include "revng/Model/Binary.h"
+#include "revng/Model/TypeDefinitionKind.h"
 #include "revng/Support/Debug.h"
 #include "revng/Support/InitRevng.h"
+#include "revng/Support/YAMLTraits.h"
 
 #include "ABIRuntimeTestResultParser.h"
 #include "Verify.h"
@@ -37,9 +46,9 @@ template<size_t... Indices>
 static auto packValues(std::integer_sequence<size_t, Indices...>) {
   using namespace llvm::cl;
   using namespace model::ABI;
-  return values(OptionEnumValue{ getName(Values(Indices)),
-                                 int(Indices),
-                                 getDescription(Values(Indices)) }...);
+  return values(OptionEnumValue{ getName(Values(Indices + 1)),
+                                 int(Indices + 1),
+                                 getDescription(Values(Indices + 1)) }...);
 }
 
 constexpr auto ABIList = std::make_index_sequence<model::ABI::Count - 1>{};
@@ -48,6 +57,11 @@ static opt<model::ABI::Values> TargetABI("abi",
                                          packValues(ABIList),
                                          desc(Description),
                                          cat(ThisToolCategory));
+
+static opt<std::string> ExpectedPrototypeKind(Positional,
+                                              Required,
+                                              desc("<verify type>"),
+                                              cat(ThisToolCategory));
 
 static opt<std::string> Filename(Positional,
                                  Required,
@@ -59,10 +73,23 @@ static opt<std::string> Artifact(Positional,
                                  desc("<runtime abi artifact name>"),
                                  cat(ThisToolCategory));
 
+constexpr const char *SaveLayoutsDescription = "Save the ABI layout of every "
+                                               "tested function to the given "
+                                               "YAML file.";
+static opt<std::string> SaveLayouts("save-layouts",
+                                    desc(SaveLayoutsDescription),
+                                    value_desc("<output file name>"),
+                                    cat(ThisToolCategory));
+
 } // namespace Options
 
 int main(int argc, char *argv[]) {
   revng::InitRevng X(argc, argv, "", { &Options::ThisToolCategory });
+
+  namespace TDK = model::TypeDefinitionKind;
+  auto ExpectedPrototypeKind = TDK::fromName(Options::ExpectedPrototypeKind);
+  revng_assert(ExpectedPrototypeKind == TDK::CABIFunctionDefinition
+               or ExpectedPrototypeKind == TDK::RawFunctionDefinition);
 
   auto InputOrError = llvm::MemoryBuffer::getFileOrSTDIN(Options::Filename);
   if (!InputOrError) {
@@ -98,5 +125,23 @@ int main(int argc, char *argv[]) {
     revng_abort(Error.c_str());
   }
 
-  verifyABI(*Deserialized, Artifact, Options::TargetABI);
+  std::optional<std::vector<FunctionLayoutEntry>> Layouts;
+  if (Options::SaveLayouts.getNumOccurrences() != 0)
+    Layouts.emplace();
+
+  verifyABI(*Deserialized,
+            Artifact,
+            Options::TargetABI,
+            ExpectedPrototypeKind,
+            Layouts);
+
+  if (Layouts) {
+    auto Error = serializeToFile(*Layouts, Options::SaveLayouts);
+    if (Error) {
+      std::string Message = "Unable to save the layouts to `"
+                            + Options::SaveLayouts
+                            + "`: " + consumeToString(std::move(Error)) + ".";
+      revng_abort(Message.c_str());
+    }
+  }
 }

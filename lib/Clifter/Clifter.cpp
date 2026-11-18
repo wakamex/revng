@@ -646,9 +646,14 @@ private:
     if (ET == nullptr or ET->getBitWidth() != 8)
       return false;
 
-    const llvm::Constant *Init = V->getInitializer();
-    if (Init == nullptr)
+    if (not V->hasInitializer()) {
+      revng_log(ExpressionLog,
+                "Constant array of bytes " << V->getName()
+                                           << " has no initializer. Ignoring.");
       return false;
+    }
+
+    const llvm::Constant *Init = V->getInitializer();
     revng_assert(Init->getType() == Type);
 
     const auto *Array = llvm::dyn_cast<llvm::ConstantDataArray>(Init);
@@ -830,13 +835,15 @@ private:
   mlir::Value emitImplicitBitcast(mlir::Location Loc,
                                   mlir::Value Value,
                                   mlir::Type TargetType) {
+    revng_assert(not isConst(TargetType));
+
     mlir::Type SourceType = Value.getType();
 
     // A cast yields a value, which has no qualifiers: a parameter the model
     // declares as a const pointer takes a plain pointer.
     TargetType = removeConst(TargetType);
 
-    if (SourceType == TargetType)
+    if (clift::equivalent(SourceType, TargetType))
       return Value;
 
     auto SourceT = clift::unwrapped_dyn_cast<ValueType>(SourceType);
@@ -951,7 +958,7 @@ private:
     llvm::SmallVector<mlir::Value> Initializers;
     for (const auto &[A, F] : llvm::zip(Call->args(), T.getFields())) {
       mlir::Value Value = rc_recur emitExpression(A, Loc);
-      Value = emitImplicitBitcast(Loc, Value, F.getType());
+      Value = emitImplicitBitcast(Loc, Value, removeConst(F.getType()));
       Initializers.push_back(Value);
     }
 
@@ -1087,16 +1094,10 @@ private:
     }
 
     if (auto N = llvm::dyn_cast<llvm::ConstantPointerNull>(V)) {
-      revng_log(ExpressionLog, "llvm::ConstantPointerNull -> ImmediateOp");
+      revng_log(ExpressionLog, "llvm::ConstantPointerNull -> NullOp");
 
-      auto Op = Builder.create<ImmediateOp>(SurroundingLocation,
-                                            C.getIntptrType(),
-                                            /*Value=*/0);
-
-      LoggerIndent Indent(ExpressionLog);
-      rc_return emitImplicitBitcast(SurroundingLocation,
-                                    Op,
-                                    C.getVoidPointerType());
+      rc_return Builder.create<NullOp>(SurroundingLocation,
+                                       C.getVoidPointerType());
     }
 
     if (auto E = llvm::dyn_cast<llvm::ConstantExpr>(V)) {
@@ -1423,7 +1424,7 @@ private:
         Callee = emitImplicitBitcast(Loc, Callee, C.getPointerType(CallType));
       }
 
-      llvm::ArrayRef LayoutArguments = getLayoutArguments(Layout);
+      llvm::ArrayRef LayoutArguments = Layout.argumentsForC();
       revng_assert(I->arg_size() == LayoutArguments.size());
       revng_assert(I->arg_size() == CallType.getArgumentTypes().size());
 
@@ -1447,7 +1448,7 @@ private:
                                          C.getModelPointerType(T));
           Argument = Builder.create<IndirectionOp>(Loc, T, Argument);
         } else {
-          Argument = emitImplicitBitcast(Loc, Argument, T);
+          Argument = emitImplicitBitcast(Loc, Argument, removeConst(T));
         }
 
         Arguments.push_back(Argument);
@@ -1518,14 +1519,16 @@ private:
           rc_return Operand;
       }
 
-      Operand = Builder.create<BitCastOp>(Loc,
-                                          C.getPointerType(C.getIntegerType(1)),
-                                          Operand);
+      // The GEP adds a number of bytes to a pointer
+      mlir::Type BytePointer = C.getPointerType(C.getIntegerType(1,
+                                                                 IntegerKind::
+                                                                   Generic));
+      Operand = Builder.create<BitCastOp>(Loc, BytePointer, Operand);
 
       // The GEP index is signed. In C, adding to a pointer an unsigned integer
       // holding a negative offset overflows the pointer, so the index is a
       // signed integer.
-      uint64_t IndexSize = getObjectSize(Operand);
+      uint64_t IndexSize = getObjectSize(C.getIntptrType());
       IntegerType SignedIndexType = C.getIntegerType(IndexSize,
                                                      IntegerKind::Signed);
       mlir::Value Index;
@@ -1540,10 +1543,7 @@ private:
         Index = Builder.create<BitCastOp>(Loc, SignedIndexType, Index);
       }
 
-      rc_return Builder.create<PtrAddOp>(Loc,
-                                         Operand.getType(),
-                                         Operand,
-                                         Index);
+      rc_return Builder.create<PtrAddOp>(Loc, BytePointer, Operand, Index);
     }
 
     if (auto I = llvm::dyn_cast<llvm::FreezeInst>(V))
@@ -1789,8 +1789,7 @@ private:
       if (const llvm::Value *Value = Return->getReturnValue()) {
         clift::FunctionType FunctionType = Function.getFunctionType();
 
-        mlir::Type FuncReturnType = FunctionType.getReturnType();
-        mlir::Type LLVMReturnType = FuncReturnType;
+        mlir::Type ReturnType = FunctionType.getReturnType();
 
         // Emit the expression tree rooted at the return instruction directly
         // into the expression region of the newly created return operation:
@@ -1810,17 +1809,17 @@ private:
             ReturnValue = //
               emitImplicitBitcast(TerminalLoc,
                                   ReturnValue,
-                                  C.getPointerType(LLVMReturnType));
+                                  C.getPointerType(ReturnType));
 
             ReturnValue = Builder.create<IndirectionOp>(TerminalLoc,
-                                                        LLVMReturnType,
+                                                        ReturnType,
                                                         ReturnValue);
           }
 
           // Emit an implicit cast to the required return type if necessary:
           ReturnValue = emitImplicitBitcast(TerminalLoc,
                                             ReturnValue,
-                                            LLVMReturnType);
+                                            ReturnType);
 
           return ReturnValue;
         });
@@ -1988,16 +1987,8 @@ private:
 
   //===----------------------- LLVM function import -----------------------===//
 
-  static llvm::ArrayRef<abi::FunctionType::Layout::Argument>
-  getLayoutArguments(const abi::FunctionType::Layout &Layout) {
-    llvm::ArrayRef LayoutArguments = Layout.Arguments;
-    if (Layout.hasSPTAR())
-      LayoutArguments = LayoutArguments.drop_front();
-    return LayoutArguments;
-  }
-
   void initializeArgumentMapping(const llvm::Function *F) {
-    llvm::ArrayRef LayoutArguments = getLayoutArguments(FunctionLayout);
+    llvm::ArrayRef LayoutArguments = FunctionLayout.argumentsForC();
     revng_assert(F->arg_size() == Function.getArgumentTypes().size());
     revng_assert(F->arg_size() == LayoutArguments.size());
 

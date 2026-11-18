@@ -399,6 +399,7 @@ branches:
             - early-cse
             # Merge the exposed narrow predicates, e.g., x != 0 && x >= 0.
             - instcombine-noarrays
+            - remove-extractvalues
             # Restore widths that instcombine may have widened again.
             - early-type-shrinking
             - type-shrinking
@@ -481,6 +482,8 @@ branches:
             #
             # This phase is composed of early one-off rewrites, applied in
             # order to enable or simplify later transformations.
+            - translate-helpers
+            - promote-floating-point-operations
             - trivial-return-elimination
             - label-merging
             - loop-detection
@@ -545,6 +548,13 @@ branches:
             - hoist-variable-initializers
             - promote-break-continue
 
+      - pipe: emit-strings
+        arguments: [binaries-container, clift-functions]
+
+      - pipe: pure-mlir-passes-pipe
+        arguments: [clift-functions]
+        configuration:
+          passes:
             # == Backend phase ==
             #
             # C code emitted directly from Clift in the form enforced by the

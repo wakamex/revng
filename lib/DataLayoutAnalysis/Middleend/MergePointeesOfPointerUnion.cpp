@@ -286,9 +286,8 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
         }
 
         llvm::SmallSetVector<LTSN *, 8> UniquedScalars;
-        llvm::SmallPtrSet<LTSN *, 8> PointersToScalars;
+        llvm::SmallSetVector<LTSN *, 8> PointersToScalars;
         llvm::SmallSetVector<LTSN *, 8> UniquedAggregates;
-        llvm::SmallPtrSet<LTSN *, 8> PointersToAggregates;
         llvm::SmallSetVector<LTSN *, 8> UniquedFromModel;
         llvm::SmallPtrSet<LTSN *, 8> PointersToFromModel;
 
@@ -307,7 +306,6 @@ bool MergePointeesOfPointerUnion::runOnTypeSystem(LayoutTypeSystem &TS) {
             PointersToScalars.insert(Pointer);
             UniquedScalars.insert(Pointee);
           } else {
-            PointersToAggregates.insert(Pointer);
             UniquedAggregates.insert(Pointee);
           }
         }

@@ -218,7 +218,7 @@ def test_pipeline_inplace(model, storage_provider):
 
     pipeline: Pipeline = Pipeline(set(declarations), begin_node)
     assert begin_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert inplace_node.savepoint_range == SavePointsRange(start=1, end=2)
+    assert inplace_node.savepoint_range == SavePointsRange(start=2, end=2)
     assert end_node.savepoint_range == SavePointsRange(start=2, end=2)
 
     # Force the savepoint to store the objects
@@ -289,9 +289,9 @@ def test_pipeline_up_down(model, storage_provider):
 
     pipeline: Pipeline = Pipeline(set(declarations), begin_node)
     assert begin_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert up_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert same_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert down_node.savepoint_range == SavePointsRange(start=1, end=2)
+    assert up_node.savepoint_range == SavePointsRange(start=2, end=2)
+    assert same_node.savepoint_range == SavePointsRange(start=2, end=2)
+    assert down_node.savepoint_range == SavePointsRange(start=2, end=2)
     assert end_node.savepoint_range == SavePointsRange(start=2, end=2)
 
     root_obj = ObjectSet(MyKind.ROOT, {MyObjectID.root()})
@@ -424,7 +424,7 @@ def test_artifact(model, storage_provider):
 
     pipeline: Pipeline = Pipeline(set(declarations), begin_node)
     assert begin_node.savepoint_range == SavePointsRange(start=1, end=1)
-    assert same_node.savepoint_range == SavePointsRange(start=1, end=1)
+    assert same_node.savepoint_range == SavePointsRange(start=2, end=1)
 
     # Force the savepoint to store the objects
     container = ChildDictContainer()
@@ -464,7 +464,7 @@ def test_invalidation(model, storage_provider):
     pipe.add_successor(savepoint)
 
     pipeline: Pipeline = Pipeline(set(declarations), pipe)
-    assert pipe.savepoint_range == SavePointsRange(start=0, end=1)
+    assert pipe.savepoint_range == SavePointsRange(start=1, end=1)
     assert savepoint.savepoint_range == SavePointsRange(start=1, end=1)
 
     containers = pipeline.schedule(
@@ -556,7 +556,7 @@ def test_analysis(model, storage_provider):
             ),
         },
     )
-    assert pipe.savepoint_range == SavePointsRange(start=0, end=1)
+    assert pipe.savepoint_range == SavePointsRange(start=1, end=1)
     assert savepoint.savepoint_range == SavePointsRange(start=1, end=1)
 
     orig_model = model.clone()
@@ -685,9 +685,9 @@ def test_schedule_serdes(model):
 
     pipeline: Pipeline = Pipeline(set(declarations), begin_node)
     assert begin_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert up_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert same_node.savepoint_range == SavePointsRange(start=1, end=2)
-    assert down_node.savepoint_range == SavePointsRange(start=1, end=2)
+    assert up_node.savepoint_range == SavePointsRange(start=2, end=2)
+    assert same_node.savepoint_range == SavePointsRange(start=2, end=2)
+    assert down_node.savepoint_range == SavePointsRange(start=2, end=2)
     assert end_node.savepoint_range == SavePointsRange(start=2, end=2)
 
     root_obj = ObjectSet(MyKind.ROOT, {MyObjectID.root()})

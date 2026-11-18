@@ -11,9 +11,11 @@ BigArgumentsUsePointersToCopy: false
 NoRegisterArgumentsCanComeAfterStackOnes: false
 AllowPackedTypesInRegisters: false
 CalleeIsResponsibleForStackCleanup: false
-FloatsUseGPRs: false
 PackStackArguments: false
 TreatAllAggregatesAsPacked: false
+
+FloatingPointArgumentStrategy: Ignored
+FloatingPointReturnValueStrategy: Ignored
 
 StackAlignment: 16
 MinimumStackArgumentSize: 4
@@ -26,8 +28,6 @@ MaximumGPRsPerScalarReturnValue: 2
 GeneralPurposeReturnValueRegisters:
   - eax_x86
   - edx_x86
-FloatReturnValueRegisters:
-  - st0_x86
 CalleeSavedRegisters:
   - ebx_x86
   - ebp_x86

@@ -10,10 +10,12 @@
 
 #include "llvm/Support/Progress.h"
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "revng/ADT/SpeculativeWorklist.h"
+#include "revng/Clift/Clift.h"
 #include "revng/Clift/Helpers.h"
 #include "revng/CliftTransforms/Passes.h"
 #include "revng/Pipebox/MLIRPipe.h"
@@ -83,6 +85,27 @@ Configuration Configuration::parse(llvm::StringRef Input) {
   return llvm::cantFail(fromString<Configuration>(Input));
 }
 
+[[noreturn]] static void configurationError(const llvm::Twine &Message) {
+  revng_abort(("mlir-pipe: " + Message).str().c_str());
+}
+
+static constexpr llvm::StringRef
+  ModuleName = mlir::ModuleOp::getOperationName();
+static constexpr llvm::StringRef
+  FunctionName = clift::FunctionOp::getOperationName();
+
+/// The operation the registered pass \p Info runs on. Passes that can run on
+/// any operation run on each function.
+static std::string getPassOpName(const mlir::PassInfo &Info) {
+  mlir::OpPassManager PM(mlir::OpPassManager::Nesting::Explicit);
+  auto ErrorHandler = [](const llvm::Twine &) { return mlir::failure(); };
+  revng_check(Info.addToPipeline(PM, "", ErrorHandler).succeeded());
+  for (mlir::Pass &Pass : PM.getPasses())
+    if (auto OpName = Pass.getOpName())
+      return OpName->str();
+  return FunctionName.str();
+}
+
 namespace revng::pypeline::pipes {
 
 PureMLIRPassesPipe::PureMLIRPassesPipe(llvm::StringRef StaticConfiguration) :
@@ -91,10 +114,15 @@ PureMLIRPassesPipe::PureMLIRPassesPipe(llvm::StringRef StaticConfiguration) :
   for (auto &PassData : Configuration.Passes) {
     llvm::StringRef PassName = PassData.Name;
     const mlir::PassInfo *PassInfo = mlir::Pass::lookupPassInfo(PassName);
-    revng_assert(PassInfo != nullptr,
-                 ("mlir-pipe: Requested pass " + PassName.str()
-                  + " was not found")
-                   .c_str());
+    if (PassInfo == nullptr)
+      configurationError("requested pass " + PassName + " was not found");
+
+    std::string OpName = getPassOpName(*PassInfo);
+    if (OpName != ModuleName and OpName != FunctionName)
+      configurationError("pass " + PassName + " runs on " + OpName
+                         + ", but only " + ModuleName + " and " + FunctionName
+                         + " are supported");
+
     PassInfos.push_back({ PassInfo, std::move(PassData.Options) });
   }
 
@@ -109,14 +137,28 @@ PureMLIRPassesPipe::PureMLIRPassesPipe(llvm::StringRef StaticConfiguration) :
 std::unique_ptr<mlir::PassManager>
 PureMLIRPassesPipe::makePassManager(mlir::MLIRContext *Context) const {
   using namespace clift;
-  auto PM = std::make_unique<mlir::PassManager>(Context,
-                                                FunctionOp::getOperationName());
+  auto PM = std::make_unique<mlir::PassManager>(Context, ModuleName);
   auto ErrorHandler = [&](const llvm::Twine &Msg) {
     emitError(mlir::UnknownLoc::get(Context)) << Msg;
     return mlir::failure();
   };
+
+  // Module passes go in the top-level pass manager. Each run of consecutive
+  // function passes goes in its own nested pass manager. The constructor has
+  // already rejected passes restricted to anything else, so every pass that is
+  // not a module pass is a function pass.
+  mlir::OpPassManager *FunctionPM = nullptr;
   for (const PassInfo &PassInfo : PassInfos) {
-    mlir::LogicalResult R = PassInfo.PassInfo->addToPipeline(*PM,
+    mlir::OpPassManager *Target = PM.get();
+    if (getPassOpName(*PassInfo.PassInfo) == ModuleName) {
+      FunctionPM = nullptr;
+    } else {
+      if (FunctionPM == nullptr)
+        FunctionPM = &PM->nest<FunctionOp>();
+      Target = FunctionPM;
+    }
+
+    mlir::LogicalResult R = PassInfo.PassInfo->addToPipeline(*Target,
                                                              PassInfo.Options,
                                                              ErrorHandler);
     revng_check(R.succeeded());
@@ -141,7 +183,7 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
     return false;
 
   // Every function is in its own module, and the passes change nothing
-  // outside the function they run on. What the functions share is the
+  // outside that module. What the functions share is the
   // context's uniqued types and attributes, which a context with threading
   // enabled locks.
   mlir::MLIRContext *Context = Container.getContext();
@@ -152,12 +194,10 @@ bool PureMLIRPassesPipe::runInParallel(const std::vector<const ObjectID *>
   std::map<const ObjectID *, std::pair<Ticket, size_t>> Inputs;
   for (const ObjectID *Object : Objects) {
     revng_assert(Object->kind() == Kinds::Function);
-    const MetaAddress &Key = std::get<MetaAddress>(Object->key());
-    FunctionOp Function = getUniqueIsolatedFunction(Container.getModule(*Object),
-                                                    Key);
+    mlir::ModuleOp Module = Container.getModule(*Object);
     size_t Operations = 0;
-    Function->walk([&](mlir::Operation *) { ++Operations; });
-    Inputs[Object] = { Function.getOperation(), Operations };
+    Module->walk([&](mlir::Operation *) { ++Operations; });
+    Inputs[Object] = { Module.getOperation(), Operations };
   }
 
   // Commits do not depend on each other: start the largest functions first,
@@ -202,7 +242,6 @@ PipeOutput PureMLIRPassesPipe::run(const Model &TheModel,
                                    const revng::pypeline::Request &Outgoing,
                                    llvm::StringRef Configuration,
                                    CliftFunctionContainer &Container) {
-  using namespace clift;
   llvm::Task T(Outgoing[0].size(), TaskName);
   if (runInParallel(Outgoing[0], Container, T))
     return { {}, {} };
@@ -213,9 +252,7 @@ PipeOutput PureMLIRPassesPipe::run(const Model &TheModel,
     revng_assert(Object->kind() == Kinds::Function);
     const MetaAddress &Key = std::get<MetaAddress>(Object->key());
     T.advance(Key.toString(), true);
-    mlir::ModuleOp Module = Container.getModule(*Object);
-    FunctionOp Function = getUniqueIsolatedFunction(Module, Key);
-    mlir::LogicalResult R = PM->run(Function);
+    mlir::LogicalResult R = PM->run(Container.getModule(*Object));
     revng_check(R.succeeded());
   }
 

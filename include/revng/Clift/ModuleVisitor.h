@@ -81,6 +81,14 @@ protected:
 private:
   VisitorT &getVisitor() { return static_cast<VisitorT &>(*this); }
 
+  static constexpr bool hasVisitType() {
+    return requires(VisitorT &V, mlir::Type T) { V.visitType(T); };
+  }
+
+  static constexpr bool hasVisitAttr() {
+    return requires(VisitorT &V, mlir::Attribute A) { V.visitAttr(A); };
+  }
+
   template<typename SubElementInterface>
   mlir::LogicalResult visitSubElements(SubElementInterface Interface) {
     mlir::LogicalResult R = mlir::success();
@@ -102,7 +110,7 @@ private:
     if (not VisitedTypes.insert(Type).second)
       return mlir::success();
 
-    if constexpr (requires { getVisitor().visitType(Type); }) {
+    if constexpr (hasVisitType()) {
       if (getVisitor().visitType(Type).failed())
         return mlir::failure();
     }
@@ -125,7 +133,7 @@ private:
     if (not VisitedAttrs.insert(Attr).second)
       return mlir::success();
 
-    if constexpr (requires { getVisitor().visitAttr(Attr); }) {
+    if constexpr (hasVisitAttr()) {
       if (getVisitor().visitAttr(Attr).failed())
         return mlir::failure();
     }
@@ -139,32 +147,23 @@ private:
   }
 
   mlir::LogicalResult internalVisitOp(mlir::Operation *Op) {
-    // A visitor with no type or attribute hook does not walk the types and
-    // attributes of the operations, which reach every type a module refers to
-    constexpr bool VisitsTypes = requires(mlir::Type Type) {
-      getVisitor().visitType(Type);
-    };
-    constexpr bool VisitsAttrs = requires(mlir::Attribute Attr) {
-      getVisitor().visitAttr(Attr);
-    };
-    if constexpr (not VisitsTypes and not VisitsAttrs)
-      return mlir::success();
+    if (hasVisitType() or hasVisitAttr()) {
+      for (mlir::Type Type : Op->getResultTypes()) {
+        if (internalVisitType(Type).failed())
+          return mlir::failure();
+      }
 
-    for (mlir::Type Type : Op->getResultTypes()) {
-      if (internalVisitType(Type).failed())
-        return mlir::failure();
-    }
+      for (auto &&Attr : Op->getAttrs()) {
+        if (internalVisitAttr(Attr.getValue()).failed())
+          return mlir::failure();
+      }
 
-    for (auto &&Attr : Op->getAttrs()) {
-      if (internalVisitAttr(Attr.getValue()).failed())
-        return mlir::failure();
-    }
-
-    for (mlir::Region &Region : Op->getRegions()) {
-      for (auto &Block : Region.getBlocks()) {
-        for (mlir::Type ArgumentType : Block.getArgumentTypes()) {
-          if (internalVisitType(ArgumentType).failed())
-            return mlir::failure();
+      for (mlir::Region &Region : Op->getRegions()) {
+        for (auto &Block : Region.getBlocks()) {
+          for (mlir::Type ArgumentType : Block.getArgumentTypes()) {
+            if (internalVisitType(ArgumentType).failed())
+              return mlir::failure();
+          }
         }
       }
     }

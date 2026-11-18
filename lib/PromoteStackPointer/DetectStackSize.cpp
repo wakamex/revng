@@ -12,6 +12,7 @@
 #include "revng/Model/FunctionTags.h"
 #include "revng/Model/IRHelpers.h"
 #include "revng/Model/NameBuilder.h"
+#include "revng/Model/Ordering.h"
 #include "revng/Model/VerifyHelper.h"
 #include "revng/PromoteStackPointer/DetectStackSize.h"
 #include "revng/PromoteStackPointer/InstrumentStackAccessesPass.h"
@@ -95,15 +96,8 @@ class DetectStackSize {
 private:
   TupleTree<model::Binary> &Binary;
   std::vector<FunctionStackInfo> FunctionsStackInfo;
-  /// Order prototypes by ID: electing a stack arguments size creates a type,
-  /// so the iteration order decides the IDs of the new types
-  struct ByID {
-    bool operator()(const RawFunctionDefinition *LHS,
-                    const RawFunctionDefinition *RHS) const {
-      return LHS->ID() < RHS->ID();
-    }
-  };
-  std::map<RawFunctionDefinition *, UpperBoundCollector, ByID>
+  /// Keyed by ID, since electing a stack arguments size creates a type
+  model::TypeDefinitionMap<RawFunctionDefinition, UpperBoundCollector>
     FunctionTypeStackArguments;
   const size_t CallInstructionPushSize = 0;
   /// Helper for fast model::TypeDefinition size computation
