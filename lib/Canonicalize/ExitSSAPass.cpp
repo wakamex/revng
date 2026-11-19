@@ -237,16 +237,16 @@ static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
                                      llvm::function_ref<bool(Value *)>
                                        InClass) {
   for (const IncomingInfo &Internal : Incomings) {
-    if (not InClass(Internal.IncomingValue))
+    if (not InClass(Internal.incomingValue()))
       continue;
-    BasicBlock *Definition = cast<PHINode>(Internal.IncomingValue)->getParent();
+    BasicBlock *Definition = cast<PHINode>(Internal.incomingValue())->getParent();
     for (const IncomingInfo &Stored : Incomings) {
-      if (InClass(Stored.IncomingValue)
-          or isa<UndefValue>(Stored.IncomingValue))
+      if (InClass(Stored.incomingValue())
+          or isa<UndefValue>(Stored.incomingValue()))
         continue;
-      if (reaches(Definition, Stored.IncomingBlock, Definition)
-          and reaches(Stored.IncomingBlock,
-                      Internal.IncomingBlock,
+      if (reaches(Definition, Stored.incomingBlock(), Definition)
+          and reaches(Stored.incomingBlock(),
+                      Internal.incomingBlock(),
                       Definition))
         return true;
     }
