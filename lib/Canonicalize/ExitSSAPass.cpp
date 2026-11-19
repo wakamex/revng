@@ -211,7 +211,8 @@ static bool haveIncompatibleIncomings(const std::set<IncomingInfo> &LHS,
 }
 
 /// Whether \p To is reached from \p From, along a path that does not go through
-/// \p Barrier after leaving it. Reaching a block means reaching its end.
+/// \p Barrier after leaving it. Reaching a block means reaching its end, so
+/// \p Barrier itself is reached only when \p From is \p Barrier.
 static bool reaches(BasicBlock *From, BasicBlock *To, BasicBlock *Barrier) {
   if (From == To)
     return true;
@@ -219,7 +220,7 @@ static bool reaches(BasicBlock *From, BasicBlock *To, BasicBlock *Barrier) {
   SmallVector<BasicBlock *, 32> Worklist{ From };
   while (not Worklist.empty()) {
     for (BasicBlock *Successor : successors(Worklist.pop_back_val())) {
-      if (Successor == To)
+      if (Successor == To and Successor != Barrier)
         return true;
       if (Successor != Barrier and Visited.insert(Successor).second)
         Worklist.push_back(Successor);
@@ -233,9 +234,20 @@ static bool reaches(BasicBlock *From, BasicBlock *To, BasicBlock *Barrier) {
 /// expected to still hold it at the end of the incoming block. That fails if
 /// the store of another incoming of the class can execute after the incoming
 /// PHINode and before the end of that block.
+///
+/// The store of an incoming goes at the end of its incoming block, unless that
+/// block also has an incoming internal to the class: that one is handled first
+/// and needs no store, so the store goes on the edge to the PHINode's block,
+/// which edge splitting gives a block of its own, and executes only on the way
+/// to that block.
 static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
                                      llvm::function_ref<bool(Value *)>
                                        InClass) {
+  SmallPtrSet<BasicBlock *, 8> BlocksWithInternalIncoming;
+  for (const IncomingInfo &Incoming : Incomings)
+    if (InClass(Incoming.incomingValue()))
+      BlocksWithInternalIncoming.insert(Incoming.incomingBlock());
+
   for (const IncomingInfo &Internal : Incomings) {
     if (not InClass(Internal.incomingValue()))
       continue;
@@ -244,10 +256,13 @@ static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
       if (InClass(Stored.incomingValue())
           or isa<UndefValue>(Stored.incomingValue()))
         continue;
-      if (reaches(Definition, Stored.incomingBlock(), Definition)
-          and reaches(Stored.incomingBlock(),
-                      Internal.incomingBlock(),
-                      Definition))
+      BasicBlock *StoreBlock = Stored.incomingBlock();
+      if (not reaches(Definition, StoreBlock, Definition))
+        continue;
+      BasicBlock *After = BlocksWithInternalIncoming.contains(StoreBlock) ?
+                            Stored.phiBlock() :
+                            StoreBlock;
+      if (reaches(After, Internal.incomingBlock(), Definition))
         return true;
     }
   }
