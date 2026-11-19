@@ -457,7 +457,7 @@ branches:
             - enforce-single-exit
             - materialize-trivial-goto
             - strip-dead-prototypes
-            - defer-allocas
+            - compute-alloca-lifetime-start
             - legalize-integer-widths
         artifacts:
           - name: clifter-input
