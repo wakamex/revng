@@ -6,8 +6,10 @@
 
 #include <compare>
 #include <optional>
+#include <utility>
 #include <vector>
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include "revng/Support/Debug.h"
@@ -114,26 +116,16 @@ struct Traversal {
 
 /// `TraversalInfo` describes a set of `Traversal`s and `ArrayPaths`, which we
 /// associated to a `mlir::Type` (so we can cache them)
-struct TraversalInfo {
-  std::vector<Traversal> Traversals;
-  std::vector<ArrayPath> ArrayPaths;
-};
-
-/// What EFA caches about `mlir::Type`s while it rewrites the accesses of one
-/// operation. Both depend only on the type.
 struct TraversalCache {
-  /// The `Traversal`s and `ArrayPath`s computed starting from a `mlir::Type`
-  llvm::DenseMap<mlir::Type, TraversalInfo> Infos;
+  /// The `Traversal`s covering each offset of each base type looked up so far
+  llvm::DenseMap<std::pair<mlir::Type, int64_t>, std::vector<Traversal>>
+    Traversals;
 
-  /// How many `Traversal`s each `mlir::Type` has, for every type counted so
-  /// far, including the types nested in a `BaseType`
-  llvm::DenseMap<mlir::Type, uint64_t> Counts;
+  /// The `ArrayPath`s covering each offset of each base type looked up so far
+  llvm::DenseMap<std::pair<mlir::Type, int64_t>, std::vector<ArrayPath>>
+    ArrayPaths;
 };
 
-/// Helper function used to obtain the `BaseType` for the `Traversal` analysis.
-/// Specifically, this is used to enable the `p[i]` rewrites. In situations
-/// where we have a `pointer` to a `PrimitiveType`, we virtually wrap it in a
-/// `array<N x T>`.
 mlir::Type deriveBaseType(mlir::Value BasePointer);
 
 /// Main entry point used to compute the `BestTraversal` from an `Expression`

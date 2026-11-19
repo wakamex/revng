@@ -1,18 +1,15 @@
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
+#include <algorithm>
 #include <compare>
 #include <cstdint>
-#include <limits>
 #include <optional>
 
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/MathExtras.h"
 
 #include "revng/ADT/RecursiveCoroutine.h"
 #include "revng/Clift/Clift.h"
 #include "revng/Support/Assert.h"
-#include "revng/Support/CommandLine.h"
 
 #include "BestTraversal.h"
 #include "PointerArithmetic.h"
@@ -135,52 +132,6 @@ namespace {
 // =============================================================================
 // Static helper functions
 // =============================================================================
-
-/// Helper function which checks if the `BaseOffset` falls inside of the
-/// innermost `array` described by the `ArrayPath`
-static bool isCompatible(const ArrayPath &Path, llvm::APInt BaseOffset) {
-  for (const NestedArrayShape &Shape : Path) {
-
-    // If the offset doesn't reach the offset of this `Shape` inside its parent
-    // we just bail out
-    if (BaseOffset.ult(Shape.OffsetFromParentArrayElement)) {
-      return false;
-    }
-
-    BaseOffset -= Shape.OffsetFromParentArrayElement;
-
-    // If we're entering in an array element past the first, we have to adjust
-    // `BaseOffset`, consuming it
-    if (BaseOffset.uge(Shape.Stride)) {
-
-      // If we're jumping over the whole array, past it, we just bail out.
-      if (BaseOffset.udiv(Shape.Stride).uge(Shape.NumElements)) {
-        return false;
-      }
-
-      // Otherwise adjust the `BaseOffset`, to set it to the offset inside the
-      // array element we're traversing
-      BaseOffset = BaseOffset.urem(Shape.Stride);
-    }
-  }
-
-  // If we reach this point, it means that the `ArrayPath` was inedeed
-  // compatible
-  return true;
-}
-
-/// Helper function which finds all the `ArrayPath`s that are compatible with a
-/// given `BaseOffset`
-static llvm::SmallVector<const ArrayPath *>
-findCompatibleArrayPaths(const std::vector<ArrayPath> &AllArrayPaths,
-                         const llvm::APInt &BaseOffset) {
-  llvm::SmallVector<const ArrayPath *> CompatibleArrays;
-  for (const ArrayPath &Path : AllArrayPaths) {
-    if (isCompatible(Path, BaseOffset))
-      CompatibleArrays.push_back(&Path);
-  }
-  return CompatibleArrays;
-}
 
 /// Helper function which counts the length of the common prefix between two
 /// sorted `TraversedArrays` vectors. Since both are sorted in descending stride
@@ -420,224 +371,85 @@ static Score score(const Traversal &Explicit,
 // `TypeTraversalAnalyzer` class definition
 // =============================================================================
 
-static const char *D = "Upper bound on the number of type traversals "
-                       "emit-field-accesses materializes per type before "
-                       "leaving an access as raw pointer arithmetic; "
-                       "0 removes the bound.";
-
-/// Upper bound on the number of `Traversal`s that `TypeTraversalAnalyzer` will
-/// materialize for a single `BaseType`. Real, non-degenerate types stay far
-/// below this; degenerate DLA type systems, whose deeply-nested high-arity
-/// unions share substructure, reach millions of distinct root-to-leaf
-/// traversals. Above this bound EFA bails out of the rewrite for accesses into
-/// the offending type (leaving the raw pointer arithmetic), which caps both the
-/// memory used to store the traversals and the time spent scoring an access
-/// against them. A value of 0 removes the bound, treating it as infinite.
-static llvm::cl::opt<uint64_t> MaxTraversalsPerType("max-traversals-per-type",
-                                                    llvm::cl::init(1024),
-                                                    llvm::cl::cat(MainCategory),
-                                                    llvm::cl::desc(D));
-
-/// `TypeTraversalAnalyzer` is used as an oracle to compute and retrieve
-/// `Traversal`s and `ArrayPath`s in a lazy manner
+/// `TypeTraversalAnalyzer` answers, for a `BaseType` and a byte offset into it,
+/// which `Traversal`s and `ArrayPath`s can describe an access at that offset.
+/// It walks only the fields that cover the offset, so its cost depends on how
+/// deep the type is, not on how many fields it has: enumerating every
+/// `Traversal` of a type instead grows with the size of its expanded field tree,
+/// which for a large stack frame or a type with nested unions runs into the
+/// thousands or millions. Answers are cached per type and offset for the whole
+/// pass run.
 class TypeTraversalAnalyzer {
 private:
-  /// Reference to the cache containing the pre-computed `Traversal`s and
-  /// `ArrayPath`s. This passed in the constructor, as we want to cache the
-  /// information across different runs
-  llvm::DenseMap<mlir::Type, TraversalInfo> &Data;
-
-  /// Memoizes `countTraversals`. A type's traversal count depends only on the
-  /// type, so it is safe to cache and reuse across `BaseType`s and, like
-  /// `Data`, across the analyzers built for each access.
-  llvm::DenseMap<mlir::Type, uint64_t> &TraversalCountCache;
+  TraversalCache &Cache;
 
 public:
-  TypeTraversalAnalyzer(TraversalCache &Cache) :
-    Data(Cache.Infos), TraversalCountCache(Cache.Counts) {}
+  TypeTraversalAnalyzer(TraversalCache &Cache) : Cache(Cache) {}
 
 public:
-  /// Retrieve the precomputed `Traversal`s for `BaseType` (or compute them
-  /// on-the-fly`)
-  const std::vector<Traversal> &getTraversals(mlir::Type BaseType);
+  /// The `ArrayPath`s of the arrays that cover \p Offset, the empty one first,
+  /// then in the order a walk of `BaseType` meets them, each sorted by
+  /// descending `Stride`
+  const std::vector<ArrayPath> &getArrayPaths(mlir::Type BaseType,
+                                              int64_t Offset);
 
-  /// Retrieve the precomputed `ArrayPath`s for `BaseType` (or compute them
-  /// on-the-fly`)
-  const std::vector<ArrayPath> &getArrayPaths(mlir::Type BaseType);
-
-  /// Retrieve only the slice of `Traversal`s, starting from the `BaseType`,
-  /// that are useful for the comparison with the current access described by
-  /// `Arithmetic`.
-  /// There are two _modes of operation_:
-  /// 1) When `SmartLookup` is off, we simply retrieve all the `Traversal`s
-  ///    relative to `BaseType`. With this mode of operation, the additional
-  ///    parameters are actually useless.
-  //// 2) When `SmartLookup` is on, we employ some smarties in order to reduce
-  ///     the search space for `Traversal`s that we retrieve.
-  //      TODO: this mode of operation is not implemented ATM.
-  std::pair<std::vector<Traversal>::const_iterator,
-            std::vector<Traversal>::const_iterator>
-  getTraversalRange(mlir::Type BaseType,
-                    const PointerArithmetic &Arithmetic,
-                    mlir::Type PointeeType,
-                    bool SmartLookup);
+  /// The `Traversal`s that cover \p Offset, an offset whose constant array
+  /// indices have been made explicit, so that it lies in the first element of
+  /// the arrays it goes through. They are sorted by `StartOffset`, then by the
+  /// size of their `TargetType`. A `Traversal` must start at the offset an
+  /// access starts at, or contain it, to describe the access, so no other
+  /// `Traversal` of `BaseType` can.
+  const std::vector<Traversal> &getTraversals(mlir::Type BaseType,
+                                              int64_t Offset);
 
 private:
-  /// Counts, without materializing them, how many `Traversal`s `traverseImpl`
-  /// would emit for `Type` (one per traversed node; pointers are leaves).
-  /// Saturates at `MaxTraversalsPerType + 1`, so a degenerate, deeply-shared
-  /// type cannot overflow the counter or make counting itself expensive. Uses
-  /// `RecursiveCoroutine` for stack safety on deeply nested types (like
-  /// `traverseImpl`); evaluate it with `rc_eval`.
-  RecursiveCoroutine<uint64_t> countTraversals(mlir::Type Type);
-
-  /// Entry point for traversing the `BaseType`, and producing the corresponding
-  /// `Traversal`s and `ArrayPaths` (takes care of ordering them)
-  llvm::DenseMap<mlir::Type, TraversalInfo>::iterator
-  traverse(mlir::Type BaseType);
-
-  /// Underlying `impl` method for performing the recursive step of the traverse
-  /// of a `BaseType`. Uses `RecursiveCoroutine` for stack safety.
   RecursiveCoroutine<void>
-  traverseImpl(mlir::Type Type,
-               std::vector<Traversal> &Traversals,
-               std::vector<ArrayPath> &ArrayPaths,
-               int64_t CurrentOffset = 0,
-               const std::vector<uint64_t> &FieldPath = {},
-               const ArrayPath &CurrentArrayPath = {});
+  collectArrayPaths(mlir::Type Type,
+                    int64_t Offset,
+                    int64_t CurrentOffset,
+                    const ArrayPath &CurrentArrayPath,
+                    std::vector<ArrayPath> &ArrayPaths);
+
+  RecursiveCoroutine<void>
+  collectTraversals(mlir::Type Type,
+                    int64_t Offset,
+                    int64_t CurrentOffset,
+                    const std::vector<uint64_t> &FieldPath,
+                    const ArrayPath &CurrentArrayPath,
+                    std::vector<Traversal> &Traversals);
 };
 
-const std::vector<Traversal> &
-TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType) {
-  auto It = Data.find(BaseType);
-  if (It == Data.end()) {
-    It = traverse(BaseType);
-  }
+/// The `NestedArrayShape` of an array of \p Type entered at \p CurrentOffset,
+/// appended to \p CurrentArrayPath
+static ArrayPath enterArray(clift::ArrayType Type,
+                            int64_t CurrentOffset,
+                            const ArrayPath &CurrentArrayPath) {
+  NestedArrayShape ArrayInfo;
+  ArrayInfo.Stride = getObjectSize(Type.getElementType());
+  ArrayInfo.NumElements = Type.getElementsCount();
 
-  return It->second.Traversals;
+  // The offset is relative to the parent array, if any
+  ArrayInfo.OffsetFromParentArrayElement = CurrentOffset;
+  if (not CurrentArrayPath.empty())
+    ArrayInfo.OffsetFromParentArrayElement -= CurrentArrayPath.back()
+                                                .OffsetFromParentArrayElement;
+
+  ArrayPath NewArrayPath = CurrentArrayPath;
+  NewArrayPath.push_back(ArrayInfo);
+  return NewArrayPath;
 }
 
 const std::vector<ArrayPath> &
-TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType) {
-  auto It = Data.find(BaseType);
-  if (It == Data.end()) {
-    It = traverse(BaseType);
-  }
+TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
+  auto [It, Inserted] = Cache.ArrayPaths.try_emplace({ BaseType, Offset });
+  if (not Inserted)
+    return It->second;
 
-  return It->second.ArrayPaths;
-}
-
-std::pair<std::vector<Traversal>::const_iterator,
-          std::vector<Traversal>::const_iterator>
-TypeTraversalAnalyzer::getTraversalRange(mlir::Type BaseType,
-                                         const PointerArithmetic &Arithmetic,
-                                         mlir::Type PointeeType,
-                                         bool SmartLookup) {
-
-  // TODO: for the time being, we do not implement the smart lookup logic, and
-  //       therefore we assert that this does not happen until we have added the
-  //       implementation
-  if (not SmartLookup) {
-    const std::vector<Traversal> &Traversals = getTraversals(BaseType);
-    return { Traversals.begin(), Traversals.end() };
-  }
-
-  revng_abort("Fast lookup not implemented");
-}
-
-RecursiveCoroutine<uint64_t>
-TypeTraversalAnalyzer::countTraversals(mlir::Type Type) {
-  // A type's traversal count depends only on the type: reuse cached results.
-  if (auto It = TraversalCountCache.find(Type); It != TraversalCountCache.end())
-    rc_return It->second;
-
-  // By-value types cannot form a cycle (it would have infinite size), but seed
-  // the cache with a saturated value before recurring so that, if a malformed
-  // type ever did, it would be treated as over the cap rather than recurring
-  // forever. `llvm::SaturatingAdd` likewise keeps the running count from
-  // overflowing on a degenerate type; only its comparison with the cap matters.
-  TraversalCountCache[Type] = std::numeric_limits<uint64_t>::max();
-
-  uint64_t Count = 0;
-  if (mlir::isa<clift::PrimitiveType, clift::PointerType>(Type)) {
-    // Leaves: `traverseImpl` emits a single `Traversal` and stops (in
-    // particular it does not follow pointers).
-    Count = 1;
-  } else if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
-    uint64_t Underlying = rc_recur countTraversals(Typedef.getUnderlyingType());
-    Count = llvm::SaturatingAdd(Underlying, uint64_t{ 1 });
-  } else if (auto Array = mlir::dyn_cast<clift::ArrayType>(Type)) {
-    uint64_t Element = rc_recur countTraversals(Array.getElementType());
-    Count = llvm::SaturatingAdd(Element, uint64_t{ 1 });
-  } else if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
-    // One `Traversal` for the class itself, plus every field's subtree.
-    Count = 1;
-    for (clift::FieldAttr Field : Class.getFields()) {
-      uint64_t FieldCount = rc_recur countTraversals(Field.getType());
-      Count = llvm::SaturatingAdd(Count, FieldCount);
-    }
-  } else if (auto Enum = mlir::dyn_cast<clift::EnumType>(Type)) {
-    uint64_t Underlying = rc_recur countTraversals(Enum.getUnderlyingType());
-    Count = llvm::SaturatingAdd(Underlying, uint64_t{ 1 });
-  }
-
-  TraversalCountCache[Type] = Count;
-  rc_return Count;
-}
-
-llvm::DenseMap<mlir::Type, TraversalInfo>::iterator
-TypeTraversalAnalyzer::traverse(mlir::Type BaseType) {
-  revng_assert(Data.count(BaseType) == 0);
-
-  auto [It, Inserted] = Data.insert({ BaseType, TraversalInfo() });
-  auto &[Traversals, ArrayPaths] = It->second;
-
-  // Some DLA type systems contain deeply-nested, high-arity unions whose fields
-  // share substructure, so that the number of distinct root-to-leaf traversals
-  // is exponential in the nesting depth (millions, even for types with only a
-  // handful of fields each). Enumerating and storing them all exhausts memory,
-  // and scoring an access against all of them does not terminate in reasonable
-  // time. Counting the traversals is cheap (memoized, one value per type) where
-  // enumerating them is not, so we count first and, above the cap, bail out
-  // leaving `Traversals`/`ArrayPaths` empty. Downstream, `computeBestTraversal`
-  // then finds no traversal and EFA leaves the raw pointer arithmetic in place,
-  // exactly as it does for any access it cannot lower onto a field access.
-  if (MaxTraversalsPerType != 0
-      and rc_eval(countTraversals(BaseType)) > MaxTraversalsPerType) {
-    llvm::StringRef Handle = "<anonymous>";
-    if (auto Defined = mlir::dyn_cast<clift::DefinedType>(BaseType))
-      Handle = Defined.getHandle();
-    revng_log(Log,
-              "WARNING: skipping field-access rewrite for type '"
-                << Handle << "' producing more than "
-                << MaxTraversalsPerType.getValue() << " traversals");
-    return It;
-  }
-
-  // Add the empty `ArrayPath` representing the case where no `array` is
-  // traversed. This ensures that `toExplicitArrayAccesses` can produce
-  // explicit `Arithmetic`s even when no array traversal is involved.
+  std::vector<ArrayPath> ArrayPaths;
   ArrayPaths.push_back(ArrayPath());
+  rc_eval(collectArrayPaths(BaseType, Offset, 0, {}, ArrayPaths));
 
-  // Recursively traverse the `BaseType` to populate `Traversal`s and
-  // `ArrayPath`s
-  rc_eval(traverseImpl(BaseType, Traversals, ArrayPaths));
-
-  // Sort traversals by `StartOffset`, then by `Size` of the `TargetType`
-  std::sort(Traversals.begin(),
-            Traversals.end(),
-            [](const Traversal &A, const Traversal &B) {
-              if (A.StartOffset != B.StartOffset) {
-                return A.StartOffset < B.StartOffset;
-              } else {
-                auto ASize = getObjectSizeOrZero(A.TargetType);
-                auto BSize = getObjectSizeOrZero(B.TargetType);
-                return ASize < BSize;
-              }
-            });
-
-  // Sort `ArrayPath`s by `Stride`, larger first
-  for (auto &Path : ArrayPaths) {
+  for (ArrayPath &Path : ArrayPaths) {
     std::sort(Path.begin(),
               Path.end(),
               [](const NestedArrayShape &A, const NestedArrayShape &B) {
@@ -645,150 +457,148 @@ TypeTraversalAnalyzer::traverse(mlir::Type BaseType) {
               });
   }
 
-  return It;
+  // `collectArrayPaths` may have grown the cache: look the entry up again
+  return Cache.ArrayPaths[{ BaseType, Offset }] = std::move(ArrayPaths);
+}
+
+const std::vector<Traversal> &
+TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
+  auto [It, Inserted] = Cache.Traversals.try_emplace({ BaseType, Offset });
+  if (not Inserted)
+    return It->second;
+
+  std::vector<Traversal> Traversals;
+  rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
+
+  std::stable_sort(Traversals.begin(),
+                   Traversals.end(),
+                   [](const Traversal &A, const Traversal &B) {
+                     if (A.StartOffset != B.StartOffset)
+                       return A.StartOffset < B.StartOffset;
+                     return getObjectSizeOrZero(A.TargetType)
+                            < getObjectSizeOrZero(B.TargetType);
+                   });
+
+  return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
 }
 
 RecursiveCoroutine<void>
-TypeTraversalAnalyzer::traverseImpl(mlir::Type Type,
-                                    std::vector<Traversal> &Traversals,
-                                    std::vector<ArrayPath> &ArrayPaths,
-                                    int64_t CurrentOffset,
-                                    const std::vector<uint64_t> &FieldPath,
-                                    const ArrayPath &CurrentArrayPath) {
+TypeTraversalAnalyzer::collectArrayPaths(mlir::Type Type,
+                                         int64_t Offset,
+                                         int64_t CurrentOffset,
+                                         const ArrayPath &CurrentArrayPath,
+                                         std::vector<ArrayPath> &ArrayPaths) {
+  if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
+    rc_recur collectArrayPaths(Typedef.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               CurrentArrayPath,
+                               ArrayPaths);
+  } else if (auto Enum = mlir::dyn_cast<clift::EnumType>(Type)) {
+    rc_recur collectArrayPaths(Enum.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               CurrentArrayPath,
+                               ArrayPaths);
+  } else if (auto Array = mlir::dyn_cast<clift::ArrayType>(Type)) {
+    // An array covers the offset if the offset lands in one of its elements
+    uint64_t Stride = getObjectSize(Array.getElementType());
+    uint64_t Relative = Offset - CurrentOffset;
+    if (Relative / Stride >= Array.getElementsCount())
+      rc_return;
 
+    ArrayPath NewArrayPath = enterArray(Array, CurrentOffset, CurrentArrayPath);
+    ArrayPaths.push_back(NewArrayPath);
+
+    // Go on into the element the offset lands in, as if it were the first
+    rc_recur collectArrayPaths(Array.getElementType(),
+                               CurrentOffset + Relative % Stride,
+                               CurrentOffset,
+                               NewArrayPath,
+                               ArrayPaths);
+  } else if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
+    for (clift::FieldAttr Field : Class.getFields()) {
+      int64_t FieldOffset = CurrentOffset + Field.getOffset();
+      uint64_t FieldSize = getObjectSize(Field.getType());
+      if (FieldOffset <= Offset
+          and static_cast<uint64_t>(Offset - FieldOffset) < FieldSize)
+        rc_recur collectArrayPaths(Field.getType(),
+                                   Offset,
+                                   FieldOffset,
+                                   CurrentArrayPath,
+                                   ArrayPaths);
+    }
+  }
+}
+
+RecursiveCoroutine<void>
+TypeTraversalAnalyzer::collectTraversals(mlir::Type Type,
+                                         int64_t Offset,
+                                         int64_t CurrentOffset,
+                                         const std::vector<uint64_t> &FieldPath,
+                                         const ArrayPath &CurrentArrayPath,
+                                         std::vector<Traversal> &Traversals) {
   // We should never reach a type with zero size - if we do, it means there is
   // something severely wrong in the types we're working with
   revng_assert(getObjectSizeOrZero(Type) > 0);
 
-  if (auto PrimitiveType = mlir::dyn_cast<clift::PrimitiveType>(Type)) {
-    // `PrimitiveType` is a leaf node in our traversal
-    Traversals.emplace_back(PrimitiveType,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-    rc_return;
-  }
+  // Pointers are leaves: we do not traverse through them, but a `Traversal`
+  // can land on a field whose type is a pointer
+  if (mlir::isa<clift::PrimitiveType, clift::PointerType>(Type)) {
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
+  } else if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
+    rc_recur collectTraversals(Typedef.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               FieldPath,
+                               CurrentArrayPath,
+                               Traversals);
+  } else if (auto Enum = mlir::dyn_cast<clift::EnumType>(Type)) {
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
+    rc_recur collectTraversals(Enum.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               FieldPath,
+                               CurrentArrayPath,
+                               Traversals);
+  } else if (auto Array = mlir::dyn_cast<clift::ArrayType>(Type)) {
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
 
-  // `PointerType` is a leaf node in our traversal: we do not traverse
-  // through pointers, but we still want to produce a `Traversal` that
-  // lands on a field whose type is a pointer
-  if (auto Pointer = mlir::dyn_cast<clift::PointerType>(Type)) {
-    Traversals.emplace_back(Pointer,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-    rc_return;
-  }
+    // Only the first element is walked: the access's constant array indices
+    // have already been made explicit. An element ending at the offset is still
+    // walked, as an access of no size there can land on its last field.
+    uint64_t Stride = getObjectSize(Array.getElementType());
+    if (static_cast<uint64_t>(Offset - CurrentOffset) <= Stride)
+      rc_recur collectTraversals(Array.getElementType(),
+                                 Offset,
+                                 CurrentOffset,
+                                 FieldPath,
+                                 enterArray(Array,
+                                            CurrentOffset,
+                                            CurrentArrayPath),
+                                 Traversals);
+  } else if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
 
-  // Traverse each `typedef`
-  if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
-    Traversals.emplace_back(Typedef,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-    rc_recur traverseImpl(Typedef.getUnderlyingType(),
-                          Traversals,
-                          ArrayPaths,
-                          CurrentOffset,
-                          FieldPath,
-                          CurrentArrayPath);
-    rc_return;
-  }
-
-  // Traverse the `array`
-  if (auto ArrayType = mlir::dyn_cast<clift::ArrayType>(Type)) {
-    Traversals.emplace_back(ArrayType,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-    mlir::Type ElementType = ArrayType.getElementType();
-    uint64_t NumElements = ArrayType.getElementsCount();
-    uint64_t ElementSize = getObjectSize(ElementType);
-
-    // Add this array to the current array path
-    NestedArrayShape ArrayInfo;
-    ArrayInfo.OffsetFromParentArrayElement = 0;
-    ArrayInfo.Stride = ElementSize;
-    ArrayInfo.NumElements = NumElements;
-
-    ArrayPath NewArrayPath = CurrentArrayPath;
-    if (!NewArrayPath.empty()) {
-
-      // Adjust `OffsetFromParentArray` for nested arrays
-      ArrayInfo
-        .OffsetFromParentArrayElement = CurrentOffset
-                                        - (NewArrayPath.back()
-                                             .OffsetFromParentArrayElement);
-    } else {
-      ArrayInfo.OffsetFromParentArrayElement = CurrentOffset;
-    }
-    NewArrayPath.push_back(ArrayInfo);
-
-    // Record this array path
-    ArrayPaths.push_back(NewArrayPath);
-
-    // Traverse into the first element of the array
-    rc_recur traverseImpl(ElementType,
-                          Traversals,
-                          ArrayPaths,
-                          CurrentOffset,
-                          FieldPath,
-                          NewArrayPath);
-    rc_return;
-  }
-
-  // Traverse `struct` or `union` (both implement `ClassType`).
-  // For `union`s, `Field.getOffset()` always returns 0 by verification.
-  if (auto ClassType = mlir::dyn_cast<clift::ClassType>(Type)) {
-    Traversals.emplace_back(ClassType,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-    llvm::ArrayRef<clift::FieldAttr> Fields = ClassType.getFields();
+    // For `union`s, `Field.getOffset()` always returns 0 by verification
+    llvm::ArrayRef<clift::FieldAttr> Fields = Class.getFields();
     for (size_t I = 0; I < Fields.size(); ++I) {
-      clift::FieldAttr Field = Fields[I];
-      mlir::Type FieldType = Field.getType();
-      int64_t FieldOffset = CurrentOffset + Field.getOffset();
+      int64_t FieldOffset = CurrentOffset + Fields[I].getOffset();
+      uint64_t FieldSize = getObjectSize(Fields[I].getType());
+      if (FieldOffset > Offset
+          or static_cast<uint64_t>(Offset - FieldOffset) > FieldSize)
+        continue;
 
       std::vector<uint64_t> NewFieldPath = FieldPath;
       NewFieldPath.push_back(static_cast<uint64_t>(I));
-
-      rc_recur traverseImpl(FieldType,
-                            Traversals,
-                            ArrayPaths,
-                            FieldOffset,
-                            NewFieldPath,
-                            CurrentArrayPath);
+      rc_recur collectTraversals(Fields[I].getType(),
+                                 Offset,
+                                 FieldOffset,
+                                 NewFieldPath,
+                                 CurrentArrayPath,
+                                 Traversals);
     }
-    rc_return;
-  }
-
-  // Traverse the `enum`
-  if (auto EnumType = mlir::dyn_cast<clift::EnumType>(Type)) {
-
-    // We traverse the underlying `EnumType`
-    mlir::Type UnderlyingType = EnumType.getUnderlyingType();
-
-    // Add traversal for the `enum` itself
-    Traversals.emplace_back(EnumType,
-                            CurrentOffset,
-                            0,
-                            FieldPath,
-                            CurrentArrayPath);
-
-    // Also traverse into the underlying type inside the `enum
-    rc_recur traverseImpl(UnderlyingType,
-                          Traversals,
-                          ArrayPaths,
-                          CurrentOffset,
-                          FieldPath,
-                          CurrentArrayPath);
-    rc_return;
   }
 }
 
@@ -1045,19 +855,12 @@ BestTraversalChooser::toExplicitArrayAccesses(const PointerArithmetic
                                               mlir::Type BaseType) {
   ExplicitPointerArithmetics Result;
 
-  // We retrieve all the `ArrayPath`s that we can build from `BaseType`
+  // The `ArrayPath`s of `BaseType` whose arrays the access lands in
+  int64_t Offset = Arithmetic.Offset.BaseOffset.getZExtValue();
   const std::vector<ArrayPath> &ArrayPaths = TraversalAnalyzer
-                                               .getArrayPaths(BaseType);
+                                               .getArrayPaths(BaseType, Offset);
 
-  // We now filter the `ArrayPath`s by taking into consideration only those that
-  // are compatible with the `BaseOffset` access present in the
-  // `PointerArithmetic` that we are considering
-  auto CompatibleArrayPaths = findCompatibleArrayPaths(ArrayPaths,
-                                                       Arithmetic.Offset
-                                                         .BaseOffset);
-
-  for (const ArrayPath *TheArrayPath : CompatibleArrayPaths) {
-
+  for (const ArrayPath &Path : ArrayPaths) {
     // Try and turn `Arithmetic` into a form where all array indexes, even the
     // constant ones, are explicit. In case of success, we enqueue the
     // `Explicit`, together with the array shapes it walked, in the final
@@ -1065,11 +868,11 @@ BestTraversalChooser::toExplicitArrayAccesses(const PointerArithmetic
     // which the `CommonStrides` criterion compares against each candidate
     // `Ideal`.
     std::optional<PointerArithmetic>
-      Explicit = getExplicitArithmetic(Arithmetic, *TheArrayPath);
+      Explicit = getExplicitArithmetic(Arithmetic, Path);
     if (Explicit) {
       Result
         .push_back({ .Arithmetic = std::move(*Explicit),
-                     .AccessArrays = arrayPathToSortedVector(*TheArrayPath) });
+                     .AccessArrays = arrayPathToSortedVector(Path) });
     }
   }
 
@@ -1118,25 +921,14 @@ BestTraversalChooser::getBestTraversal(mlir::Type BaseType,
   std::optional<Traversal> BestTraversal = std::nullopt;
   Score BestScore = Score::invalid();
 
-  // The `Traversal`s are lazily computed upon first inspection of a `BaseType`
-  const std::vector<Traversal> &Traversals = TraversalAnalyzer
-                                               .getTraversals(BaseType);
-
   for (const ExplicitPointerArithmetic &ExplicitAccess : ExplicitAccesses) {
     const PointerArithmetic &Explicit = ExplicitAccess.Arithmetic;
 
-    // Get the range of `Traversal`s to compare from the `TraversalAnalyzer`.
-    // There are two modes of operation for this: with `SmartLookup`, or
-    // without.
-    // ATM only `SmartLookup` is not implemented. Once it is however,
-    // in the tests we want to double check that the results obtained are the
-    // SAME both if `SmartLookup` enabled and disabled.
-    auto [Begin, End] = TraversalAnalyzer.getTraversalRange(BaseType,
-                                                            Explicit,
-                                                            PointeeType,
-                                                            false);
-    for (auto It = Begin; It != End; ++It) {
-      const Traversal &Ideal = *It;
+    // Only the `Traversal`s that cover the offset the access starts at can
+    // describe it
+    int64_t Offset = Explicit.Offset.BaseOffset.getZExtValue();
+    for (const Traversal &Ideal :
+         TraversalAnalyzer.getTraversals(BaseType, Offset)) {
 
       // Skip `Ideals` whose `StartOffset` exceeds the `Explicit` `BaseOffset`,
       // the `Explicit` cannot reach that far, and `toTraversal` would
