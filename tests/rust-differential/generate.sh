@@ -66,7 +66,7 @@ open(f"{out}/wrapper-stubs.c", "w").write("\n".join(stubs) + "\n")
 argv = json.load(open(f"{out}/report.json"))["commands"][-1]["argv"]
 argv[argv.index("-o"):argv.index("-o")] = renames
 shim_object = f"{out}/float-shims.o"
-subprocess.run([argv[0], "-c", "-O1", "-w", f"{out}/float-shims.c", "-o", shim_object], check=True)
+subprocess.run([argv[0], "-c", "-fPIC", "-O1", "-w", f"{out}/float-shims.c", "-o", shim_object], check=True)
 argv[argv.index("-o"):argv.index("-o")] = [f"{out}/segment-init.c", f"{out}/wrapper-stubs.c", shim_object]
 # libm, for the softfloat routines extracted below
 argv.append("-lm")
