@@ -66,6 +66,7 @@ void DetectCStrings::run(llvm::Module &M, llvm::Function *LimitTo) {
                 << getName(SegmentUse.TheUse->getUser()) << ". Address is "
                 << SegmentUse.Address.toString() << ".");
     LoggerIndent Indent(Log);
+    UsedAddresses.push_back(SegmentUse.Address);
     auto MaybeData = BinaryView.getFromAddressOn(SegmentUse.Address);
 
     // Check if there's data at the given offset
@@ -166,9 +167,50 @@ DetectCStrings::CandidateList::byAddress() const {
   }
 }
 
+const Candidate *
+DetectCStrings::CandidateList::find(MetaAddress Address,
+                                    Encoding TheEncoding) const {
+  auto It = llvm::lower_bound(Candidates,
+                              Address,
+                              [](const Candidate &Entry, MetaAddress Address) {
+                                return Entry.Address < Address;
+                              });
+  for (; It != Candidates.end() and It->Address == Address; ++It)
+    if (It->String.encoding() == TheEncoding)
+      return &*It;
+  return nullptr;
+}
+
+/// A string runs up to the first zero, but strings that are not C strings, such
+/// as Rust's, have no terminator: the zero ending them can be the first byte of
+/// the next object, say the constant -inf, whose low bytes are zero. When the
+/// code uses an address inside the string, terminator included, the bytes there
+/// are another object, unless they are a tail of the string, which linkers
+/// share between strings that end the same way.
+bool DetectCStrings::isCutShortByAnotherObject(const Candidate &TheCandidate)
+  const {
+  MetaAddress End = TheCandidate.Address + TheCandidate.String.data().size();
+  if (not End.isValid())
+    return true;
+
+  for (auto It = llvm::upper_bound(UsedAddresses, TheCandidate.Address);
+       It != UsedAddresses.end() and *It < End;
+       ++It) {
+    const Candidate *Tail = Candidates.find(*It,
+                                            TheCandidate.String.encoding());
+    if (Tail == nullptr or not Tail->ends(End))
+      return true;
+  }
+
+  return false;
+}
+
 void DetectCStrings::commit() {
   Candidates.sortAndDeduplicate();
   Candidates.rate();
+  llvm::sort(UsedAddresses);
+  UsedAddresses.erase(std::unique(UsedAddresses.begin(), UsedAddresses.end()),
+                      UsedAddresses.end());
 
   revng_log(Log, "Committing");
   LoggerIndent Indent(Log);
@@ -192,6 +234,11 @@ void DetectCStrings::commit() {
 
     if (Winner == nullptr)
       continue;
+
+    if (isCutShortByAnotherObject(*Winner)) {
+      logCandidate("Discarded (runs into another object)", *Winner);
+      continue;
+    }
 
     // A string in bytes the lift decodes as code is a value that happens to
     // point into code: claiming the bytes would make them data and take them

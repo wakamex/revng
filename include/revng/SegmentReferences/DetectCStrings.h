@@ -42,6 +42,10 @@ public:
       MetaAddress End = Address + String.data().size();
       return End.isValid() and Next.Address == End;
     }
+
+    bool ends(MetaAddress End) const {
+      return Address + String.data().size() == End;
+    }
   };
 
   class CandidateList {
@@ -62,6 +66,11 @@ public:
     /// \return sets of candidates on the same address
     cppcoro::generator<llvm::ArrayRef<Candidate>> byAddress() const;
 
+    /// \return the reading of \p Address in \p TheEncoding, if there is one.
+    /// Call it after `sortAndDeduplicate`.
+    const Candidate *find(MetaAddress Address,
+                          UnicodeCStringView::Encoding TheEncoding) const;
+
   private:
     void approve(llvm::ArrayRef<Candidate *> Run);
   };
@@ -75,6 +84,9 @@ private:
   MetaAddressRangeSet Code;
   CandidateList Candidates;
 
+  /// Every address the code uses, sorted by `commit`
+  std::vector<MetaAddress> UsedAddresses;
+
 public:
   DetectCStrings(model::Binary &Binary, RawBinaryView &BinaryView) :
     SegmentUses(Binary, SegmentUsesEnumerator::SegmentAccess::ReadOnly),
@@ -86,6 +98,9 @@ public:
   void run(llvm::Module &M, llvm::Function *LimitTo = nullptr);
 
   void commit();
+
+private:
+  bool isCutShortByAnotherObject(const Candidate &TheCandidate) const;
 };
 
 namespace revng::pypeline::analyses {

@@ -608,3 +608,4 @@ model/microsoft-stack-arguments.S
 model/prototype-set-after-use.S
 model/sysv-float-arguments.S
 segment-references/c-strings-outside-code.S
+segment-references/c-strings-cut-short.S
