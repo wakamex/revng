@@ -43,12 +43,27 @@ stubs.append("int __fpclassifyf(float x) { return fpclassify(x); }")
 # The C calls softfloat routines without their last argument, the floating point status, and with floating point
 # types where QEMU has their bits in integers: adapt the calls
 bits = {"float64_t": "uint64_t", "float32_t": "uint32_t"}
-shims, renames = ["static char revng_float_status[256];"], []
+# The helper bitcode reaches CPU state through its address relative to the constant @env, so the status is passed at
+# the address of the SSE status in that CPU state, which the C's float operations come from
+orchestra = __import__("os").environ["ORCHESTRA"]
+rt = __import__("os").path.dirname(__import__("os").path.dirname(launcher))
+ir = subprocess.run([f"{orchestra}/bin/llvm-dis", f"{rt}/share/revng/libtcg-helpers-full-x86_64.bc", "-o", "-"],
+                    capture_output=True, text=True, check=True).stdout
+env = int(re.search(r"^@env = constant i64 (\d+)", ir, re.M)[1])
+field = re.search(r"%sse_status[.\d]* = getelementptr inbounds %struct\.CPUArchState, ptr %env, i32 0, i32 (\d+)", ir)[1]
+probe = "\n".join(re.findall(r"^(?:target datalayout .*|%\S+ = type .*)$", ir, re.M)) + (
+    f"\ndefine i64 @offset() {{\n  %p = getelementptr %struct.CPUArchState, ptr null, i32 0, i32 {field}\n"
+    "  %i = ptrtoint ptr %p to i64\n  ret i64 %i\n}\n")
+folded = subprocess.run([f"{orchestra}/lib64/llvm/llvm/bin/opt", "-S", "-passes=instcombine"], input=probe,
+                        capture_output=True, text=True, check=True).stdout
+offset = int(re.search(r"ret i64 (\d+)", folded)[1])
+status = f"(void *) {env + offset}UL"
+shims, renames = [], []
 for result, name, arguments in re.findall(r"^(\w+) ((?:u?int\d+|float\d+|floatx80)_\w+)\(([^()*]*)\);$", open(f"{out}/helpers.h").read(), re.M):
     types = [] if arguments.strip() in ("", "void") else [t.strip() for t in arguments.split(",")]
     formal = ", ".join(f"{t} a{i}" for i, t in enumerate(types)) or "void"
     actual = "".join((f"to_bits_{t}(a{i}), " if t in bits else f"a{i}, ") for i, t in enumerate(types))
-    call = f"{name}({actual}revng_float_status)"
+    call = f"{name}({actual}{status})"
     shims += [f"{bits.get(result, result)} {name}({', '.join([bits.get(t, t) for t in types] + ['void *'])});",
               f"{result} revng_shim_{name}({formal}) {{ return {f'from_bits_{result}({call})' if result in bits else call}; }}"]
     renames.append(f"-D{name}=revng_shim_{name}")
