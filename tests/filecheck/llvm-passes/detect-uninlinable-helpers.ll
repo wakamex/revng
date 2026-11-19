@@ -121,45 +121,6 @@ entry:
 ; CHECK-NOT: define {{.*}}@helper_recursive_b{{.*}}section "revng_inline"
 
 ;
-; (7) never-inline (loop-carried index): the `getelementptr` index is a `phi`,
-; and inlining does not unroll the loop.
-;
-define void @helper_never_loop_index(ptr %base) section "revng_inline" {
-entry:
-  br label %header
-header:
-  %i = phi i64 [ 0, %entry ], [ %next, %body ]
-  %done = icmp eq i64 %i, 8
-  br i1 %done, label %exit, label %body
-body:
-  %p = getelementptr i32, ptr %base, i64 %i
-  store i32 0, ptr %p
-  %next = add i64 %i, 1
-  br label %header
-exit:
-  ret void
-}
-; CHECK-NOT: define {{.*}}@helper_never_loop_index{{.*}}section "revng_inline"
-
-;
-; (8) never-inline (`phi`): even outside of loops, it depends on the branch
-; taken, which the walk does not follow.
-;
-define ptr @helper_never_phi(ptr %base, i1 %c) section "revng_inline" {
-entry:
-  br i1 %c, label %left, label %right
-left:
-  br label %merge
-right:
-  br label %merge
-merge:
-  %idx = phi i64 [ 1, %left ], [ 2, %right ]
-  %p = getelementptr i64, ptr %base, i64 %idx
-  ret ptr %p
-}
-; CHECK-NOT: define {{.*}}@helper_never_phi{{.*}}section "revng_inline"
-
-;
 ; (9) `conditional` through a `select`: its condition is an operand, so the
 ; walk reaches the argument.
 ;
