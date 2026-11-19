@@ -423,20 +423,24 @@ Exit:                 ; preds = %Loop
 ;
 ; CHECK-LABEL: define i64 @latch_with_exit_value(i64 %a, i1 %c0, i1 %c1, i1 %c2)
 ;
-; %acc, %next and %result share a variable. Latch passes %next to Header
-; unchanged and 42 to Exit, so the store of 42 must go on the Latch-Exit edge:
-; in Latch it would clobber the accumulator on the back edge.
+; %acc, %next and %result could share a variable, with the store of 42 on the
+; Latch-Exit edge, since in Latch it would clobber the accumulator on the back
+; edge. This fork keeps %result in a variable of its own, because its check
+; against stores that clobber a PHI does not see the split edge: Header copies
+; the accumulator into it, Latch stores 42 there, and Exit reads it.
+;
+; CHECK: Header:
+; CHECK: store i64 {{%[0-9]+}}, ptr [[RESULT:%[0-9]+]]
+; CHECK: Latch:
+; CHECK: store i64 42, ptr [[RESULT]]
+; CHECK: Exit:
+; CHECK-NEXT: [[VALUE:%[0-9]+]] = load i64, ptr [[RESULT]]
+; CHECK-NEXT: ret i64 [[VALUE]]
 define i64 @latch_with_exit_value(i64 %a, i1 %c0, i1 %c1, i1 %c2) {
 
-; CHECK: Entry:
-; CHECK: [[ALLOCA:%[a-zA-Z0-9_]+]] = alloca i64
-; CHECK-NOT: alloca
-; CHECK: store i64 %a, ptr [[ALLOCA]]
 Entry:
   br label %Header
 
-; CHECK: Header:
-; CHECK: load i64, ptr [[ALLOCA]]
 Header:
   %acc = phi i64 [ %a, %Entry ], [ %next, %Latch ]
   br i1 %c0, label %Exit, label %Body
@@ -444,31 +448,20 @@ Header:
 Body:
   br i1 %c1, label %Add, label %Negate
 
-; CHECK: Add:
-; CHECK: store i64 %add, ptr [[ALLOCA]]
 Add:
   %add = add i64 %acc, 1
   br label %Latch
 
-; CHECK: Negate:
-; CHECK: store i64 %negate, ptr [[ALLOCA]]
 Negate:
   %negate = sub i64 0, %acc
   br label %Latch
 
-; CHECK: Latch:
-; CHECK-NOT: store
-; CHECK: br i1 %c2, label %Latch-to-Exit, label %Header
 Latch:
   %next = phi i64 [ %add, %Add ], [ %negate, %Negate ]
   br i1 %c2, label %Exit, label %Header
 
-; CHECK: Exit:
-; CHECK: load i64, ptr [[ALLOCA]]
 Exit:
   %result = phi i64 [ %acc, %Header ], [ 42, %Latch ]
   ret i64 %result
 
-; CHECK: Latch-to-Exit:
-; CHECK: store i64 42, ptr [[ALLOCA]]
 }
