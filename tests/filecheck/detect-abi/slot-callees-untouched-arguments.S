@@ -14,7 +14,7 @@
 # RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
-# CHECK: float64_t var_{{[0-9]+}} = function_0x{{[0-9a-f]+}}_Code_x86_64(var_{{[0-9]+}}, var_{{[0-9]+}}, bit_cast(float64_t, int64_to_float64(argument_2
+# CHECK: float64_t var_{{[0-9]+}} = function_0x{{[0-9a-f]+}}_Code_x86_64(var_{{[0-9]+}}, var_{{[0-9]+}}, (int64_t) argument_2);
 # CHECK: float64_t function_0x{{[0-9a-f]+}}_Code_x86_64(float64_t argument_0, float64_t argument_1, float64_t argument_2) {
 # CHECK-NEXT: float64_t var_0 = ((cabifunction_{{[0-9]+}} *) {{.+}})(argument_0, argument_1, argument_2);
 

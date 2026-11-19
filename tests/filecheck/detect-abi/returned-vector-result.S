@@ -18,7 +18,7 @@
 # CHECK: float64_t function_0x{{[0-9a-f]+}}_Code_x86_64(float64_t argument_0, float64_t argument_1, float64_t argument_2) {
 # CHECK-NEXT: return function_0x{{[0-9a-f]+}}_Code_x86_64(argument_0, argument_1, argument_2);
 # CHECK: float64_t function_0x{{[0-9a-f]+}}_Code_x86_64(float64_t argument_0, float64_t argument_1, float64_t argument_2) {
-# CHECK-NEXT: float64_add(float64_mul(bit_cast(generic64_t, argument_0), bit_cast(generic64_t, argument_1),
+# CHECK-NEXT: float64_t var_0 = argument_0 * argument_1 + argument_2;
 
 .text
 .globl entry

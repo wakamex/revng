@@ -32,7 +32,7 @@
 # CHECK-NEXT: return function_0x{{[0-9a-f]+}}_Code_x86_64(argument_0);
 #
 # CHECK: release(generic64_t argument_0
-# CHECK-NEXT: free(argument_0
+# CHECK-NEXT: free((void *) argument_0);
 
 .text
 .type method, @function

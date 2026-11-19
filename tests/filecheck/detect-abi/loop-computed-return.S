@@ -20,7 +20,7 @@
 #
 # CHECK: float64_t scale(
 # CHECK: float64_t [[RESULT:var_[0-9]+]] = scale(
-# CHECK-NEXT: float64_to_int64_round_to_zero(bit_cast(generic64_t, [[RESULT]]),
+# CHECK-NEXT: return (int64_t) [[RESULT]];
 
 	.text
 	.globl	scale
