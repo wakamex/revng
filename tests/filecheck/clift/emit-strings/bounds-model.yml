@@ -1,0 +1,70 @@
+#
+# This file is distributed under the MIT License. See LICENSE.md for details.
+#
+
+Architecture: x86_64
+Version: 15
+
+TypeDefinitions:
+  - ID: 1000
+    Kind: CABIFunctionDefinition
+    ABI: SystemV_x86_64
+    Arguments:
+      - Index: 0
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+          Size: 8
+
+  - ID: 2000
+    Kind: StructDefinition
+    Size: 28
+    Fields:
+      - Offset: 0
+        Type:
+          Kind: PrimitiveType
+          PrimitiveKind: Unsigned
+          Size: 4
+      - Offset: 4
+        Type:
+          Kind: ArrayType
+          ElementCount: 12
+          ElementType:
+            Kind: PrimitiveType
+            PrimitiveKind: Unsigned
+            Size: 1
+            IsConst: true
+      - Offset: 16
+        Type:
+          Kind: ArrayType
+          ElementCount: 4
+          ElementType:
+            Kind: PrimitiveType
+            PrimitiveKind: Unsigned
+            Size: 1
+            IsConst: true
+
+Functions:
+  - Entry: "0x401000:Code_x86_64"
+    Prototype:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/1000-CABIFunctionDefinition"
+
+Segments:
+  - StartAddress: "0x401000:Generic64"
+    VirtualSize: 0x1000
+    StartOffset: 0
+    FileSize: 8
+    IsReadable: true
+    IsWriteable: false
+    IsExecutable: true
+  - StartAddress: "0x402000:Generic64"
+    VirtualSize: 0x1000
+    StartOffset: 8
+    FileSize: 28
+    IsReadable: true
+    IsWriteable: false
+    IsExecutable: false
+    Type:
+      Kind: DefinedType
+      Definition: "/TypeDefinitions/2000-StructDefinition"

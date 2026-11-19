@@ -2,11 +2,17 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <limits>
+#include <optional>
+
+#include "llvm/ADT/SmallVector.h"
+
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 #include "revng/Clift/Clift.h"
 #include "revng/Clift/CliftOpHelpers.h"
+#include "revng/Clift/CliftTypes.h"
 #include "revng/Clift/LocationAddresses.h"
 #include "revng/CliftPipes/EmitStrings.h"
 #include "revng/Model/Binary.h"
@@ -52,6 +58,309 @@ static MetaAddress getGlobalObjectMetaAddress(mlir::Value Value) {
   }
 }
 
+static std::optional<int64_t> checkedAdd(int64_t LHS, int64_t RHS) {
+  int64_t Result;
+  if (__builtin_add_overflow(LHS, RHS, &Result))
+    return std::nullopt;
+  return Result;
+}
+
+static std::optional<int64_t> checkedSub(int64_t LHS, int64_t RHS) {
+  int64_t Result;
+  if (__builtin_sub_overflow(LHS, RHS, &Result))
+    return std::nullopt;
+  return Result;
+}
+
+static std::optional<int64_t> checkedMul(int64_t LHS, int64_t RHS) {
+  int64_t Result;
+  if (__builtin_mul_overflow(LHS, RHS, &Result))
+    return std::nullopt;
+  return Result;
+}
+
+static std::optional<int64_t> getSignedOffset(mlir::Value V) {
+  if (auto Imm = V.getDefiningOp<ImmediateOp>()) {
+    auto IntType = unwrapped_dyn_cast<IntegerType>(Imm.getType());
+    if (not IntType)
+      return std::nullopt;
+
+    const llvm::APInt &Value = Imm.getValue();
+    if (IntType.getKind() == IntegerKind::Signed) {
+      if (Value.getSignificantBits() > 64)
+        return std::nullopt;
+      return Value.getSExtValue();
+    }
+
+    if (Value.getActiveBits() > 63)
+      return std::nullopt;
+    return static_cast<int64_t>(Value.getZExtValue());
+  }
+
+  if (auto Neg = V.getDefiningOp<NegOp>()) {
+    auto Inner = getSignedOffset(Neg.getValue());
+    if (not Inner or *Inner == std::numeric_limits<int64_t>::min())
+      return std::nullopt;
+    return -*Inner;
+  }
+
+  return std::nullopt;
+}
+
+/// Returns true only when every use of \p Access stays within the \p Size bytes
+/// of the string object and does not rely on its address relative to the
+/// enclosing segment. Replacing the segment field access with a standalone
+/// string literal detaches it from the segment, so out-of-bounds reads,
+/// dynamic pointer arithmetic, and segment-relative address arithmetic must
+/// keep the original segment access.
+static bool staysWithinString(DirectAccessOp Access, uint64_t Size) {
+  constexpr uint64_t MaxInt64 = std::numeric_limits<int64_t>::max();
+  auto IsInBounds = [Size](int64_t Offset, uint64_t AccessSize) -> bool {
+    if (Offset < 0)
+      return false;
+    uint64_t UnsignedOffset = static_cast<uint64_t>(Offset);
+    if (UnsignedOffset > Size)
+      return false;
+    return AccessSize <= Size - UnsignedOffset;
+  };
+
+  struct UseState {
+    mlir::Value Value;
+    int64_t Offset;
+    bool IsLvalue;
+  };
+
+  llvm::SmallVector<UseState> Worklist;
+  Worklist.push_back({ Access.getResult(), 0, true });
+
+  while (not Worklist.empty()) {
+    UseState State = Worklist.pop_back_val();
+
+    for (mlir::OpOperand &Use : State.Value.getUses()) {
+      mlir::Operation *Op = Use.getOwner();
+
+      if (State.IsLvalue) {
+        if (mlir::isa<AddressofOp, DecayOp>(Op)) {
+          Worklist.push_back({ Op->getResult(0), State.Offset, false });
+          continue;
+        }
+
+        if (auto FieldAccess = mlir::dyn_cast<DirectAccessOp>(Op)) {
+          uint64_t FieldOffset = FieldAccess.getFieldAttr().getOffset();
+          if (FieldOffset > MaxInt64)
+            return false;
+          auto NewOffset = checkedAdd(State.Offset,
+                                      static_cast<int64_t>(FieldOffset));
+          if (not NewOffset)
+            return false;
+          Worklist.push_back({ FieldAccess.getResult(), *NewOffset, true });
+          continue;
+        }
+
+        if (auto Comma = mlir::dyn_cast<CommaOp>(Op)) {
+          if (Use.getOperandNumber() == 1) {
+            Worklist.push_back({ Comma.getResult(), State.Offset, true });
+            continue;
+          }
+          uint64_t ObjSize = getObjectSizeOrZero(State.Value.getType());
+          if (ObjSize == 0 or not IsInBounds(State.Offset, ObjSize))
+            return false;
+          continue;
+        }
+
+        if (auto Assign = mlir::dyn_cast<AssignOp>(Op)) {
+          if (Use.getOperandNumber() == 0)
+            return false;
+        } else if (mlir::isa<IncrementOp,
+                             DecrementOp,
+                             PostIncrementOp,
+                             PostDecrementOp>(Op)) {
+          return false;
+        }
+
+        // Any other use performs an lvalue-to-rvalue read (or yields the
+        // object) of its full type size at the current offset.
+        uint64_t ObjSize = getObjectSizeOrZero(State.Value.getType());
+        if (ObjSize == 0 or not IsInBounds(State.Offset, ObjSize))
+          return false;
+        continue;
+      }
+
+      if (mlir::isa<BitCastOp, ImplicitCastOp, PtrResizeOp>(Op)) {
+        Worklist.push_back({ Op->getResult(0), State.Offset, false });
+        continue;
+      }
+
+      if (auto PtrAdd = mlir::dyn_cast<PtrAddOp>(Op)) {
+        if (PtrAdd.getPointer() != State.Value)
+          return false;
+        auto PtrType = unwrapped_dyn_cast<PointerType>(State.Value.getType());
+        uint64_t ElemSize = PtrType ?
+                              getObjectSizeOrZero(PtrType.getPointeeType()) :
+                              0;
+        if (ElemSize == 0 or ElemSize > MaxInt64)
+          return false;
+        auto Step = getSignedOffset(PtrAdd.getOffset());
+        if (not Step)
+          return false;
+        auto Delta = checkedMul(*Step, static_cast<int64_t>(ElemSize));
+        if (not Delta)
+          return false;
+        auto NewOffset = checkedAdd(State.Offset, *Delta);
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ PtrAdd.getResult(), *NewOffset, false });
+        continue;
+      }
+
+      if (auto PtrSub = mlir::dyn_cast<PtrSubOp>(Op)) {
+        if (PtrSub.getPointer() != State.Value)
+          return false;
+        auto PtrType = unwrapped_dyn_cast<PointerType>(State.Value.getType());
+        uint64_t ElemSize = PtrType ?
+                              getObjectSizeOrZero(PtrType.getPointeeType()) :
+                              0;
+        if (ElemSize == 0 or ElemSize > MaxInt64)
+          return false;
+        auto Step = getSignedOffset(PtrSub.getOffset());
+        if (not Step)
+          return false;
+        auto Delta = checkedMul(*Step, static_cast<int64_t>(ElemSize));
+        if (not Delta)
+          return false;
+        auto NewOffset = checkedSub(State.Offset, *Delta);
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ PtrSub.getResult(), *NewOffset, false });
+        continue;
+      }
+
+      if (auto Add = mlir::dyn_cast<AddOp>(Op)) {
+        mlir::Value Other = Use.getOperandNumber() == 0 ? Add.getRhs() :
+                                                          Add.getLhs();
+        auto Delta = getSignedOffset(Other);
+        if (not Delta)
+          return false;
+        auto NewOffset = checkedAdd(State.Offset, *Delta);
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ Add.getResult(), *NewOffset, false });
+        continue;
+      }
+
+      if (auto Sub = mlir::dyn_cast<SubOp>(Op)) {
+        if (Use.getOperandNumber() != 0)
+          return false;
+        auto Delta = getSignedOffset(Sub.getRhs());
+        if (not Delta)
+          return false;
+        auto NewOffset = checkedSub(State.Offset, *Delta);
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ Sub.getResult(), *NewOffset, false });
+        continue;
+      }
+
+      if (auto Subscript = mlir::dyn_cast<SubscriptOp>(Op)) {
+        if (Subscript.getPointer() != State.Value)
+          return false;
+        uint64_t ElemSize = getObjectSizeOrZero(Subscript.getType());
+        if (ElemSize == 0 or ElemSize > MaxInt64)
+          return false;
+        auto Index = getSignedOffset(Subscript.getIndex());
+        if (not Index)
+          return false;
+        auto Delta = checkedMul(*Index, static_cast<int64_t>(ElemSize));
+        if (not Delta)
+          return false;
+        auto NewOffset = checkedAdd(State.Offset, *Delta);
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ Subscript.getResult(), *NewOffset, true });
+        continue;
+      }
+
+      if (auto Indir = mlir::dyn_cast<IndirectionOp>(Op)) {
+        Worklist.push_back({ Indir.getResult(), State.Offset, true });
+        continue;
+      }
+
+      if (auto IndirAccess = mlir::dyn_cast<IndirectAccessOp>(Op)) {
+        uint64_t FieldOffset = IndirAccess.getFieldAttr().getOffset();
+        if (FieldOffset > MaxInt64)
+          return false;
+        auto NewOffset = checkedAdd(State.Offset,
+                                    static_cast<int64_t>(FieldOffset));
+        if (not NewOffset)
+          return false;
+        Worklist.push_back({ IndirAccess.getResult(), *NewOffset, true });
+        continue;
+      }
+
+      if (auto Comma = mlir::dyn_cast<CommaOp>(Op)) {
+        if (Use.getOperandNumber() == 1) {
+          Worklist.push_back({ Comma.getResult(), State.Offset, false });
+          continue;
+        }
+        if (not IsInBounds(State.Offset, 1))
+          return false;
+        continue;
+      }
+
+      if (auto Ternary = mlir::dyn_cast<TernaryOp>(Op)) {
+        if (Use.getOperandNumber() != 0) {
+          Worklist.push_back({ Ternary.getResult(), State.Offset, false });
+          continue;
+        }
+        if (not IsInBounds(State.Offset, 1))
+          return false;
+        continue;
+      }
+
+      if (mlir::isa<PtrDiffOp,
+                    MulOp,
+                    SDivOp,
+                    UDivOp,
+                    SRemOp,
+                    URemOp,
+                    NegOp,
+                    BitwiseNotOp,
+                    BitwiseAndOp,
+                    BitwiseOrOp,
+                    BitwiseXorOp,
+                    ShlOp,
+                    ShrOp,
+                    SarOp,
+                    TruncateOp,
+                    ZeroExtendOp,
+                    SignExtendOp>(Op)) {
+        return false;
+      }
+
+      // Escaping address (call argument, assignment RHS, comparison, return,
+      // yield, etc.): verify that it stays within the string bytes.
+      if (auto PtrType = unwrapped_dyn_cast<PointerType>(State.Value
+                                                           .getType())) {
+        mlir::Type Pointee = PtrType.getPointeeType();
+        if (unwrapped_isa<IntegerType,
+                          FloatType,
+                          EnumType,
+                          PointerType>(Pointee)) {
+          uint64_t PointeeSize = getObjectSizeOrZero(Pointee);
+          if (PointeeSize == 0 or not IsInBounds(State.Offset, PointeeSize))
+            return false;
+          continue;
+        }
+      }
+
+      if (not IsInBounds(State.Offset, 1))
+        return false;
+    }
+  }
+
+  return true;
+}
+
 class EmitStringsPattern : public mlir::OpRewritePattern<DirectAccessOp> {
   RawBinaryView &BinaryView;
 
@@ -84,6 +393,13 @@ public:
     }
 
     uint64_t BinarySize = CodeUnitSize * ArrayType.getElementsCount();
+    if (not staysWithinString(Access, BinarySize)) {
+      revng_log(Log,
+                "Ignoring an access to " << Address.toString()
+                                         << " that may leave the string");
+      return mlir::failure();
+    }
+
     UnicodeCStringView String = readString(BinaryView,
                                            Address,
                                            BinarySize,
