@@ -40,9 +40,34 @@ stubs.append("unsigned long revng_xgetbv(unsigned ecx) { unsigned a, d; __asm__ 
 # binaries only
 stubs.append("int __fpclassify(double x) { return fpclassify(x); }")
 stubs.append("int __fpclassifyf(float x) { return fpclassify(x); }")
+# The C calls softfloat routines without their last argument, the floating point status, and with floating point
+# types where QEMU has their bits in integers: adapt the calls
+bits = {"float64_t": "uint64_t", "float32_t": "uint32_t"}
+shims, renames = ["static char revng_float_status[256];"], []
+for result, name, arguments in re.findall(r"^(\w+) ((?:u?int\d+|float\d+|floatx80)_\w+)\(([^()*]*)\);$", open(f"{out}/helpers.h").read(), re.M):
+    types = [] if arguments.strip() in ("", "void") else [t.strip() for t in arguments.split(",")]
+    formal = ", ".join(f"{t} a{i}" for i, t in enumerate(types)) or "void"
+    actual = "".join((f"to_bits_{t}(a{i}), " if t in bits else f"a{i}, ") for i, t in enumerate(types))
+    call = f"{name}({actual}revng_float_status)"
+    shims += [f"{bits.get(result, result)} {name}({', '.join([bits.get(t, t) for t in types] + ['void *'])});",
+              f"{result} revng_shim_{name}({formal}) {{ return {f'from_bits_{result}({call})' if result in bits else call}; }}"]
+    renames.append(f"-D{name}=revng_shim_{name}")
+prelude = """#include <stdint.h>
+#include <string.h>
+typedef double float64_t;
+typedef float float32_t;
+static uint64_t to_bits_float64_t(float64_t v) { uint64_t r; memcpy(&r, &v, 8); return r; }
+static uint32_t to_bits_float32_t(float32_t v) { uint32_t r; memcpy(&r, &v, 4); return r; }
+static float64_t from_bits_float64_t(uint64_t v) { float64_t r; memcpy(&r, &v, 8); return r; }
+static float32_t from_bits_float32_t(uint32_t v) { float32_t r; memcpy(&r, &v, 4); return r; }
+"""
+open(f"{out}/float-shims.c", "w").write(prelude + "\n".join(shims) + "\n")
 open(f"{out}/wrapper-stubs.c", "w").write("\n".join(stubs) + "\n")
 argv = json.load(open(f"{out}/report.json"))["commands"][-1]["argv"]
-argv[argv.index("-o"):argv.index("-o")] = [f"{out}/segment-init.c", f"{out}/wrapper-stubs.c"]
+argv[argv.index("-o"):argv.index("-o")] = renames
+shim_object = f"{out}/float-shims.o"
+subprocess.run([argv[0], "-c", "-O1", "-w", f"{out}/float-shims.c", "-o", shim_object], check=True)
+argv[argv.index("-o"):argv.index("-o")] = [f"{out}/segment-init.c", f"{out}/wrapper-stubs.c", shim_object]
 # libm, for the softfloat routines extracted below
 argv.append("-lm")
 result = subprocess.run(argv, capture_output=True, text=True)
