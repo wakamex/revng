@@ -25,10 +25,9 @@
 # RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck %s
 #
 # CHECK: function_0x{{[0-9a-f]+}}_Code_x86_64(generic64_t argument_0{{.*}}) {
-# CHECK-NEXT: free(argument_0
+# CHECK-NEXT: free((void *) argument_0);
 # CHECK: entry(
-# CHECK-NEXT: malloc(
-# CHECK-NEXT: function_0x{{[0-9a-f]+}}_Code_x86_64({{.+}});
+# CHECK-NEXT: function_0x{{[0-9a-f]+}}_Code_x86_64((generic64_t) malloc(argument_0));
 
 .text
 .type drop, @function
