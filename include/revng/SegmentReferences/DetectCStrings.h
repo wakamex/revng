@@ -4,6 +4,7 @@
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
 
+#include <optional>
 #include <vector>
 
 #include "llvm/ADT/ArrayRef.h"
@@ -100,7 +101,8 @@ public:
   void commit();
 
 private:
-  bool isCutShortByAnotherObject(const Candidate &TheCandidate) const;
+  std::optional<uint64_t>
+  bytesBeforeAnotherObject(const Candidate &TheCandidate) const;
 };
 
 namespace revng::pypeline::analyses {

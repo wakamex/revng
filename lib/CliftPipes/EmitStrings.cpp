@@ -4,6 +4,7 @@
 
 #include <limits>
 #include <optional>
+#include <string>
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -361,6 +362,28 @@ static bool staysWithinString(DirectAccessOp Access, uint64_t Size) {
   return true;
 }
 
+/// The text of the string held by the \p ByteCount bytes at \p Address. The
+/// bytes end with the string's terminator or, for a string that has none, such
+/// as a Rust string followed by the next object, with its last character.
+static std::optional<std::string> readText(RawBinaryView &BinaryView,
+                                           MetaAddress Address,
+                                           uint64_t ByteCount) {
+  auto MaybeData = BinaryView.getByAddress(Address, ByteCount);
+  if (not MaybeData.has_value() or MaybeData->empty())
+    return std::nullopt;
+
+  llvm::SmallVector<uint8_t> Bytes(MaybeData->begin(), MaybeData->end());
+  if (Bytes.back() != 0)
+    Bytes.push_back(0);
+
+  for (const UnicodeCStringView &Reading :
+       UnicodeCStringView::getPrintable(Bytes))
+    if (Reading.charSize() == 1 and Reading.data().size() == Bytes.size())
+      return Reading.data().drop_back().str();
+
+  return std::nullopt;
+}
+
 class EmitStringsPattern : public mlir::OpRewritePattern<DirectAccessOp> {
   RawBinaryView &BinaryView;
 
@@ -400,23 +423,18 @@ public:
       return mlir::failure();
     }
 
-    UnicodeCStringView String = readString(BinaryView,
-                                           Address,
-                                           BinarySize,
-                                           CodeUnitSize);
-
-    if (not String.isValid()) {
+    std::optional<std::string> Content = readText(BinaryView,
+                                                  Address,
+                                                  BinarySize);
+    if (not Content) {
       revng_log(Log, "No string at " << Address.toString() << " after all");
       return mlir::failure();
     }
 
     revng_log(Log, "Emitting the string at " << Address.toString());
 
-    // Drop the null terminator, which is not part of the string content.
-    llvm::StringRef Content = String.data().drop_back(CodeUnitSize);
-
     Rewriter.setInsertionPoint(Access);
-    Rewriter.replaceOpWithNewOp<StringOp>(Access, ArrayType, Content);
+    Rewriter.replaceOpWithNewOp<StringOp>(Access, ArrayType, *Content);
 
     return mlir::success();
   }

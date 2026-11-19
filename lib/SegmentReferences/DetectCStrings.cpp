@@ -183,15 +183,19 @@ DetectCStrings::CandidateList::find(MetaAddress Address,
 
 /// A string runs up to the first zero, but strings that are not C strings, such
 /// as Rust's, have no terminator: the zero ending them can be the first byte of
-/// the next object, say the constant -inf, whose low bytes are zero. When the
-/// code uses an address inside the string, terminator included, the bytes there
-/// are another object, unless they are a tail of the string, which linkers
-/// share between strings that end the same way.
-bool DetectCStrings::isCutShortByAnotherObject(const Candidate &TheCandidate)
-  const {
+/// the next object, say the constant -inf, whose low bytes are zero, and Rust
+/// stores its strings back to back, so a reading can span several of them. When
+/// the code uses an address inside the reading, terminator included, the bytes
+/// from there on are another object, unless they are a tail of the string,
+/// which linkers share between strings that end the same way.
+///
+/// \return how many bytes of \p TheCandidate come before another object, if
+/// one starts inside it
+std::optional<uint64_t>
+DetectCStrings::bytesBeforeAnotherObject(const Candidate &TheCandidate) const {
   MetaAddress End = TheCandidate.Address + TheCandidate.String.data().size();
   if (not End.isValid())
-    return true;
+    return 0;
 
   for (auto It = llvm::upper_bound(UsedAddresses, TheCandidate.Address);
        It != UsedAddresses.end() and *It < End;
@@ -199,8 +203,26 @@ bool DetectCStrings::isCutShortByAnotherObject(const Candidate &TheCandidate)
     const Candidate *Tail = Candidates.find(*It,
                                             TheCandidate.String.encoding());
     if (Tail == nullptr or not Tail->ends(End))
-      return true;
+      return It->address() - TheCandidate.Address.address();
   }
+
+  return std::nullopt;
+}
+
+/// Whether the first \p ByteCount bytes of \p TheCandidate, a UTF-8 reading,
+/// are text by themselves, without cutting a character in two
+static bool isTextOnItsOwn(const Candidate &TheCandidate, uint64_t ByteCount) {
+  if (ByteCount == 0 or TheCandidate.String.charSize() != 1)
+    return false;
+
+  llvm::StringRef Bytes = TheCandidate.String.data().take_front(ByteCount);
+  llvm::SmallVector<uint8_t> Terminated(Bytes.bytes_begin(), Bytes.bytes_end());
+  Terminated.push_back(0);
+  for (const UnicodeCStringView &Reading :
+       UnicodeCStringView::getPrintable(Terminated))
+    if (Reading.encoding() == Encoding::UTF8
+        and Reading.data().size() == Terminated.size())
+      return true;
 
   return false;
 }
@@ -235,28 +257,45 @@ void DetectCStrings::commit() {
     if (Winner == nullptr)
       continue;
 
-    if (isCutShortByAnotherObject(*Winner)) {
-      logCandidate("Discarded (runs into another object)", *Winner);
-      continue;
+    // A string that runs into another object ends before it, with no
+    // terminator, if what comes before is text by itself
+    uint64_t ByteCount = Winner->String.data().size();
+    bool Terminated = true;
+    if (auto Before = bytesBeforeAnotherObject(*Winner)) {
+      if (not isTextOnItsOwn(*Winner, *Before)) {
+        logCandidate("Discarded (runs into another object)", *Winner);
+        continue;
+      }
+
+      ByteCount = *Before;
+      Terminated = false;
     }
 
     // A string in bytes the lift decodes as code is a value that happens to
     // point into code: claiming the bytes would make them data and take them
     // from the lift
-    MetaAddress End = Winner->Address + Winner->String.data().size();
+    MetaAddress End = Winner->Address + ByteCount;
     if (Code.overlaps(Winner->Address, End)) {
       logCandidate("Discarded (in code)", *Winner);
       continue;
     }
 
-    // Create a uint8_t array of the size of the string (including the NUL byte)
+    // Create a uint8_t array of the size of the string, including the NUL byte
+    // if it has one
     unsigned CharSize = Winner->String.charSize();
     auto Character = model::PrimitiveType::makeConstUnsigned(CharSize);
-    size_t Size = Winner->String.data().size() / CharSize;
-    auto StringType = model::ArrayType::make(std::move(Character), Size);
+    auto StringType = model::ArrayType::make(std::move(Character),
+                                             ByteCount / CharSize);
     bool Success = GlobalBuilder.insert(Winner->Address, std::move(StringType));
 
-    logCandidate(Success ? "Added" : "Not added", *Winner);
+    if (not Success)
+      logCandidate("Not added", *Winner);
+    else if (Terminated)
+      logCandidate("Added", *Winner);
+    else
+      logCandidate("Added the first " + std::to_string(ByteCount)
+                     + " bytes (runs into another object) of",
+                   *Winner);
   }
 }
 

@@ -7,4 +7,4 @@
 !char$const = !clift.const<!clift.int<number 1>>
 
 // CHECK: result type length must match string length
-clift.str "hello" : !clift.array<5 x !char$const>
+clift.str "hello" : !clift.array<4 x !char$const>

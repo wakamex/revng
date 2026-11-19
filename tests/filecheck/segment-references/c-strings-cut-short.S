@@ -4,19 +4,23 @@
 # A string runs up to the first zero byte, but a string with no terminator, such
 # as a Rust one, is followed directly by the next object. Here `unterminated` is
 # followed by -inf, whose low bytes are zero, so its reading includes the first
-# byte of -inf, which the code loads on its own: that string runs into another
-# object and must not be claimed. `merged` is used both from its start and from
-# a tail it shares, as linkers merge strings that end the same way: it is still
-# a string, and so is `plain`.
+# byte of -inf, which the code loads on its own: the string is its 8 bytes
+# before -inf, with no terminator, and the C prints it as a string literal.
+# `merged` is used both from its start and from a tail it shares, as linkers
+# merge strings that end the same way: it is still the whole string, and so is
+# `plain`.
 #
 # RUN: clang --target=x86_64-unknown-linux-gnu -nostdlib -static %s -o %t
 # RUN: env REVNG_OPTIONS=-debug-log=detect-c-strings %root/bin/revng quick analyze --analyses=parse-binary,detect-abi,detect-stack-size,detect-c-strings %t > %t.yml 2> %t.log
 # RUN: FileCheck %s < %t.log
+# RUN: %root/bin/revng quick artifact emit-c-as-single-file %t -o %t.ptml
+# RUN: %root/bin/revng ptml --plain %t.ptml | FileCheck --check-prefix=C %s
 #
-# CHECK-DAG: Discarded (runs into another object) "extern {{.*}}"
+# CHECK-DAG: Added the first 8 bytes (runs into another object) of "extern \22\00"
 # CHECK-DAG: Added "a long merged string\00"
 # CHECK-DAG: Added "a plain string\00"
-# CHECK-NOT: Added "extern
+#
+# C: "extern \""
 
     .intel_syntax noprefix
     .text

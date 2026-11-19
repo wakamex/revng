@@ -1630,10 +1630,13 @@ mlir::LogicalResult StringOp::verify() {
                          << " result element type must be an 8-bit wide"
                             " primitive integer type.";
 
-  if (ArrayT.getElementsCount() != getValue().size() + 1)
+  // A string with no terminator, such as a Rust string followed by the next
+  // object, is an array of exactly its characters
+  uint64_t Count = ArrayT.getElementsCount();
+  if (Count != getValue().size() + 1 and Count != getValue().size())
     return emitOpError() << getOperationName()
-                         << " result type length must match string length"
-                            " (including null terminator).";
+                         << " result type length must match string length,"
+                            " with or without the null terminator.";
 
   return mlir::success();
 }
