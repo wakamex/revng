@@ -80,6 +80,37 @@ static UpcastableType makeStructWrapper(UpcastableType &&T,
 /// LayoutTypeSystemNodes that were originally distinct and were merged by DLA
 /// during its normal operation.
 ///
+/// Whether the first bytes of \p Node can hold a pointer: it is a pointer, or
+/// has a pointer alternative of its own, or so does its field at offset 0.
+static bool offersPointerAtStart(const LayoutTypeSystemNode *Node,
+                                 uint64_t PointerSize);
+
+/// Whether a field at offset 0 of \p Node can already hold a pointer. A struct
+/// like that needs no pointer alternative of its own, which would only add a
+/// union level to the name of every access, such as every stack slot of a
+/// frame.
+static bool hasPointerFieldAtStart(const LayoutTypeSystemNode *Node,
+                                   uint64_t PointerSize) {
+  for (const auto &[Child, Edge] : Node->successors())
+    if (Edge->getKind() == TypeLinkTag::LK_Instance
+        and Edge->getOffsetExpr().Offset == 0
+        and Edge->getOffsetExpr().Strides.empty()
+        and offersPointerAtStart(Child, PointerSize))
+      return true;
+  return false;
+}
+
+static bool offersPointerAtStart(const LayoutTypeSystemNode *Node,
+                                 uint64_t PointerSize) {
+  if (isPointerNode(Node))
+    return Node->Size == PointerSize;
+  // A node with unknown pointee evidence gets a pointer alternative, unless its
+  // own first field already offers one
+  if (Node->HasUnknownPointee and Node->Size >= PointerSize)
+    return true;
+  return hasPointerFieldAtStart(Node, PointerSize);
+}
+
 class NodeToUpcastableTypeMap {
 public:
   /// Constructor, to create a NodeToUpcastableTypeMap from a LayoutTypeSystem.
@@ -112,8 +143,9 @@ public:
   const UpcastableType &withAlternatives(const LayoutTypeSystemNode *Node,
                                         TupleTree<model::Binary> &Model) {
     const UpcastableType &Base = at(Node);
+    uint64_t PointerSize = model::Architecture::getPointerSize(Model->Architecture());
     if (not Node->HasUnknownPointee or isPointerNode(Node)
-        or Node->Size < model::Architecture::getPointerSize(Model->Architecture()))
+        or Node->Size < PointerSize or hasPointerFieldAtStart(Node, PointerSize))
       return Base;
     // The alternative of a primitive, such as a generic 64-bit value, is the
     // same union wherever it appears, so it is defined once. Any other base
