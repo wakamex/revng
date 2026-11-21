@@ -364,7 +364,10 @@ bool TDBP::pinMaterializedValues(Function &F) {
           } else {
             auto Address = MetaAddress::decomposeIntegerPC(Value);
             revng_assert(Address.isValid());
-            DirectDestinations.push_back(Address);
+            // A destination the lift chose not to translate, such as where a
+            // call that does not return would return, is no destination
+            if (JTM->hasJT(Address))
+              DirectDestinations.push_back(Address);
           }
         }
 
@@ -1313,6 +1316,25 @@ void JumpTargetManager::purgeTranslation() {
 }
 
 // TODO: register Reason
+bool JumpTargetManager::followsNoReturnCall(MetaAddress PC) {
+  if (unwindRanges().isGapCode(PC))
+    return false;
+
+  auto MaybeBytes = BinaryView.getFromAddressOn(PC);
+  if (not MaybeBytes.has_value())
+    return false;
+  llvm::ArrayRef<uint8_t> Bytes = *MaybeBytes;
+
+  // One-byte nops, then the int3 just past the end of the unwind range
+  constexpr uint8_t Nop = 0x90;
+  constexpr uint8_t Int3 = 0xcc;
+  size_t Nops = 0;
+  while (Nops < Bytes.size() and Nops < 16 and Bytes[Nops] == Nop)
+    ++Nops;
+  return Nops > 0 and Nops < Bytes.size() and Bytes[Nops] == Int3
+         and unwindRanges().isGapCode(PC + Nops);
+}
+
 BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
                                           JumpTargetReason::Values Reason) {
   revng_check(PC.isValid());
@@ -1343,6 +1365,17 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
               "Not translating " << PC.toString() << ", reached for "
                                  << JumpTargetReason::getName(Reason)
                                  << ": no path of its function reaches it");
+    return nullptr;
+  }
+
+  // MSVC ends a function with `call f; nop; int3` when f does not return, and
+  // the function's unwind range ends before the int3: the nops where the call
+  // would return, and the int3 after them, never run
+  if (TranslateOnlyLiveCode and followsNoReturnCall(PC)) {
+    revng_log(DeadCodeLog,
+              "Not translating " << PC.toString() << ", reached for "
+                                 << JumpTargetReason::getName(Reason)
+                                 << ": it follows a call that does not return");
     return nullptr;
   }
 

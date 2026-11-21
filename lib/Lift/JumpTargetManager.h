@@ -429,6 +429,11 @@ public:
   /// Return the raw bytes of the binary being lifted
   const RawBinaryView &binaryView() const { return BinaryView; }
 
+  /// Whether \p PC, in a PE function's unwind range, holds only nops up to an
+  /// int3 just past the end of the range: MSVC's code after a call that does
+  /// not return
+  bool followsNoReturnCall(MetaAddress PC);
+
   /// Return the function ranges described by the binary's unwind information
   UnwindFunctionRanges &unwindRanges() {
     if (not Unwind)
