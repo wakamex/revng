@@ -496,7 +496,8 @@ fillStructWithRecoveredDLATypeAtOffset(model::Binary &Model,
     revng_log(Log,
               "Updated field StructDefinition: " << TargetFieldStruct.ID());
     revng_assert(*TargetFieldStruct.size() == OldFieldSize);
-    revng_assert(TargetFieldStruct.verify());
+    if (VerifyLog.isEnabled())
+      revng_assert(TargetFieldStruct.verify());
 
     rc_return;
   }
@@ -576,7 +577,8 @@ fillStructWithRecoveredDLATypeAtOffset(model::Binary &Model,
           revng_log(Log,
                     "Updated field StructDefinition: " << OldFieldStruct->ID());
           revng_assert(*OldFieldStruct->size() == OldFieldSize);
-          revng_assert(OldFieldStruct->verify(true));
+          if (VerifyLog.isEnabled())
+            revng_assert(OldFieldStruct->verify(true));
         }
       }
       ++NewFieldsIt;
@@ -605,8 +607,10 @@ fillStructWithRecoveredDLATypeAtOffset(model::Binary &Model,
       auto It = NewU->Fields().begin();
       auto End = NewU->Fields().end();
       for (; It != End; ++It) {
-        revng_assert(It->verify());
-        revng_assert(It->Type()->verify());
+        if (VerifyLog.isEnabled()) {
+          revng_assert(It->verify());
+          revng_assert(It->Type()->verify());
+        }
         if (IsTooLarge(*It))
           FieldsToDrop.insert(It->Index());
       }
@@ -635,7 +639,8 @@ fillStructWithRecoveredDLATypeAtOffset(model::Binary &Model,
         RecoveredType = std::move(TrimmedType);
 
         revng_assert(Trimmed.Fields().size() == FieldsRemaining);
-        revng_assert(Trimmed.verify());
+        if (VerifyLog.isEnabled())
+          revng_assert(Trimmed.verify());
       }
     }
 
@@ -689,7 +694,8 @@ static bool updateStackFrameType(model::Function &ModelFunc,
                   << ModelFunc.stackFrameType()->ID());
       revng_assert(ModelFunc.stackFrameType() != nullptr);
       revng_assert(*ModelFunc.stackFrameType()->size() == OldStackSize);
-      revng_assert(ModelFunc.stackFrameType()->verify());
+      if (VerifyLog.isEnabled())
+        revng_assert(ModelFunc.stackFrameType()->verify());
 
       Updated = true;
     }
@@ -778,7 +784,8 @@ bool dla::updateSegmentsTypes(const llvm::Module &M,
       revng_log(Log,
                 "Updated segment StructDefinition: " << NewSegmentType.ID());
       revng_assert(*NewSegmentType.size() == *SegmentStruct.size());
-      revng_assert(NewSegmentType.verify());
+      if (VerifyLog.isEnabled())
+        revng_assert(NewSegmentType.verify());
 
       Updated = true;
     }
