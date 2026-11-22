@@ -549,6 +549,7 @@ lift/tail-jump-function.S
 lift/trace-type-shrinking.S
 lift/translate-only-live-code-chained-pe.S
 lift/translate-only-live-code-noreturn-call-pe.S
+lift/translate-only-live-code-noreturn-callee-pe.S
 lift/translate-only-live-code-pe.S
 lift/trap-check-kept.S
 lift/unbounded-relative-jump-table.S

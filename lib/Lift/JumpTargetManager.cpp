@@ -1316,23 +1316,27 @@ void JumpTargetManager::purgeTranslation() {
 }
 
 // TODO: register Reason
-bool JumpTargetManager::followsNoReturnCall(MetaAddress PC) {
-  if (unwindRanges().isGapCode(PC))
-    return false;
+void JumpTargetManager::registerSimpleLiteral(MetaAddress Address,
+                                              MetaAddress Source,
+                                              bool Computed) {
+  // A call pushes where it returns to, which a call that does not return
+  // never reaches
+  if (TranslateOnlyLiveCode and Source.isValid() and Address.isValid()
+      and Source.address() < Address.address()
+      and unwindRanges().isNoReturnCallReturn(Address)
+      and Address.address() - Source.address() == 5) {
+    revng_log(DeadCodeLog,
+              "Not registering " << Address.toString()
+                                 << ": it follows a call that does not return");
+    return;
+  }
 
-  auto MaybeBytes = BinaryView.getFromAddressOn(PC);
-  if (not MaybeBytes.has_value())
-    return false;
-  llvm::ArrayRef<uint8_t> Bytes = *MaybeBytes;
-
-  // One-byte nops, then the int3 just past the end of the unwind range
-  constexpr uint8_t Nop = 0x90;
-  constexpr uint8_t Int3 = 0xcc;
-  size_t Nops = 0;
-  while (Nops < Bytes.size() and Nops < 16 and Bytes[Nops] == Nop)
-    ++Nops;
-  return Nops > 0 and Nops < Bytes.size() and Bytes[Nops] == Int3
-         and unwindRanges().isGapCode(PC + Nops);
+  SimpleLiterals.insert(Address);
+  if (not unwindRanges().isGapCode(Source)) {
+    LiteralsFromFunctionCode.insert(Address);
+    if (Computed)
+      CodeAddressLiterals.insert(Address);
+  }
 }
 
 BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
@@ -1368,10 +1372,13 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
     return nullptr;
   }
 
-  // MSVC ends a function with `call f; nop; int3` when f does not return, and
-  // the function's unwind range ends before the int3: the nops where the call
-  // would return, and the int3 after them, never run
-  if (TranslateOnlyLiveCode and followsNoReturnCall(PC)) {
+  // Where a call that does not return would return never runs. Only the
+  // reasons a call gives its return address are refused: a jump there still
+  // translates it
+  using namespace JumpTargetReason;
+  if (TranslateOnlyLiveCode
+      and (Reason == MemoryStore or Reason == ReturnAddress)
+      and not hasJT(PC) and unwindRanges().isNoReturnCallReturn(PC)) {
     revng_log(DeadCodeLog,
               "Not translating " << PC.toString() << ", reached for "
                                  << JumpTargetReason::getName(Reason)
@@ -1386,7 +1393,6 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
   // Everything else there, such as junk reached by jumps from other junk, is
   // not code to translate
   if (TranslateOnlyLiveCode and unwindRanges().isGapCode(PC)) {
-    using namespace JumpTargetReason;
     bool IsRoot = Reason == Callee or Reason == GlobalData
                   or Reason == UnusedGlobalData or Reason == MemoryStore
                   or Reason == FunctionSymbol

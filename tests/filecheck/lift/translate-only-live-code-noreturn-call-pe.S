@@ -16,7 +16,7 @@
 # RUN: FileCheck %s --check-prefix=IR < %t.ll
 # RUN: env REVNG_OPTIONS='-prune-decided-branches -translate-only-live-code' %root/bin/revng quick analyze --analyses=parse-binary,detect-abi %t.exe | FileCheck %s --check-prefix=MODEL
 #
-# LOG: Not translating 0x140001009:Code_x86_64, reached for {{.*}}: it follows a call that does not return
+# LOG: Not registering 0x140001009:Code_x86_64: it follows a call that does not return
 # IR: "bb.0x140001000:Code_x86_64":
 # IR-NOT: "bb.0x140001009:Code_x86_64":
 # IR-NOT: 0x14000100a

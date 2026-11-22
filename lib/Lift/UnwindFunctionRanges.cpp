@@ -870,6 +870,72 @@ UnwindFunctionRanges::tableExtent(MetaAddress Jump,
   return Extent;
 }
 
+std::optional<uint64_t>
+UnwindFunctionRanges::directCallBefore(unsigned Index, uint64_t Return) {
+  // call rel32
+  constexpr uint64_t CallSize = 5;
+  constexpr uint8_t CallOpcode = 0xe8;
+  const Range &R = Ranges[Index];
+  if (Return < R.Start + CallSize or Return > R.End)
+    return std::nullopt;
+
+  uint64_t Call = Return - CallSize;
+  auto Bytes = BinaryView.getFromAddressOn(MetaAddress::fromPC(Architecture,
+                                                               Call));
+  if (not Bytes or Bytes->size() < CallSize or (*Bytes)[0] != CallOpcode
+      or not isInstructionStart(Index, Call))
+    return std::nullopt;
+
+  uint32_t Displacement = 0;
+  for (unsigned I = 0; I < 4; ++I)
+    Displacement |= uint32_t((*Bytes)[1 + I]) << (8 * I);
+  return Return + int64_t(int32_t(Displacement));
+}
+
+const llvm::DenseSet<uint64_t> &UnwindFunctionRanges::noReturnCallees() {
+  if (NoReturnCallees)
+    return *NoReturnCallees;
+
+  NoReturnCallees.emplace();
+  if (not FromPData or Architecture != model::Architecture::x86_64)
+    return *NoReturnCallees;
+
+  constexpr uint8_t Nop = 0x90;
+  for (unsigned Index = 0; Index < Ranges.size(); ++Index) {
+    const Range &R = Ranges[Index];
+    auto Bytes = BinaryView.getFromAddressOn(MetaAddress::fromPC(Architecture,
+                                                                 R.Start));
+    if (not Bytes or Bytes->size() < R.End - R.Start)
+      continue;
+
+    // The nops that end the range, each an instruction of its own
+    uint64_t Return = R.End;
+    while (Return > R.Start and (*Bytes)[Return - 1 - R.Start] == Nop)
+      --Return;
+    if (Return == R.End or not isInstructionStart(Index, Return))
+      continue;
+
+    if (auto Callee = directCallBefore(Index, Return))
+      NoReturnCallees->insert(*Callee);
+  }
+
+  return *NoReturnCallees;
+}
+
+bool UnwindFunctionRanges::isNoReturnCallReturn(MetaAddress Address) {
+  if (not FromPData or Architecture != model::Architecture::x86_64
+      or Address.type() != CodeType or Address.address() == 0)
+    return false;
+
+  // The call is in a range; where it returns to can be the range's end
+  auto Index = find(Address.address() - 1);
+  if (not Index)
+    return false;
+
+  auto Callee = directCallBefore(*Index, Address.address());
+  return Callee and noReturnCallees().contains(*Callee);
+}
+
 bool UnwindFunctionRanges::isGapCode(MetaAddress Address) const {
   return FromPData and Architecture == model::Architecture::x86_64
          and Address.type() == CodeType and not find(Address.address());

@@ -110,6 +110,14 @@ private:
   llvm::DenseSet<uint64_t> GapRoots;
   llvm::DenseSet<uint64_t> GapExits;
 
+  /// The callees of the calls that end a range followed only by nops,
+  /// collected on first use
+  std::optional<llvm::DenseSet<uint64_t>> NoReturnCallees;
+  const llvm::DenseSet<uint64_t> &noReturnCallees();
+  /// The destination of the direct call in range \p Index that ends right
+  /// before \p Return, if there is one
+  std::optional<uint64_t> directCallBefore(unsigned Index, uint64_t Return);
+
   DecidedBranches makeWalk();
   void recordExits(const DecidedBranches::Coverage &Covered);
 
@@ -210,6 +218,14 @@ public:
   bool isGapExit(MetaAddress Address) const {
     return GapExits.contains(Address.address());
   }
+
+  /// Whether \p Address is where a direct call right before it would return
+  /// to, and the callee does not return. A callee does not return when some
+  /// function's unwind range ends with a call to it followed only by nops:
+  /// MSVC ends a function so when the last thing it does is call a function
+  /// that does not return, as the nops keep the return address in the
+  /// caller's range for the unwinder. x86-64 PE only.
+  bool isNoReturnCallReturn(MetaAddress Address);
 
 private:
   std::optional<unsigned> find(uint64_t Address) const;
