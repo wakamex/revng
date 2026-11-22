@@ -472,6 +472,7 @@ clift/types/struct-with-indirect-recursion.mlir
 clift/types/struct-with-pointer-recursion.mlir
 clift/types/struct-with-recursion.mlir
 clift/types/union-with-large-tree.mlir
+clift/types/union-with-deep-value-tree.mlir
 clift/types/union-with-pointer-recursion.mlir
 clift/unique-fallthrough-branch-hoisting/hoist-else.mlir
 clift/unique-fallthrough-branch-hoisting/hoist-then.mlir

@@ -4,6 +4,8 @@
 
 #include <optional>
 
+#include "llvm/ADT/DenseSet.h"
+
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -80,7 +82,12 @@ class ModuleVerifier : public ModuleVisitor<ModuleVerifier> {
 public:
   // Visit a field type of a class type attribute.
   // RootType is the root class type attribute and is used to detect recursion.
-  mlir::LogicalResult visitFieldType(mlir::Type FieldType, ClassType RootType) {
+  // Visited holds the class types the visit from RootType has reached: one that
+  // several fields contain is visited once, not once for each path to it,
+  // whose number grows exponentially with the depth of the nesting.
+  mlir::LogicalResult visitFieldType(mlir::Type FieldType,
+                                     ClassType RootType,
+                                     llvm::DenseSet<mlir::Type> &Visited) {
     FieldType = unwrapTypedefs(FieldType);
 
     if (auto T = mlir::dyn_cast<ClassType>(FieldType)) {
@@ -88,7 +95,7 @@ public:
         return getCurrentOp()->emitError() << "Clift ModuleOp contains a "
                                               "recursive class type.";
 
-      return visitClassType(T, RootType);
+      return visitClassType(T, RootType, Visited);
     }
 
     return mlir::success();
@@ -96,12 +103,17 @@ public:
 
   mlir::LogicalResult visitClassType(ClassType Type,
                                      ClassType RootType,
+                                     llvm::DenseSet<mlir::Type> &Visited,
                                      bool CheckRecursion = true) {
-    if (not CheckRecursion or not equivalent(Type, RootType)) {
-      for (FieldAttr Field : Type.getFields()) {
-        if (visitFieldType(Field.getType(), RootType).failed())
-          return mlir::failure();
-      }
+    if (CheckRecursion and equivalent(Type, RootType))
+      return mlir::success();
+
+    if (not Visited.insert(removeConst(Type)).second)
+      return mlir::success();
+
+    for (FieldAttr Field : Type.getFields()) {
+      if (visitFieldType(Field.getType(), RootType, Visited).failed())
+        return mlir::failure();
     }
     return mlir::success();
   }
@@ -119,7 +131,9 @@ public:
                                          << UnqualifiedType.getHandle() << '\'';
 
     if (auto Class = mlir::dyn_cast<ClassType>(Type)) {
-      if (visitClassType(Class, Class, /*CheckRecursion=*/false).failed())
+      llvm::DenseSet<mlir::Type> Visited;
+      if (visitClassType(Class, Class, Visited, /*CheckRecursion=*/false)
+            .failed())
         return mlir::failure();
 
       ClassTypes.insert(Class);
