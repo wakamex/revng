@@ -94,6 +94,8 @@ private:
   };
   llvm::DenseMap<unsigned, RegisterSlice> Slices;
   unsigned RSP = 0;
+  /// The count register of shifts and rotates by CL
+  unsigned CL = 0;
 
 public:
   /// What a path knows: the flags, the facts, registers, the stack

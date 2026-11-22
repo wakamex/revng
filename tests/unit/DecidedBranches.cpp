@@ -193,6 +193,23 @@ BOOST_AUTO_TEST_CASE(UnknownMemoryWriteForgetsTheStack) {
               == Decisions{ { 14, true } }));
 }
 
+BOOST_AUTO_TEST_CASE(RotateByUnknownCountKeepsZero) {
+  // xor eax, eax; ror edx, cl; jne +1; int3; ret
+  // A rotate by any count changes only the carry and overflow flags
+  Fixture F;
+  BOOST_TEST((F.decided({ 0x31, 0xc0, 0xd3, 0xca, 0x75, 0x01, 0xcc, 0xc3 })
+              == Decisions{ { 4, false } }));
+}
+
+BOOST_AUTO_TEST_CASE(ShiftByKnownCl) {
+  // mov eax, 3; mov ecx, 3; shl eax, cl; cmp eax, 0x18; je +1; int3; ret
+  Fixture F;
+  BOOST_TEST((F.decided({ 0xb8, 0x03, 0x00, 0x00, 0x00, 0xb9, 0x03,
+                          0x00, 0x00, 0x00, 0xd3, 0xe0, 0x83, 0xf8,
+                          0x18, 0x74, 0x01, 0xcc, 0xc3 })
+              == Decisions{ { 15, true } }));
+}
+
 BOOST_AUTO_TEST_CASE(UndocumentedShiftAlias) {
   // stc; sal al, 0 in its /6 encoding, which LLVM does not decode; jbe +1;
   // int3; ret

@@ -253,6 +253,8 @@ DecidedBranches::DecidedBranches(const MCDisassembler &Disassembler,
   }
   RSP = ByName.lookup("RSP");
   revng_assert(RSP != 0);
+  CL = ByName.lookup("CL");
+  revng_assert(CL != 0);
 }
 
 /// Applies instructions to a state
@@ -709,18 +711,33 @@ bool DecidedBranches::Interpreter::shift() {
     return true;
   }
 
-  // The count: an immediate, 1 for the `r1` and `m1` forms; by CL it is
-  // modeled only when CL is known
+  // The count: an immediate, 1 for the `r1` and `m1` forms, or CL when the
+  // bits of it the instruction uses are known
+  uint64_t CountMask = Bits == 64 ? 0x3F : 0x1F;
   std::optional<uint64_t> Count;
-  if (Name.Form.ends_with("1"))
+  if (Name.Form.ends_with("1")) {
     Count = 1;
-  else if (Operands.size() >= 2 and Operands.back().K == Operand::Immediate)
+  } else if (Name.Form.ends_with("CL")) {
+    Operand Counter;
+    Counter.Reg = D.CL;
+    auto [Value, Mask] = read(Counter, 8);
+    if ((Mask & CountMask) == CountMask)
+      Count = Value;
+  } else if (Operands.size() >= 2 and Operands.back().K == Operand::Immediate) {
     Count = uint64_t(Operands.back().Imm);
+  }
   if (not Count) {
+    // A rotate by any count changes only the carry and overflow flags
+    if (F == "ROL" or F == "ROR" or F == "RCL" or F == "RCR") {
+      write(Operands[0], Bits, 0, 0);
+      setFlag(CF, std::nullopt);
+      setFlag(OF, std::nullopt);
+      return true;
+    }
     unmodeled();
     return true;
   }
-  *Count &= Bits == 64 ? 0x3F : 0x1F;
+  *Count &= CountMask;
   if (*Count == 0)
     return true;
 
