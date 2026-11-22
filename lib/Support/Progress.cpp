@@ -14,6 +14,7 @@ extern "C" {
 #include <chrono>
 #include <fstream>
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Mutex.h"
@@ -58,6 +59,26 @@ static opt<std::chrono::milliseconds,
                               "usage tracepoint"),
                          init(std::chrono::milliseconds{ 100 }));
 
+static opt<unsigned> TraceMaxDepth("trace-max-depth",
+                                    desc("With --trace, record only tasks "
+                                         "fewer than this many levels deep "
+                                         "in their thread's task stack, and "
+                                         "their steps; 0 records every task"),
+                                    init(0));
+
+/// How many tasks enclose \p T in its thread's task stack
+static size_t taskDepth(const llvm::Task *T) {
+  const auto &Tasks = T->stack().Tasks;
+  return llvm::find(Tasks, T) - Tasks.begin();
+}
+
+/// Whether --trace-max-depth leaves \p T out of the trace. A whole program's
+/// analyses run nested tasks for every function, and recording them all makes
+/// a trace of tens of GB; the outer tasks' steps still show the progress.
+static bool isTooDeep(const llvm::Task *T) {
+  return TraceMaxDepth != 0 and taskDepth(T) >= TraceMaxDepth;
+}
+
 static void destroyTraceProgressListener(void *OpaqueListener);
 
 class TraceProgressListener : public llvm::ProgressListener {
@@ -95,11 +116,15 @@ public:
 
 public:
   void handleNewTask(const llvm::Task *T) override {
+    if (isTooDeep(T))
+      return;
     llvm::sys::ScopedLock Lock(OutputMutex);
     emitEvent(T->name(), "task", "B");
   }
 
   void handleTaskCompleted(const llvm::Task *T) override {
+    if (isTooDeep(T))
+      return;
     llvm::sys::ScopedLock Lock(OutputMutex);
     if (T->stepIndex() != -1) {
       emitEvent(T->stepName(), "task", "E");
@@ -109,6 +134,8 @@ public:
 
   void handleTaskAdvancement(const llvm::Task *T,
                              llvm::StringRef PreviousStepName) override {
+    if (isTooDeep(T))
+      return;
     llvm::sys::ScopedLock Lock(OutputMutex);
     if (T->stepIndex() != 0)
       emitEvent(PreviousStepName, "task", "E");
