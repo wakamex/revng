@@ -236,6 +236,11 @@ static bool reaches(BasicBlock *From, BasicBlock *To, BasicBlock *Barrier) {
 static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
                                      llvm::function_ref<bool(Value *)>
                                        InClass) {
+  SmallPtrSet<BasicBlock *, 8> BlocksWithInternalIncoming;
+  for (const IncomingInfo &Incoming : Incomings)
+    if (InClass(Incoming.incomingValue()))
+      BlocksWithInternalIncoming.insert(Incoming.incomingBlock());
+
   for (const IncomingInfo &Internal : Incomings) {
     if (not InClass(Internal.incomingValue()))
       continue;
@@ -244,10 +249,13 @@ static bool clobbersInternalIncoming(const std::set<IncomingInfo> &Incomings,
       if (InClass(Stored.incomingValue())
           or isa<UndefValue>(Stored.incomingValue()))
         continue;
-      if (reaches(Definition, Stored.incomingBlock(), Definition)
-          and reaches(Stored.incomingBlock(),
-                      Internal.incomingBlock(),
-                      Definition))
+      BasicBlock *StoreBlock = Stored.incomingBlock();
+      if (not reaches(Definition, StoreBlock, Definition))
+        continue;
+      BasicBlock *After = BlocksWithInternalIncoming.contains(StoreBlock) ?
+                            Stored.phiBlock() :
+                            StoreBlock;
+      if (reaches(After, Internal.incomingBlock(), Definition))
         return true;
     }
   }
