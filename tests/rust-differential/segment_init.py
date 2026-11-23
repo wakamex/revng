@@ -3,7 +3,9 @@ into the recovered C's segment_N global, so that data the C reads has the origin
 applies the binary's R_X86_64_RELATIVE relocations into those copies: a target in a data segment becomes the
 address of that place in its segment_N, and a target at a function entry becomes the address of the recovered C
 function. Targets anywhere else keep the file's bytes. Each slot an imported function's relocation fills gets the
-address of that function, which the recovered library resolves from the libraries it links."""
+address of that function, which the recovered library resolves from the libraries it links. The binary's thread-local
+storage becomes one __thread array of the recovered library with the same initial image, and each tls_index a
+R_X86_64_DTPMOD64 relocation fills names the recovered library's module and that array's place in its block."""
 import re
 import subprocess
 import sys
@@ -78,9 +80,44 @@ for f in m.get("ImportedDynamicFunctions", []):
         externs.update({f"segment_{where[0]}", f["Name"]})
         lines.append(f"  *(unsigned long *)(segment_{where[0]} + {where[1]}) = (unsigned long){f['Name']};")
         relocated["import"] = relocated.get("import", 0) + 1
+# Thread-local storage: __tls_get_addr reads a tls_index, the module and the offset in its block, which the dynamic
+# loader fills in the original; in the copies the module is the file's 0
+program_headers = subprocess.run(["readelf", "-lW", binary], capture_output=True, text=True, check=True).stdout
+tls = [line.split() for line in program_headers.splitlines() if line.split()[:1] == ["TLS"]]
+tls_lines = []
+if tls:
+    offset, size, memory_size, align = int(tls[0][1], 16), int(tls[0][4], 16), int(tls[0][5], 16), int(tls[0][-1], 16)
+    image = data[offset : offset + size]
+    tls_lines = [
+        "#define _GNU_SOURCE",
+        "#include <dlfcn.h>",
+        f"static __thread unsigned char recovered_tls[{memory_size}] __attribute__((aligned({align}))) = "
+        f"{{{','.join(map(str, image)) or '0'}}};",
+    ]
+    slots = re.findall(r"^([0-9a-f]+)\s+[0-9a-f]+\s+R_X86_64_DTPMOD64\s+0\s*$", relocations, re.M)
+    if slots:
+        lines += [
+            "  { Dl_info info; size_t module = 0; void *block = 0;",
+            "    unsigned char *mine = recovered_tls;",
+            "    dladdr((void *)initialize_segments, &info);",
+            "    void *self = dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);",
+            "    dlinfo(self, RTLD_DI_TLS_MODID, &module);",
+            "    dlinfo(self, RTLD_DI_TLS_DATA, &block);",
+            "    unsigned long start = (unsigned long)(mine - (unsigned char *)block);",
+        ]
+        for slot in slots:
+            where = place(int(slot, 16) + base)
+            if where is None:
+                relocated["other"] += 1
+                continue
+            externs.add(f"segment_{where[0]}")
+            lines += [f"    *(unsigned long *)(segment_{where[0]} + {where[1]}) = module;",
+                      f"    *(unsigned long *)(segment_{where[0]} + {where[1] + 8}) += start;"]
+            relocated["tls"] = relocated.get("tls", 0) + 1
+        lines.append("    dlclose(self); }")
 # Each symbol is declared under a neutral name bound to it, since many are C library functions the compiler knows
 names = {name: f"symbol_{i}" for i, name in enumerate(sorted(externs))}
 head = [f'extern unsigned char {alias}[] __asm__("{name}");' for name, alias in names.items()]
 body = [re.sub(r"\b(?:segment_\d+|[A-Za-z_]\w*)\b", lambda w: names.get(w.group(0), w.group(0)), line) for line in lines]
-open(out, "w").write("\n".join(head + body + ["}", ""]))
+open(out, "w").write("\n".join(tls_lines + head + body + ["}", ""]))
 print("relative relocations applied:", relocated, file=sys.stderr)

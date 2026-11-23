@@ -111,10 +111,10 @@ def main():
         t[0] += 1
         pair = (results[0][0] + ("" if results[0][0] != "signal" else str(results[0][1])),
                 results[1][0] + ("" if results[1][0] != "signal" else str(results[1][1])))
-        if results[0] == results[1]:
-            pair = ("same", "same")
-        kinds.setdefault(name, {}).setdefault(" vs ".join(pair), 0)
-        kinds[name][" vs ".join(pair)] += 1
+        # Named as compare_uniform.py names them, which check.sh counts
+        kind = "agree" if results[0] == results[1] else " vs ".join(pair)
+        kinds.setdefault(name, {}).setdefault(kind, 0)
+        kinds[name][kind] += 1
         if results[0] != results[1]:
             t[1] += 1
             if len(failures) < 40:
