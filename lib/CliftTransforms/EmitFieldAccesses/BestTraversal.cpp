@@ -1,11 +1,13 @@
 //
 // This file is distributed under the MIT License. See LICENSE.md for details.
 //
+
 #include <algorithm>
 #include <compare>
 #include <cstdint>
 #include <optional>
-
+#include <set>
+#include <tuple>
 
 #include "revng/ADT/RecursiveCoroutine.h"
 #include "revng/Clift/Clift.h"
@@ -383,6 +385,41 @@ class TypeTraversalAnalyzer {
 private:
   TraversalCache &Cache;
 
+  /// A point a walk reaches: a type, the offset it starts at and the offset
+  /// looked up, how many fields deep it is, and the arrays it is in
+  using WalkState = std::tuple<const void *,
+                               int64_t,
+                               int64_t,
+                               size_t,
+                               std::vector<std::tuple<int64_t, uint64_t,
+                                                      uint64_t>>>;
+
+  /// The points the current walk has reached. Everything a walk finds below a
+  /// point it reaches again repeats what it found there the first time, which
+  /// ranks ahead: without this, a type that several members of nested unions
+  /// share would be walked once per path to it, and the paths multiply at every
+  /// level of nesting.
+  std::set<WalkState> Reached;
+
+  bool reachedBefore(mlir::Type Type,
+                     int64_t Offset,
+                     int64_t CurrentOffset,
+                     size_t Depth,
+                     const ArrayPath &Arrays) {
+    std::vector<std::tuple<int64_t, uint64_t, uint64_t>> Shapes;
+    for (const NestedArrayShape &Shape : Arrays)
+      Shapes.emplace_back(Shape.OffsetFromParentArrayElement,
+                          Shape.NumElements,
+                          Shape.Stride);
+    return not Reached
+                 .insert({ Type.getAsOpaquePointer(),
+                           Offset,
+                           CurrentOffset,
+                           Depth,
+                           std::move(Shapes) })
+                 .second;
+  }
+
 public:
   TypeTraversalAnalyzer(TraversalCache &Cache) : Cache(Cache) {}
 
@@ -447,6 +484,7 @@ TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
 
   std::vector<ArrayPath> ArrayPaths;
   ArrayPaths.push_back(ArrayPath());
+  Reached.clear();
   rc_eval(collectArrayPaths(BaseType, Offset, 0, {}, ArrayPaths));
 
   for (ArrayPath &Path : ArrayPaths) {
@@ -468,6 +506,7 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
     return It->second;
 
   std::vector<Traversal> Traversals;
+  Reached.clear();
   rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
 
   std::stable_sort(Traversals.begin(),
@@ -488,6 +527,9 @@ TypeTraversalAnalyzer::collectArrayPaths(mlir::Type Type,
                                          int64_t CurrentOffset,
                                          const ArrayPath &CurrentArrayPath,
                                          std::vector<ArrayPath> &ArrayPaths) {
+  if (reachedBefore(Type, Offset, CurrentOffset, 0, CurrentArrayPath))
+    rc_return;
+
   if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
     rc_recur collectArrayPaths(Typedef.getUnderlyingType(),
                                Offset,
@@ -541,6 +583,13 @@ TypeTraversalAnalyzer::collectTraversals(mlir::Type Type,
   // We should never reach a type with zero size - if we do, it means there is
   // something severely wrong in the types we're working with
   revng_assert(getObjectSizeOrZero(Type) > 0);
+
+  if (reachedBefore(Type,
+                    Offset,
+                    CurrentOffset,
+                    FieldPath.size(),
+                    CurrentArrayPath))
+    rc_return;
 
   // Pointers are leaves: we do not traverse through them, but a `Traversal`
   // can land on a field whose type is a pointer
