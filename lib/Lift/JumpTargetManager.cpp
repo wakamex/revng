@@ -1386,6 +1386,19 @@ BasicBlock *JumpTargetManager::registerJT(MetaAddress PC,
     return nullptr;
   }
 
+  // Code that runs straight into an encoding x86-64 does not have never runs
+  // in a working program, as after a protector's call whose callee does not
+  // return to it. A function's entry is kept, as the model has the function
+  if (TranslateOnlyLiveCode and Reason != UnwindEntry
+      and Reason != FunctionSymbol and not hasJT(PC)
+      and unwindRanges().runsIntoInvalidInstruction(PC)) {
+    revng_log(DeadCodeLog,
+              "Not translating " << PC.toString() << ", reached for "
+                                 << JumpTargetReason::getName(Reason)
+                                 << ": it runs into an invalid instruction");
+    return nullptr;
+  }
+
   // Code between the functions the unwind information describes runs only
   // when reached from a root: the target of a call, a pointer in data or
   // stored to memory, a literal in a function's code, or where a walked path

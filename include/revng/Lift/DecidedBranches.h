@@ -120,6 +120,11 @@ public:
                  llvm::ArrayRef<std::pair<uint64_t, uint64_t>> Parts,
                  Coverage *Covered = nullptr) const;
 
+  /// Whether the straight-line code from \p Address reaches an encoding
+  /// x86-64 does not have, such as `aad` or `push cs`, before any branch,
+  /// call, return or trap. No working program runs such code.
+  bool runsIntoInvalidInstruction(uint64_t Address) const;
+
 private:
   class Interpreter;
 };

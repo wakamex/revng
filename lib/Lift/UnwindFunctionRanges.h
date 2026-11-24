@@ -119,6 +119,8 @@ private:
   std::optional<uint64_t> directCallBefore(unsigned Index, uint64_t Return);
 
   DecidedBranches makeWalk();
+  /// A walker kept for the checks that decode code one address at a time
+  std::optional<DecidedBranches> Decoder;
   void recordExits(const DecidedBranches::Coverage &Covered);
 
   std::unique_ptr<llvm::MCRegisterInfo> RegisterInfo;
@@ -226,6 +228,11 @@ public:
   /// that does not return, as the nops keep the return address in the
   /// caller's range for the unwinder. x86-64 PE only.
   bool isNoReturnCallReturn(MetaAddress Address);
+
+  /// Whether the straight-line code from \p Address reaches an encoding x86-64
+  /// does not have before any branch: see
+  /// DecidedBranches::runsIntoInvalidInstruction. x86-64 only.
+  bool runsIntoInvalidInstruction(MetaAddress Address);
 
 private:
   std::optional<unsigned> find(uint64_t Address) const;

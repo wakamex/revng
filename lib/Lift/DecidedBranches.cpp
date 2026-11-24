@@ -1017,6 +1017,31 @@ static bool decode(const MCDisassembler &Disassembler,
          and Size != 0;
 }
 
+bool DecidedBranches::runsIntoInvalidInstruction(uint64_t Address) const {
+  // A compiler writes a deliberate trap as `ud2` or `int3`, which decode and
+  // end the search; a block longer than this ends at a branch long before
+  constexpr unsigned MaxInstructions = 64;
+  for (unsigned I = 0; I < MaxInstructions; ++I) {
+    ArrayRef<uint8_t> Code = Bytes(Address);
+    if (Code.empty())
+      return false;
+
+    MCInst Instruction;
+    uint64_t Size = 0;
+    if (not decode(Disassembler, Instruction, Size, Code, Address))
+      return true;
+
+    const MCInstrDesc &Desc = InstrInfo.get(Instruction.getOpcode());
+    StringRef Name = InstrInfo.getName(Instruction.getOpcode());
+    if (Desc.mayAffectControlFlow(Instruction, RegisterInfo) or Desc.isTrap()
+        or Desc.isBarrier() or Name.starts_with("INT"))
+      return false;
+
+    Address += Size;
+  }
+  return false;
+}
+
 DecidedBranches::Decisions
 DecidedBranches::walk(uint64_t Entry,
                       ArrayRef<std::pair<uint64_t, uint64_t>> Parts,

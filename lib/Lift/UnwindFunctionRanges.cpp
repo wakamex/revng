@@ -939,6 +939,16 @@ bool UnwindFunctionRanges::isNoReturnCallReturn(MetaAddress Address) {
   return Callee and noReturnCallees().contains(*Callee);
 }
 
+bool UnwindFunctionRanges::runsIntoInvalidInstruction(MetaAddress Address) {
+  if (Architecture != model::Architecture::x86_64
+      or Address.type() != CodeType)
+    return false;
+
+  if (not Decoder)
+    Decoder.emplace(makeWalk());
+  return Decoder->runsIntoInvalidInstruction(Address.address());
+}
+
 bool UnwindFunctionRanges::isGapCode(MetaAddress Address) const {
   return FromPData and Architecture == model::Architecture::x86_64
          and Address.type() == CodeType and not find(Address.address());

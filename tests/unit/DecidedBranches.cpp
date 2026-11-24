@@ -83,6 +83,21 @@ public:
 
   /// Whether the walk of \p Code follows every path, and the offsets of the
   /// instructions its paths reach
+  /// Whether \p Code, from its start, runs into an encoding x86-64 does not
+  /// have
+  bool runsIntoInvalid(std::vector<uint8_t> Code) {
+    DecidedBranches Walk(*Disassembler,
+                         *InstrInfo,
+                         *RegisterInfo,
+                         [&Code](uint64_t Address) -> ArrayRef<uint8_t> {
+                           if (Address < 0x1000
+                               or Address >= 0x1000 + Code.size())
+                             return {};
+                           return ArrayRef(Code).drop_front(Address - 0x1000);
+                         });
+    return Walk.runsIntoInvalidInstruction(0x1000);
+  }
+
   /// \p NoReturn lists the functions that do not return
   std::pair<bool, std::set<uint64_t>>
   coverage(std::vector<uint8_t> Code, std::set<uint64_t> NoReturn = {}) {
@@ -353,6 +368,18 @@ BOOST_AUTO_TEST_CASE(CoverageIsTheLiveInstructions) {
   auto [Complete, Starts] = F.coverage({ 0xf9, 0x72, 0x01, 0xcc, 0xc3 });
   BOOST_TEST(Complete);
   BOOST_TEST((Starts == std::set<uint64_t>{ 0, 1, 4 }));
+}
+
+BOOST_AUTO_TEST_CASE(RunsIntoInvalidInstruction) {
+  Fixture F;
+  // mov eax, 1; push cs, which x86-64 does not have
+  BOOST_TEST(F.runsIntoInvalid({ 0xb8, 0x01, 0x00, 0x00, 0x00, 0x0e }));
+  // mov eax, 1; ret; push cs: the ret ends the search
+  BOOST_TEST(not F.runsIntoInvalid({ 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x0e }));
+  // ud2; push cs: a deliberate trap ends it too
+  BOOST_TEST(not F.runsIntoInvalid({ 0x0f, 0x0b, 0x0e }));
+  // sal al, 0 in its undocumented /6 encoding, which the walk decodes; ret
+  BOOST_TEST(not F.runsIntoInvalid({ 0xc0, 0xf0, 0x00, 0xc3 }));
 }
 
 BOOST_AUTO_TEST_CASE(PathEndsAtCallThatDoesNotReturn) {
