@@ -83,17 +83,21 @@ public:
 
   /// Whether the walk of \p Code follows every path, and the offsets of the
   /// instructions its paths reach
-  std::pair<bool, std::set<uint64_t>> coverage(std::vector<uint8_t> Code) {
+  /// \p NoReturn lists the functions that do not return
+  std::pair<bool, std::set<uint64_t>>
+  coverage(std::vector<uint8_t> Code, std::set<uint64_t> NoReturn = {}) {
     Code.insert(Code.end(), 16, 0xcc);
-    DecidedBranches Walk(*Disassembler,
-                         *InstrInfo,
-                         *RegisterInfo,
-                         [&Code](uint64_t Address) -> ArrayRef<uint8_t> {
-                           if (Address < 0x1000
-                               or Address >= 0x1000 + Code.size())
-                             return {};
-                           return ArrayRef(Code).drop_front(Address - 0x1000);
-                         });
+    DecidedBranches Walk(
+      *Disassembler,
+      *InstrInfo,
+      *RegisterInfo,
+      [&Code](uint64_t Address) -> ArrayRef<uint8_t> {
+        if (Address < 0x1000 or Address >= 0x1000 + Code.size())
+          return {};
+        return ArrayRef(Code).drop_front(Address - 0x1000);
+      },
+      {},
+      [&NoReturn](uint64_t Callee) { return NoReturn.contains(Callee); });
     std::pair<uint64_t, uint64_t> Part{ 0x1000, 0x1000 + Code.size() };
     DecidedBranches::Coverage Covered;
     Walk.walk(0x1000, Part, &Covered);
@@ -349,6 +353,19 @@ BOOST_AUTO_TEST_CASE(CoverageIsTheLiveInstructions) {
   auto [Complete, Starts] = F.coverage({ 0xf9, 0x72, 0x01, 0xcc, 0xc3 });
   BOOST_TEST(Complete);
   BOOST_TEST((Starts == std::set<uint64_t>{ 0, 1, 4 }));
+}
+
+BOOST_AUTO_TEST_CASE(PathEndsAtCallThatDoesNotReturn) {
+  // call 0x2000; mov eax, 1; ret: nothing after the call runs when the callee
+  // does not return
+  Fixture F;
+  std::vector<uint8_t> Code{ 0xe8, 0xfb, 0x0f, 0x00, 0x00, 0xb8,
+                             0x01, 0x00, 0x00, 0x00, 0xc3 };
+  auto [Complete, Starts] = F.coverage(Code, { 0x2000 });
+  BOOST_TEST(Complete);
+  BOOST_TEST((Starts == std::set<uint64_t>{ 0 }));
+  auto [CompleteReturning, StartsReturning] = F.coverage(Code);
+  BOOST_TEST((StartsReturning == std::set<uint64_t>{ 0, 5, 10 }));
 }
 
 BOOST_AUTO_TEST_CASE(CallForgetsTheStack) {

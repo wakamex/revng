@@ -529,6 +529,9 @@ DecidedBranches UnwindFunctionRanges::makeWalk() {
                            for (const MetaAddress &Target : Table->first)
                              Result.push_back(Target.address());
                            return Result;
+                         },
+                         [this](uint64_t Callee) {
+                           return noReturnCallees().contains(Callee);
                          });
 }
 

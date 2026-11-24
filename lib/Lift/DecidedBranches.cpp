@@ -210,12 +210,14 @@ DecidedBranches::DecidedBranches(const MCDisassembler &Disassembler,
                                  const MCInstrInfo &InstrInfo,
                                  const MCRegisterInfo &RegisterInfo,
                                  BytesAt Bytes,
-                                 IndirectTargets Indirect) :
+                                 IndirectTargets Indirect,
+                                 NoReturnCallee NoReturn) :
   Disassembler(Disassembler),
   InstrInfo(InstrInfo),
   RegisterInfo(RegisterInfo),
   Bytes(std::move(Bytes)),
-  Indirect(std::move(Indirect)) {
+  Indirect(std::move(Indirect)),
+  NoReturn(std::move(NoReturn)) {
 
   // Name the 64-bit registers and the parts of them the walk tracks
   StringMap<unsigned> ByName;
@@ -1165,6 +1167,11 @@ DecidedBranches::walk(uint64_t Entry,
         }
         break;
       }
+
+      // Nothing after a call to a function that does not return runs
+      if (Desc.isCall() and NoReturn and Instruction.getOperand(0).isImm()
+          and NoReturn(Address + Size + Instruction.getOperand(0).getImm()))
+        break;
 
       std::optional<State> Before;
       if (StatesLog.isEnabled())

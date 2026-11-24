@@ -45,7 +45,8 @@ class MCRegisterInfo;
 /// through a register with a REX.W prefix, which MSVC writes only to end an
 /// epilogue, is a tail call and ends the path; and any other jump through a
 /// register leaves paths unwalked, so no jump of the function counts as
-/// decided.
+/// decided. A path also ends at a direct call to a function that NoReturn says
+/// does not return.
 class DecidedBranches {
 public:
   /// The bytes from an address on, empty when there are none
@@ -55,6 +56,9 @@ public:
   /// through its table, when known
   using IndirectTargets =
     std::function<std::optional<std::vector<uint64_t>>(uint64_t)>;
+
+  /// Whether the function at an address does not return
+  using NoReturnCallee = std::function<bool(uint64_t)>;
 
   /// A decided jump: its outcome and the successor no path takes
   struct Decision {
@@ -84,6 +88,7 @@ private:
   const llvm::MCRegisterInfo &RegisterInfo;
   BytesAt Bytes;
   IndirectTargets Indirect;
+  NoReturnCallee NoReturn;
 
   /// For each LLVM register, its 64-bit register, the offset of its bits in
   /// it and their number; registers not listed are not tracked
@@ -105,7 +110,8 @@ public:
                   const llvm::MCInstrInfo &InstrInfo,
                   const llvm::MCRegisterInfo &RegisterInfo,
                   BytesAt Bytes,
-                  IndirectTargets Indirect = {});
+                  IndirectTargets Indirect = {},
+                  NoReturnCallee NoReturn = {});
 
   /// The decided jumps of the function entered at \p Entry, whose code lies
   /// in \p Parts, half-open address ranges
