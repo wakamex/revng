@@ -698,6 +698,39 @@ TCC::tryConvertingStackArguments(const model::UpcastableType &StackStruct,
 
   llvm::SmallVector<model::Argument, 8> Result;
   uint64_t InitialIndexOffset = Distributor.ArgumentIndex;
+
+  // Without fields, as when data layout analysis has not typed the area, the
+  // arguments still follow from its size under ABIs that reserve an area for
+  // the register arguments and pass every argument in a single stack slot:
+  // one argument for each slot past the reserved area, as wide as the bytes
+  // the area covers in it
+  bool OneSlotPerArgument = ABI.MaximumGPRsPerScalarArgument() == 1
+                            and ABI.MaximumGPRsPerAggregateArgument() == 1;
+  if (Stack.Fields().empty() and ABI.UnusedStackArgumentBytes() != 0
+      and OneSlotPerArgument and not StackStruct->isTypedef()
+      and not model::hasMetadata(Stack)) {
+    revng_log(Log, "Stack struct has no fields, one argument per slot.");
+    uint64_t Slot = ABI.getPointerSize();
+    std::optional<ArgumentProperties> Previous;
+    for (uint64_t Offset = ABI.UnusedStackArgumentBytes();
+         Offset < Stack.Size();
+         Offset += Slot) {
+      uint64_t Size = llvm::PowerOf2Ceil(std::min(Slot, Stack.Size() - Offset));
+      model::UpcastableType Type = model::PrimitiveType::makeGeneric(Size);
+      ArgumentProperties Current = { .Offset = Offset,
+                                     .Size = Size,
+                                     .Alignment = adjustedAlignment(*Type) };
+      if (not canBeNext(Distributor, *Type, Current, Previous))
+        return std::nullopt;
+
+      model::Argument &New = Result.emplace_back();
+      New.Index() = Distributor.ArgumentIndex - 1;
+      New.Type() = std::move(Type);
+      Previous = Current;
+    }
+    return Result;
+  }
+
   if (!StackStruct->isTypedef() && !model::hasMetadata(Stack)) {
     // NOTE: Only proceed with trying to "split" the stack struct up if it has
     //       no metadata attached: as in, it doesn't have a user-defined

@@ -611,6 +611,7 @@ model/import-binary/pe-headers.yml
 model/microsoft-float-arguments.S
 model/microsoft-home-space.S
 model/microsoft-stack-arguments.S
+model/microsoft-stack-arguments-without-fields.S
 model/prototype-set-after-use.S
 model/sysv-float-arguments.S
 segment-references/c-strings-outside-code.S
