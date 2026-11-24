@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <compare>
 #include <cstdint>
+#include <map>
 #include <optional>
-#include <set>
 #include <tuple>
 
 #include "revng/ADT/RecursiveCoroutine.h"
@@ -385,39 +385,43 @@ class TypeTraversalAnalyzer {
 private:
   TraversalCache &Cache;
 
-  /// A point a walk reaches: a type, the offset it starts at and the offset
-  /// looked up, how many fields deep it is, and the arrays it is in
-  using WalkState = std::tuple<const void *,
+  /// A point a walk reaches: a type, the offset looked up, the offset the type
+  /// starts at, and the arrays it is in
+  using WalkPoint = std::tuple<const void *,
                                int64_t,
                                int64_t,
-                               size_t,
                                std::vector<std::tuple<int64_t, uint64_t,
                                                       uint64_t>>>;
 
-  /// The points the current walk has reached. Everything a walk finds below a
-  /// point it reaches again repeats what it found there the first time, which
+  /// The smallest number of fields the current walk has reached each point
+  /// through. Everything a walk finds below a point it reaches again no less
+  /// deep repeats what it found there before, deeper or later, which never
   /// ranks ahead: without this, a type that several members of nested unions
   /// share would be walked once per path to it, and the paths multiply at every
   /// level of nesting.
-  std::set<WalkState> Reached;
+  std::map<WalkPoint, size_t> ShallowestDepth;
 
-  bool reachedBefore(mlir::Type Type,
-                     int64_t Offset,
-                     int64_t CurrentOffset,
-                     size_t Depth,
-                     const ArrayPath &Arrays) {
+  /// Whether the walk has reached this point before through \p Depth fields or
+  /// fewer; if not, record that it has now
+  bool reachedNoDeeper(mlir::Type Type,
+                       int64_t Offset,
+                       int64_t CurrentOffset,
+                       size_t Depth,
+                       const ArrayPath &Arrays) {
     std::vector<std::tuple<int64_t, uint64_t, uint64_t>> Shapes;
     for (const NestedArrayShape &Shape : Arrays)
       Shapes.emplace_back(Shape.OffsetFromParentArrayElement,
                           Shape.NumElements,
                           Shape.Stride);
-    return not Reached
-                 .insert({ Type.getAsOpaquePointer(),
-                           Offset,
-                           CurrentOffset,
-                           Depth,
-                           std::move(Shapes) })
-                 .second;
+    auto [It, Inserted] = ShallowestDepth.try_emplace({ Type.getAsOpaquePointer(),
+                                                        Offset,
+                                                        CurrentOffset,
+                                                        std::move(Shapes) },
+                                                      Depth);
+    if (not Inserted and It->second <= Depth)
+      return true;
+    It->second = Depth;
+    return false;
   }
 
 public:
@@ -484,7 +488,7 @@ TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
 
   std::vector<ArrayPath> ArrayPaths;
   ArrayPaths.push_back(ArrayPath());
-  Reached.clear();
+  ShallowestDepth.clear();
   rc_eval(collectArrayPaths(BaseType, Offset, 0, {}, ArrayPaths));
 
   for (ArrayPath &Path : ArrayPaths) {
@@ -506,8 +510,39 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
     return It->second;
 
   std::vector<Traversal> Traversals;
-  Reached.clear();
+  ShallowestDepth.clear();
   rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
+
+  // Of the traversals landing on one type at one offset through the same
+  // arrays, which `getBestTraversal` scores alike but for their depth, it can
+  // only choose the first of the shallowest: keep just that one, in its place
+  using Key = std::tuple<const void *,
+                         int64_t,
+                         std::vector<std::pair<uint64_t, uint64_t>>>;
+  auto KeyOf = [](const Traversal &T) {
+    std::vector<std::pair<uint64_t, uint64_t>> Arrays;
+    for (const ArrayShape &Shape : T.TraversedArrays)
+      Arrays.emplace_back(Shape.NumElements, Shape.Stride);
+    return Key{ T.TargetType.getAsOpaquePointer(), T.StartOffset, Arrays };
+  };
+  std::map<Key, size_t> Chosen;
+  for (size_t I = 0; I < Traversals.size(); ++I) {
+    auto [It, Inserted] = Chosen.try_emplace(KeyOf(Traversals[I]), I);
+    if (not Inserted and Traversals[I].depth() < Traversals[It->second].depth())
+      It->second = I;
+  }
+  std::vector<bool> Keep(Traversals.size(), false);
+  for (const auto &[_, Index] : Chosen)
+    Keep[Index] = true;
+  size_t Kept = 0;
+  for (size_t I = 0; I < Traversals.size(); ++I) {
+    if (not Keep[I])
+      continue;
+    if (Kept != I)
+      Traversals[Kept] = std::move(Traversals[I]);
+    ++Kept;
+  }
+  Traversals.erase(Traversals.begin() + Kept, Traversals.end());
 
   std::stable_sort(Traversals.begin(),
                    Traversals.end(),
@@ -527,7 +562,7 @@ TypeTraversalAnalyzer::collectArrayPaths(mlir::Type Type,
                                          int64_t CurrentOffset,
                                          const ArrayPath &CurrentArrayPath,
                                          std::vector<ArrayPath> &ArrayPaths) {
-  if (reachedBefore(Type, Offset, CurrentOffset, 0, CurrentArrayPath))
+  if (reachedNoDeeper(Type, Offset, CurrentOffset, 0, CurrentArrayPath))
     rc_return;
 
   if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
@@ -584,11 +619,11 @@ TypeTraversalAnalyzer::collectTraversals(mlir::Type Type,
   // something severely wrong in the types we're working with
   revng_assert(getObjectSizeOrZero(Type) > 0);
 
-  if (reachedBefore(Type,
-                    Offset,
-                    CurrentOffset,
-                    FieldPath.size(),
-                    CurrentArrayPath))
+  if (reachedNoDeeper(Type,
+                      Offset,
+                      CurrentOffset,
+                      FieldPath.size(),
+                      CurrentArrayPath))
     rc_return;
 
   // Pointers are leaves: we do not traverse through them, but a `Traversal`
