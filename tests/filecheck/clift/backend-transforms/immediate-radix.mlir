@@ -6,6 +6,9 @@
 
 !void = !clift.void
 !int32_t = !clift.int<signed 4>
+!uint8_t = !clift.int<unsigned 1>
+!uint64_t = !clift.int<unsigned 8>
+!uint8_t$ptr = !clift.ptr<8 to !uint8_t>
 
 !f = !clift.func<
   "/type-definition/1001-CABIFunctionDefinition" : !void()
@@ -44,6 +47,50 @@ module attributes {clift.module} {
       // CHECK: clift.yield %2 : !int32_t
       clift.yield %2 : !int32_t
     // CHECK: }
+    }
+  }
+
+  clift.func @g<!f>() {
+    %p = clift.local : !uint8_t$ptr
+
+    // An offset added to a pointer is in hexadecimal
+    // CHECK: clift.expr {
+    clift.expr {
+      // COM: 9648 = 0x25B0
+      // CHECK: {{%[0-9]+}} = clift.imm 9648 {clift.radix = 16 : ui32} : !uint64_t
+      %1 = clift.imm 9648 : !uint64_t
+      %2 = clift.ptr_add %p, %1 : (!uint8_t$ptr, !uint64_t)
+      clift.yield %2 : !uint8_t$ptr
+    }
+
+    // A small one is not
+    // CHECK: clift.expr {
+    clift.expr {
+      // CHECK: {{%[0-9]+}} = clift.imm 8 : !uint64_t
+      %1 = clift.imm 8 : !uint64_t
+      %2 = clift.ptr_add %p, %1 : (!uint8_t$ptr, !uint64_t)
+      clift.yield %2 : !uint8_t$ptr
+    }
+
+    // So is one added to a pointer converted to an integer
+    // CHECK: clift.expr {
+    clift.expr {
+      %1 = clift.bitcast %p : !uint8_t$ptr -> !uint64_t
+      // COM: 23504 = 0x5BD0
+      // CHECK: {{%[0-9]+}} = clift.imm 23504 {clift.radix = 16 : ui32} : !uint64_t
+      %2 = clift.imm 23504 : !uint64_t
+      %3 = clift.add %1, %2 : !uint64_t
+      clift.yield %3 : !uint64_t
+    }
+
+    // An integer added to another integer keeps its radix
+    // CHECK: clift.expr {
+    clift.expr {
+      // CHECK: {{%[0-9]+}} = clift.imm 23504 : !uint64_t
+      %0 = clift.imm 23504 : !uint64_t
+      %1 = clift.imm 7 : !uint64_t
+      %2 = clift.add %0, %1 : !uint64_t
+      clift.yield %2 : !uint64_t
     }
   }
 }

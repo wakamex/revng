@@ -64,11 +64,35 @@ static bool isBitwiseOperator(mlir::Operation *Op) {
   return mlir::isa<BitwiseNotOp, BitwiseAndOp, BitwiseOrOp, BitwiseXorOp>(Op);
 }
 
+// Whether \p User uses \p Immediate as an offset into an object: added to or
+// subtracted from a pointer, or from a pointer converted to an integer.
+static bool isOffset(ImmediateOp Immediate, mlir::Operation *User) {
+  if (mlir::isa<PtrAddOp, PtrSubOp>(User))
+    return true;
+
+  if (not mlir::isa<AddOp, SubOp>(User))
+    return false;
+
+  for (mlir::Value Operand : User->getOperands()) {
+    if (Operand == Immediate.getResult())
+      continue;
+    if (auto Cast = Operand.getDefiningOp<BitCastOp>())
+      if (mlir::isa<PointerType>(unwrapTypedefs(Cast.getValue().getType())))
+        return true;
+  }
+  return false;
+}
+
 // Deduces the best radix for an immediate based both on its usage and value.
 static unsigned selectIntegerRadix(ImmediateOp Immediate) {
   for (mlir::Operation *User : Immediate.getResult().getUsers()) {
     // Operands of bitwise operators are always displayed in hexadecimal:
     if (isBitwiseOperator(User))
+      return 0x10;
+
+    // So are offsets into objects, as field offsets usually are, except small
+    // ones, which read the same in either radix
+    if (Immediate.getValue().uge(0x10) and isOffset(Immediate, User))
       return 0x10;
   }
 
