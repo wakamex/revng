@@ -1167,6 +1167,32 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
         if (not Call->DynamicFunction().empty())
           DynamicCallees[Block.ID()] = Call->DynamicFunction();
 
+  // Under an ABI that assigns arguments by position, an argument is in either
+  // the general purpose or the vector register of its position, never both:
+  // a callee taking the general purpose register of a position does not read
+  // the vector register of the same position as an argument, whatever value is
+  // left in it
+  std::map<const GlobalVariable *, GlobalVariable *> SamePosition;
+  if (Binary->DefaultABI() != model::ABI::Invalid) {
+    const auto &ABI = abi::Definition::get(Binary->DefaultABI());
+    if (ABI.ArgumentsArePositionBased()) {
+      const auto &GPRs = ABI.GeneralPurposeArgumentRegisters();
+      const auto &Vectors = ABI.FloatArgumentRegisters();
+      for (size_t I = 0; I < std::min(GPRs.size(), Vectors.size()); ++I) {
+        auto GPRCSVs = csvsOf({ GPRs[I] });
+        if (GPRCSVs.size() != 1)
+          continue;
+        for (auto *CSV : csvsOf({ Vectors[I] }))
+          SamePosition[CSV] = *GPRCSVs.begin();
+      }
+    }
+  }
+  auto IsArgument = [&SamePosition](const CSVSet &Arguments,
+                                    const GlobalVariable *CSV) {
+    auto It = SamePosition.find(CSV);
+    return It == SamePosition.end() or not Arguments.contains(It->second);
+  };
+
   revng::IRBuilder Builder(M.getContext());
   for (auto &[Call, IsPreHook] : Hooks) {
     auto CallerBlock = BasicBlockID::fromValue(Call->getArgOperand(0));
@@ -1187,6 +1213,8 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
     if (IsPreHook) {
       Builder.SetInsertPoint(Call);
       for (auto *CSV : ABIResults.ArgumentsRegisters) {
+        if (not IsArgument(ABIResults.ArgumentsRegisters, CSV))
+          continue;
         // Inject a virtual read of the arguments of the callee
         // TODO: drop const_cast. Unfortunately it requires a significant
         //       refactoring.
@@ -1198,10 +1226,13 @@ Changes DetectABI::analyzeFunctionABI(const model::Function &Function,
       // does not touch itself
       if (auto It = SlotCallees.find({ Function.Entry(), CallerBlock });
           It != SlotCallees.end())
-        for (const MetaAddress &Target : It->second)
-          for (auto *CSV :
-               Oracle.getLocalFunction(Target).ABIResults.ConsumedRegisters)
-            RegisterReader.read(Builder, const_cast<GlobalVariable *>(CSV));
+        for (const MetaAddress &Target : It->second) {
+          const CSVSet &Consumed = Oracle.getLocalFunction(Target)
+                                     .ABIResults.ConsumedRegisters;
+          for (auto *CSV : Consumed)
+            if (IsArgument(Consumed, CSV))
+              RegisterReader.read(Builder, const_cast<GlobalVariable *>(CSV));
+        }
 
       // Ensure the precall_hook is the first instruction of the block
       BB->splitBasicBlockBefore(Call);
