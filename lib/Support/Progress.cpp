@@ -11,7 +11,9 @@ extern "C" {
 }
 #endif
 
+#include <atomic>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 
 #include "llvm/ADT/STLExtras.h"
@@ -489,6 +491,109 @@ static void destroyTraceProgressListener(void *OpaqueListener) {
   auto *Listener = static_cast<TraceProgressListener *>(OpaqueListener);
   Listener->close("Exit due to signal");
 }
+
+/// The main thread's open tasks, kept where a reader outside the process can
+/// find them without a trace: a monitor looks `revng_progress_mirror` up by
+/// its symbol and reads it from /proc/PID/mem. `Sequence` is odd while the
+/// listener writes, so a reader keeps a copy only when it reads the same even
+/// value before and after it. `Depth` counts every open task; only the
+/// outermost `MaxLevels` are kept.
+extern "C" {
+
+struct RevngProgressLevel {
+  char Name[120];
+  char Step[120];
+  int64_t StepIndex;
+  int64_t TotalSteps;
+  uint64_t StartedUs;
+  uint64_t StepStartedUs;
+};
+
+struct RevngProgressMirror {
+  char Magic[16];
+  uint64_t Sequence;
+  uint64_t Depth;
+  uint64_t UpdatedUs;
+  RevngProgressLevel Levels[16];
+};
+
+__attribute__((visibility("default"), used))
+RevngProgressMirror revng_progress_mirror = { "revng-progress1", 0, 0, 0, {} };
+}
+
+class MemoryProgressListener : public llvm::ProgressListener {
+private:
+  static constexpr size_t MaxLevels = std::size(revng_progress_mirror.Levels);
+  RevngProgressMirror &Mirror = revng_progress_mirror;
+
+public:
+  static constexpr bool AllThreads = false;
+
+public:
+  void handleNewTask(const llvm::Task *T) override {
+    write([&](uint64_t Now) {
+      size_t Index = T->index();
+      Mirror.Depth = Index + 1;
+      if (Index >= MaxLevels)
+        return;
+      RevngProgressLevel &Level = Mirror.Levels[Index];
+      copy(Level.Name, T->name());
+      copy(Level.Step, "");
+      Level.StepIndex = -1;
+      Level.TotalSteps = T->totalSteps().value_or(-1);
+      Level.StartedUs = Level.StepStartedUs = Now;
+    });
+  }
+
+  void handleTaskCompleted(const llvm::Task *T) override {
+    write([&](uint64_t) { Mirror.Depth = T->index(); });
+  }
+
+  void handleTaskAdvancement(const llvm::Task *T,
+                             llvm::StringRef PreviousStepName) override {
+    write([&](uint64_t Now) {
+      size_t Index = T->index();
+      if (Index >= MaxLevels)
+        return;
+      RevngProgressLevel &Level = Mirror.Levels[Index];
+      copy(Level.Step, T->stepName());
+      Level.StepIndex = T->stepIndex();
+      Level.StepStartedUs = Now;
+    });
+  }
+
+private:
+  template<size_t Size>
+  static void copy(char (&Destination)[Size], llvm::StringRef Source) {
+    size_t Length = std::min(Source.size(), Size - 1);
+    std::memcpy(Destination, Source.data(), Length);
+    Destination[Length] = '\0';
+  }
+
+  template<typename CallableType>
+  void write(CallableType &&Update) {
+    using namespace std::chrono;
+    uint64_t Now = duration_cast<microseconds>(system_clock::now()
+                                                 .time_since_epoch())
+                     .count();
+    __atomic_store_n(&Mirror.Sequence, Mirror.Sequence + 1, __ATOMIC_RELEASE);
+    std::atomic_thread_fence(std::memory_order_release);
+    Update(Now);
+    Mirror.UpdatedUs = Now;
+    __atomic_store_n(&Mirror.Sequence, Mirror.Sequence + 1, __ATOMIC_RELEASE);
+  }
+};
+
+static auto RegisterMemoryProgressListener = callback([](const bool &Value) {
+  if (Value)
+    llvm::ProgressReport->registerListener<MemoryProgressListener>();
+});
+
+static opt<bool> ProgressMemory("progress-memory",
+                                desc("Keep the main thread's open tasks in "
+                                     "revng_progress_mirror, for a monitor "
+                                     "reading this process's memory"),
+                                RegisterMemoryProgressListener);
 
 static auto RegisterTraceProgressListener = [](const std::string &Value) {
   if (Value.size() > 0) {
