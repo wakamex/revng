@@ -473,7 +473,13 @@ struct ImmediateCastPattern : mlir::OpRewritePattern<ImmediateOp> {
                                   mlir::PatternRewriter &Rewriter) const {
     uint64_t Size = Type.getSize();
 
-    if (auto Range = DataModel.getStandardIntegerRange(Size)) {
+    // The range starts at the first standard type at least as large, so only
+    // a type of exactly this size represents the immediate
+    auto Range = DataModel.getStandardIntegerRange(Size);
+    if (Range and DataModel.getStandardTypeSize(Range->first) != Size)
+      Range = std::nullopt;
+
+    if (Range) {
       // Int, long and long long are directly representable.
       if (Range->second >= CStandardType::Int)
         return mlir::failure();
@@ -483,6 +489,15 @@ struct ImmediateCastPattern : mlir::OpRewritePattern<ImmediateOp> {
                                              IntegerKind::Signed,
                                              DataModel.getIntSize());
 
+      return rewriteWithCast(Op, NewType, Rewriter);
+    }
+
+    // A width narrower than int without a C type of its own, such as 3 bytes,
+    // is written as an int and truncated, as char and short are
+    if (Size < DataModel.getIntSize()) {
+      IntegerType NewType = IntegerType::get(Type.getContext(),
+                                             IntegerKind::Signed,
+                                             DataModel.getIntSize());
       return rewriteWithCast(Op, NewType, Rewriter);
     }
 
