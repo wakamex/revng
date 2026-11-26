@@ -111,6 +111,12 @@ public:
     if (not Visited.insert(removeConst(Type)).second)
       return mlir::success();
 
+    // A class type that passed its own check holds no class type by value
+    // that leads back to it, so no recursion of the root type passes through
+    // it either: had one, its own check would have found it
+    if (Checked.contains(removeConst(Type)))
+      return mlir::success();
+
     for (FieldAttr Field : Type.getFields()) {
       if (visitFieldType(Field.getType(), RootType, Visited).failed())
         return mlir::failure();
@@ -130,14 +136,20 @@ public:
                                             "handle: '"
                                          << UnqualifiedType.getHandle() << '\'';
 
-    if (auto Class = mlir::dyn_cast<ClassType>(Type)) {
+    // Each class type is checked once, however many times the module refers
+    // to it
+    if (auto Class = mlir::dyn_cast<ClassType>(Type);
+        Class and not Checked.contains(removeConst(Class))) {
       llvm::DenseSet<mlir::Type> Visited;
       if (visitClassType(Class, Class, Visited, /*CheckRecursion=*/false)
             .failed())
         return mlir::failure();
 
-      ClassTypes.insert(Class);
+      Checked.insert(removeConst(Class));
     }
+
+    if (auto Class = mlir::dyn_cast<ClassType>(Type))
+      ClassTypes.insert(Class);
 
     return mlir::success();
   }
@@ -210,6 +222,8 @@ public:
 private:
   llvm::DenseMap<llvm::StringRef, DefinedType> Definitions;
   llvm::DenseSet<ClassType> ClassTypes;
+  // The unqualified class types whose check for recursion passed
+  llvm::DenseSet<mlir::Type> Checked;
 };
 
 static mlir::LogicalResult verifyModuleAttr(mlir::Operation *Op,
