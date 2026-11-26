@@ -109,6 +109,7 @@ clift/emit-field-accesses/array-pointer-as-array.mlir
 clift/emit-field-accesses/array-ptradd-linear-combination.mlir
 clift/emit-field-accesses/array-struct-stride-mul.mlir
 clift/emit-field-accesses/array-struct-stride-shl.mlir
+clift/emit-field-accesses/array-three-levels-offset.mlir
 clift/emit-field-accesses/common-strides-selection.mlir
 clift/emit-field-accesses/inherited-const.mlir
 clift/emit-field-accesses/negative-stride-and-offset-no-rewrite.mlir
@@ -491,6 +492,7 @@ detect-abi/overlapping-indirect-branch.S
 detect-abi/raw-argument-order.S
 detect-abi/relocated-code-pointer.S
 detect-abi/returned-vector-result.S
+detect-abi/reuse-preliminary.S
 detect-abi/scratch-vector-register.S
 detect-abi/self-compare-idiom.S
 detect-abi/slot-callees-untouched-arguments.S
