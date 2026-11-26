@@ -19,6 +19,7 @@
 using namespace clift;
 
 static Logger Log("best-traversal");
+static Logger LimitLog("best-traversal-limit");
 
 /// Helper function which converts a generic `ArrayPath` to a compatible form
 /// used to store the `array` traversal into the `Traversal` class. The
@@ -401,6 +402,13 @@ private:
   /// level of nesting.
   std::map<WalkPoint, size_t> ShallowestDepth;
 
+  /// The most `Traversal`s one walk collects. The pruning above bounds a walk
+  /// by the points it reaches times their depth, which the union types of a
+  /// large program can still push past the memory of the machine: past this
+  /// many, the walk stops, and the accesses it was for keep their arithmetic.
+  static constexpr size_t MaxTraversals = size_t(1) << 18;
+  bool TooManyTraversals = false;
+
   /// Whether the walk has reached this point before through \p Depth fields or
   /// fewer; if not, record that it has now
   bool reachedNoDeeper(mlir::Type Type,
@@ -511,7 +519,22 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
 
   std::vector<Traversal> Traversals;
   ShallowestDepth.clear();
+  TooManyTraversals = false;
   rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
+  ShallowestDepth.clear();
+  if (TooManyTraversals) {
+    if (LimitLog.isEnabled()) {
+      std::string Name;
+      llvm::raw_string_ostream Stream(Name);
+      BaseType.print(Stream);
+      revng_log(LimitLog,
+                "more than " << MaxTraversals << " traversals reach offset "
+                             << Offset << " of " << Name);
+    }
+    Traversals.clear();
+    Traversals.shrink_to_fit();
+    return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
+  }
 
   // Of the traversals landing on one type at one offset through the same
   // arrays, which `getBestTraversal` scores alike but for their depth, it can
@@ -618,6 +641,13 @@ TypeTraversalAnalyzer::collectTraversals(mlir::Type Type,
   // We should never reach a type with zero size - if we do, it means there is
   // something severely wrong in the types we're working with
   revng_assert(getObjectSizeOrZero(Type) > 0);
+
+  if (TooManyTraversals)
+    rc_return;
+  if (Traversals.size() >= MaxTraversals) {
+    TooManyTraversals = true;
+    rc_return;
+  }
 
   if (reachedNoDeeper(Type,
                       Offset,
