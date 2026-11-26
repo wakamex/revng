@@ -46,6 +46,7 @@ clift/backend/ternary.mlir
 clift/backend/types.mlir
 clift/backend/while.mlir
 clift/c-legalization/add-i16.mlir
+clift/c-legalization/cast-odd-width.mlir
 clift/c-legalization/float-to-integer.mlir
 clift/c-legalization/imm-enum.mlir
 clift/c-legalization/imm-i8.mlir

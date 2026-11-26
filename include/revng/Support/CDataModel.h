@@ -172,9 +172,11 @@ public:
     return getStandardIntegerSizeMask() | ExtendedIntegerSizeMask;
   }
 
-  /// \pre \p Size is a power of two.
+  /// Whether a C integer type of \p Size bytes exists. Integers whose size is
+  /// not a power of two, such as 3 or 6 bytes, have none.
   [[nodiscard]] bool isSupportedIntegerSize(unsigned Size) const {
-    revng_assert(std::has_single_bit(Size));
+    if (not std::has_single_bit(Size))
+      return false;
     return (getSupportedIntegerSizeMask() & Size) != 0;
   }
 
