@@ -87,6 +87,33 @@ refineGenericType(const abi::Definition &ABI,
   return std::nullopt;
 }
 
+/// \p Raw with an argument in every register position before its stack
+/// arguments. Under an ABI that assigns arguments by position, a function with
+/// stack arguments past the area reserved for the register arguments has an
+/// argument in every register position, read or not, so a position \p Raw
+/// leaves unused gets its general purpose register.
+static model::RawFunctionDefinition
+withEveryPosition(const abi::Definition &ABI,
+                  const model::RawFunctionDefinition &Raw) {
+  model::RawFunctionDefinition Result = Raw;
+  if (not ABI.ArgumentsArePositionBased())
+    return Result;
+
+  const auto *Stack = Raw.stackArgumentsType();
+  if (Stack == nullptr or Stack->Size() <= ABI.UnusedStackArgumentBytes())
+    return Result;
+
+  const auto &GPRs = ABI.GeneralPurposeArgumentRegisters();
+  const auto &Vectors = ABI.FloatArgumentRegisters();
+  for (size_t I = 0; I < GPRs.size(); ++I) {
+    bool Used = Raw.Arguments().contains(GPRs[I])
+                or (I < Vectors.size() and Raw.Arguments().contains(Vectors[I]));
+    if (not Used)
+      Result.addArgument(GPRs[I], model::PrimitiveType::makeGeneric(GPRs[I]));
+  }
+  return Result;
+}
+
 class ToCABIConverter {
 private:
   using RFT = const model::RawFunctionDefinition &;
@@ -116,7 +143,10 @@ public:
     UseSoftRegisterStateDeductions(UseSoftRegisterStateDeductions) {}
 
   [[nodiscard]] std::optional<Converted>
-  tryConvert(const model::RawFunctionDefinition &FunctionType) {
+  tryConvert(const model::RawFunctionDefinition &OriginalType) {
+    model::RawFunctionDefinition FunctionType = withEveryPosition(ABI,
+                                                                  OriginalType);
+
     // Register arguments first.
     auto Arguments = tryConvertingRegisterArguments(FunctionType.Arguments());
     if (!Arguments.has_value()) {
@@ -390,7 +420,7 @@ tryMakeCABIFunction(const model::RawFunctionDefinition &FunctionType,
 
   std::string Reason;
   if (not layoutMatches(ABI,
-                        FunctionType,
+                        withEveryPosition(ABI, FunctionType),
                         Definition,
                         UseSoftRegisterStateDeductions,
                         Reason)) {

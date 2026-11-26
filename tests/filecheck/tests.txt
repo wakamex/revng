@@ -613,6 +613,7 @@ model/microsoft-float-arguments.S
 model/microsoft-home-space.S
 model/microsoft-stack-arguments.S
 model/microsoft-stack-arguments-without-fields.S
+model/microsoft-stack-arguments-unused-registers.S
 model/prototype-set-after-use.S
 model/sysv-float-arguments.S
 segment-references/c-strings-outside-code.S
