@@ -469,11 +469,11 @@ static ArrayPath enterArray(clift::ArrayType Type,
   ArrayInfo.Stride = getObjectSize(Type.getElementType());
   ArrayInfo.NumElements = Type.getElementsCount();
 
-  // The offset is relative to the parent array, if any
+  // The offset is relative to the first element of the parent array, if any,
+  // which starts where the offsets of all the arrays around it add up to
   ArrayInfo.OffsetFromParentArrayElement = CurrentOffset;
-  if (not CurrentArrayPath.empty())
-    ArrayInfo.OffsetFromParentArrayElement -= CurrentArrayPath.back()
-                                                .OffsetFromParentArrayElement;
+  for (const NestedArrayShape &Parent : CurrentArrayPath)
+    ArrayInfo.OffsetFromParentArrayElement -= Parent.OffsetFromParentArrayElement;
 
   ArrayPath NewArrayPath = CurrentArrayPath;
   NewArrayPath.push_back(ArrayInfo);
