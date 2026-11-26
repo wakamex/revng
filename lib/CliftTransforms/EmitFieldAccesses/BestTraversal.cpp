@@ -523,14 +523,14 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
   rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
   ShallowestDepth.clear();
   if (TooManyTraversals) {
-    if (LimitLog.isEnabled()) {
-      std::string Name;
-      llvm::raw_string_ostream Stream(Name);
-      BaseType.print(Stream);
-      revng_log(LimitLog,
-                "more than " << MaxTraversals << " traversals reach offset "
-                             << Offset << " of " << Name);
-    }
+    // Name the type by its handle: printing it writes out every class type it
+    // holds, which for such a type can take more memory than the walk did
+    std::string Handle = "a type without a handle";
+    if (auto Defined = mlir::dyn_cast<clift::DefinedType>(BaseType))
+      Handle = Defined.getHandle().str();
+    revng_log(LimitLog,
+              "more than " << MaxTraversals << " traversals reach offset "
+                           << Offset << " of " << Handle);
     Traversals.clear();
     Traversals.shrink_to_fit();
     return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
