@@ -60,6 +60,14 @@ struct EmitFieldAccessesPass
 
   mlir::FrozenRewritePatternSet Patterns;
 
+  /// The traversals of each base type and offset, kept across this pass's
+  /// runs: a pass manager runs one pass object on each function's module, and
+  /// the traversals depend only on the type, uniqued in its context. Rebuilt
+  /// for each function, the walks of the same large types took most of a
+  /// whole program's emission. Cleared once it holds `MaxCachedEntries`.
+  TraversalCache PassCache;
+  static constexpr size_t MaxCachedEntries = size_t(1) << 20;
+
   mlir::LogicalResult initialize(mlir::MLIRContext *Context) override {
     mlir::RewritePatternSet Set(Context);
     populateWithEmitFieldAccessesPatterns(Set);
@@ -69,13 +77,23 @@ struct EmitFieldAccessesPass
   }
 
   void runOnOperation() override {
-    [[maybe_unused]] EFAThreadCache Cache;
+    // A caller's cache, if it set one, is used instead
+    bool OwnCache = ThreadTraversalCache == nullptr;
+    if (OwnCache) {
+      if (PassCache.Traversals.size() + PassCache.ArrayPaths.size()
+          > MaxCachedEntries)
+        PassCache = TraversalCache();
+      ThreadTraversalCache = &PassCache;
+    }
 
     mlir::GreedyRewriteConfig Config;
     Config.maxIterations = mlir::GreedyRewriteConfig::kNoLimit;
     if (mlir::applyPatternsAndFoldGreedily(getOperation(), Patterns, Config)
           .failed())
       signalPassFailure();
+
+    if (OwnCache)
+      ThreadTraversalCache = nullptr;
   }
 };
 
