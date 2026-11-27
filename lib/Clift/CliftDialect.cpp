@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/Mutex.h"
 
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -21,6 +22,24 @@
 #include "revng/Clift/CliftDialect.cpp.inc"
 
 using namespace clift;
+
+struct clift::CliftDialectImpl {
+  std::optional<CDataModel> DefaultDataModel;
+
+  /// The unqualified class types a module that passed verification reached.
+  /// Types are uniqued and immutable in their context, so what their check
+  /// found holds in every later module: emission verifies each function's
+  /// module after each pass, and without this each walked the whole graph of
+  /// types it reaches, which for a large program's data layout types took
+  /// minutes per function.
+  llvm::DenseSet<mlir::Type> VerifiedClassTypes;
+  llvm::sys::SmartMutex<true> VerifiedMutex;
+
+  bool isVerified(mlir::Type Class) {
+    llvm::sys::SmartScopedLock<true> Lock(VerifiedMutex);
+    return VerifiedClassTypes.contains(Class);
+  }
+};
 
 namespace {
 
@@ -79,7 +98,26 @@ class ModuleVerifier : public ModuleVisitor<ModuleVerifier> {
     Switch,
   };
 
+  CliftDialectImpl &dialect() {
+    if (Dialect == nullptr)
+      Dialect = getCurrentModule()
+                  ->getContext()
+                  ->getLoadedDialect<CliftDialect>()
+                  ->Impl;
+    return *Dialect;
+  }
+
+  /// Whether \p Type is a class type an earlier module already verified
+  bool verifiedBefore(mlir::Type Type) {
+    Type = removeConst(Type);
+    return mlir::isa<ClassType>(Type) and dialect().isVerified(Type);
+  }
+
 public:
+  /// The walk does not descend into a class type verified before: everything
+  /// it reaches was verified with it
+  bool visitSubElementsOf(mlir::Type Type) { return not verifiedBefore(Type); }
+
   // Visit a field type of a class type attribute.
   // RootType is the root class type attribute and is used to detect recursion.
   // Visited holds the class types the visit from RootType has reached: one that
@@ -137,9 +175,10 @@ public:
                                          << UnqualifiedType.getHandle() << '\'';
 
     // Each class type is checked once, however many times the module refers
-    // to it
+    // to it, and not at all when an earlier module verified it
     if (auto Class = mlir::dyn_cast<ClassType>(Type);
-        Class and not Checked.contains(removeConst(Class))) {
+        Class and not Checked.contains(removeConst(Class))
+        and not verifiedBefore(Class)) {
       llvm::DenseSet<mlir::Type> Visited;
       if (visitClassType(Class, Class, Visited, /*CheckRecursion=*/false)
             .failed())
@@ -206,6 +245,9 @@ public:
     };
 
     for (ClassType Class : ClassTypes) {
+      if (verifiedBefore(Class))
+        continue;
+
       if (auto T = mlir::dyn_cast<StructType>(Class)) {
         if (T.getDefinition().verifyDefinition(EmitError).failed())
           return mlir::failure();
@@ -216,10 +258,17 @@ public:
           return mlir::failure();
       }
     }
+
+    // The whole module passed: every class type it reached is verified
+    CliftDialectImpl &Impl = dialect();
+    llvm::sys::SmartScopedLock<true> Lock(Impl.VerifiedMutex);
+    for (ClassType Class : ClassTypes)
+      Impl.VerifiedClassTypes.insert(removeConst(Class));
     return mlir::success();
   }
 
 private:
+  CliftDialectImpl *Dialect = nullptr;
   llvm::DenseMap<llvm::StringRef, DefinedType> Definitions;
   llvm::DenseSet<ClassType> ClassTypes;
   // The unqualified class types whose check for recursion passed
@@ -260,10 +309,6 @@ static mlir::LogicalResult verifyDataModelAttr(mlir::Operation *Op,
 }
 
 } // namespace
-
-struct clift::CliftDialectImpl {
-  std::optional<CDataModel> DefaultDataModel;
-};
 
 void CliftDialect::initialize() {
   Impl = new CliftDialectImpl();
