@@ -111,6 +111,7 @@ AnalysisKey IntegerAddressAA::Key;
 } // namespace
 
 static Logger Log("dla-offset-split");
+static Logger NoPrototypeLog("dla-intra-call-without-prototype");
 
 class DLATypeSystemLLVMBuilder::InstanceLinkAdder {
 public:
@@ -621,8 +622,12 @@ public:
           if (not isCallToIsolatedFunction(C))
             continue;
 
-          const auto *Prototype = getCallSitePrototype(Model, C);
-          revng_assert(Prototype);
+          const auto *Prototype = getCallSitePrototypeOrNull(Model, C);
+          if (not Prototype) {
+            revng_log(NoPrototypeLog,
+                      "a call without a prototype: " << dumpToString(*C));
+            continue;
+          }
 
           // Use the actual direct target. Sharing a signature does not make
           // another function a valid source of return-layout constraints.

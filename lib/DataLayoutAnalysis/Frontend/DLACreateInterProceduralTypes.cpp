@@ -21,6 +21,8 @@
 #include "../FuncOrCallInst.h"
 #include "DLATypeSystemBuilder.h"
 
+static Logger NoPrototypeLog("dla-inter-call-without-prototype");
+
 using namespace dla;
 using namespace llvm;
 
@@ -196,7 +198,13 @@ bool TSBuilder::createInterproceduralTypes(llvm::Module &M,
           // Devirtualization can identify a callee without updating the call
           // site's prototype. Raw prototypes still identify arguments by their
           // machine registers, even when their LLVM positions differ.
-          const auto *CallPrototype = getCallSitePrototype(Model, Call);
+          const auto *CallPrototype = getCallSitePrototypeOrNull(Model, Call);
+          if (not CallPrototype) {
+            revng_log(NoPrototypeLog,
+                      getName(&F) << " has a call without a prototype: "
+                                  << dumpToString(*Call));
+            continue;
+          }
           const auto *CalleePrototype = getFunctionPrototype(Model, *Callee);
           const auto
             *CallRaw = dyn_cast<model::RawFunctionDefinition>(CallPrototype);

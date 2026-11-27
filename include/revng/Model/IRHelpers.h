@@ -42,6 +42,15 @@ getCallSitePrototype(T &Binary, const llvm::Instruction *Call) {
     return Result.get();
 }
 
+/// The prototype of \p Call, or nullptr when it carries none
+template<ConstOrNot<model::Binary> T>
+inline ConstPtrIfConst<T, model::TypeDefinition>
+getCallSitePrototypeOrNull(T &Binary, const llvm::Instruction *Call) {
+  if (not Call->hasMetadata(PrototypeMDName))
+    return nullptr;
+  return getCallSitePrototype(Binary, Call);
+}
+
 inline model::Function *llvmToModelFunction(model::Binary &Binary,
                                             const llvm::Function &F) {
   auto MaybeMetaAddress = getMetaAddressMetadata(&F, FunctionEntryMDName);
