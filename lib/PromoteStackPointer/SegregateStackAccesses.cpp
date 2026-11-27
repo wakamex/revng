@@ -39,6 +39,7 @@ using std::tie;
 using StackSpan = abi::FunctionType::Layout::Argument::StackSpan;
 
 static Logger Log("segregate-stack-accesses");
+static Logger MismatchLog("segregate-call-mismatch");
 
 struct OffsetRange {
   int64_t Start = 0;
@@ -1933,6 +1934,24 @@ SegregateFunctionStack::handleCallSite(llvm::CallInst *SSACSCall,
   if (HasSPTAR) {
     revng_assert(Arguments.size() > 0);
     Arguments.erase(Arguments.begin());
+  }
+
+  // A direct callee whose own prototype takes a different number of arguments
+  // than this call site's prototype gives is called through a cast to the
+  // call site's type, as an indirect call is
+  if (IsDirect and CalleeType->getNumParams() != Arguments.size()) {
+    auto Architecture = SSA.Binary.Architecture();
+    FunctionType *CallSiteType = &layoutToLLVMFunctionType(OldCall
+                                                             ->getContext(),
+                                                           Architecture,
+                                                           Layout);
+    revng_log(MismatchLog,
+              getName(Caller) << " calls " << getName(CalledValue) << " with "
+                              << Arguments.size() << " arguments, but it takes "
+                              << CalleeType->getNumParams());
+    revng_assert(CallSiteType->getNumParams() == Arguments.size());
+    CalleeType = CallSiteType;
+    CalledValue = B.CreateBitCast(CalledValue, CalleeType->getPointerTo());
   }
 
   // If the old return type and the new one are identical, switch to the old
