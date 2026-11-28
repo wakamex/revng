@@ -64,9 +64,19 @@ struct EmitFieldAccessesPass
   /// runs: a pass manager runs one pass object on each function's module, and
   /// the traversals depend only on the type, uniqued in its context. Rebuilt
   /// for each function, the walks of the same large types took most of a
-  /// whole program's emission. Cleared once it holds `MaxCachedEntries`.
-  TraversalCache PassCache;
+  /// whole program's emission. Cleared once it holds `MaxCachedEntries`
+  /// offsets of types or `MaxCachedItems` traversals and array paths.
+  /// A copy of the pass, as MLIR makes for each thread, starts with an empty
+  /// cache
+  struct CacheHolder {
+    TraversalCache Cache;
+    CacheHolder() = default;
+    CacheHolder(const CacheHolder &) {}
+    CacheHolder &operator=(const CacheHolder &) { return *this; }
+  };
+  CacheHolder Holder;
   static constexpr size_t MaxCachedEntries = size_t(1) << 20;
+  static constexpr size_t MaxCachedItems = size_t(1) << 25;
 
   mlir::LogicalResult initialize(mlir::MLIRContext *Context) override {
     mlir::RewritePatternSet Set(Context);
@@ -80,10 +90,12 @@ struct EmitFieldAccessesPass
     // A caller's cache, if it set one, is used instead
     bool OwnCache = ThreadTraversalCache == nullptr;
     if (OwnCache) {
-      if (PassCache.Traversals.size() + PassCache.ArrayPaths.size()
-          > MaxCachedEntries)
-        PassCache = TraversalCache();
-      ThreadTraversalCache = &PassCache;
+      size_t Entries = Holder.Cache.Traversals.size() + Holder.Cache.ArrayPaths.size()
+                       + Holder.Cache.RelativeTraversals.size()
+                       + Holder.Cache.RelativeArrayPaths.size();
+      if (Entries > MaxCachedEntries or Holder.Cache.StoredItems > MaxCachedItems)
+        Holder.Cache = TraversalCache();
+      ThreadTraversalCache = &Holder.Cache;
     }
 
     mlir::GreedyRewriteConfig Config;
