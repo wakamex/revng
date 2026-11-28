@@ -1010,10 +1010,19 @@ clift::importIncompleteModelTypes(llvm::ArrayRef<mlir::ModuleOp> Modules,
 
   mlir::ModuleOp First = Modules.front();
   mlir::MLIRContext *Context = First.getContext();
+  auto EmitError = [Context]() -> mlir::InFlightDiagnostic {
+    return Context->getDiagEngine().emit(mlir::UnknownLoc::get(Context),
+                                         mlir::DiagnosticSeverity::Error);
+  };
+
+  // One converter for every type: each converter verifies and converts the
+  // types it reaches once, and a new one for each type redid that for all
+  // the types they share, hours on the data layout types of a large program
+  CliftConverter Converter(Context, EmitError);
   for (const std::string &Handle : Incomplete) {
     const model::TypeDefinition *Definition = getModelTypeDefinition(Handle,
                                                                      Model);
-    if (Definition == nullptr or not importType(Context, *Definition))
+    if (Definition == nullptr or not Converter.convertTypeDefinition(*Definition))
       return First->emitError() << "Cannot define class type '" << Handle
                                 << "' from the model";
   }
