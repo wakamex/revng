@@ -413,6 +413,13 @@ private:
   static constexpr size_t MaxTraversals = size_t(1) << 18;
   bool TooManyTraversals = false;
 
+  /// The most points one walk visits. Data layout analysis gives large
+  /// programs union types where one walk visits millions of points, and an
+  /// emission walking them for every access took weeks: past this many, the
+  /// walk stops, and the accesses it was for keep their pointer arithmetic.
+  static constexpr size_t MaxVisits = size_t(1) << 16;
+  size_t Visits = 0;
+
   /// Whether the walk has reached this point before through \p Depth fields or
   /// fewer; if not, record that it has now
   bool reachedNoDeeper(mlir::Type Type,
@@ -420,6 +427,10 @@ private:
                        int64_t CurrentOffset,
                        size_t Depth,
                        const ArrayPath &Arrays) {
+    if (++Visits > MaxVisits) {
+      TooManyTraversals = true;
+      return true;
+    }
     WalkPoint Point{ reinterpret_cast<intptr_t>(Type.getAsOpaquePointer()),
                      Offset,
                      CurrentOffset };
@@ -491,6 +502,15 @@ static ArrayPath enterArray(clift::ArrayType Type,
   return NewArrayPath;
 }
 
+/// \p Type's handle, to name it in a log: printing it writes out every class
+/// type it holds, which for the types that reach a limit takes more memory than
+/// the walk did
+static std::string handleOf(mlir::Type Type) {
+  if (auto Defined = mlir::dyn_cast<clift::DefinedType>(Type))
+    return Defined.getHandle().str();
+  return "a type without a handle";
+}
+
 const std::vector<ArrayPath> &
 TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
   auto [It, Inserted] = Cache.ArrayPaths.try_emplace({ BaseType, Offset });
@@ -500,7 +520,17 @@ TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
   std::vector<ArrayPath> ArrayPaths;
   ArrayPaths.push_back(ArrayPath());
   ShallowestDepth.clear();
+  TooManyTraversals = false;
+  Visits = 0;
   rc_eval(collectArrayPaths(BaseType, Offset, 0, {}, ArrayPaths));
+  ShallowestDepth.clear();
+  if (TooManyTraversals) {
+    revng_log(LimitLog,
+              "more than " << MaxVisits << " points reach offset " << Offset
+                           << " of " << handleOf(BaseType)
+                           << " in its array paths");
+    ArrayPaths.resize(1);
+  }
 
   for (ArrayPath &Path : ArrayPaths) {
     std::sort(Path.begin(),
@@ -523,17 +553,14 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
   std::vector<Traversal> Traversals;
   ShallowestDepth.clear();
   TooManyTraversals = false;
+  Visits = 0;
   rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
   ShallowestDepth.clear();
   if (TooManyTraversals) {
-    // Name the type by its handle: printing it writes out every class type it
-    // holds, which for such a type can take more memory than the walk did
-    std::string Handle = "a type without a handle";
-    if (auto Defined = mlir::dyn_cast<clift::DefinedType>(BaseType))
-      Handle = Defined.getHandle().str();
     revng_log(LimitLog,
-              "more than " << MaxTraversals << " traversals reach offset "
-                           << Offset << " of " << Handle);
+              "more than " << MaxTraversals << " traversals or " << MaxVisits
+                           << " points reach offset " << Offset << " of "
+                           << handleOf(BaseType));
     Traversals.clear();
     Traversals.shrink_to_fit();
     return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
