@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <map>
 #include <optional>
-#include <set>
 #include <tuple>
 
 #include "revng/ADT/RecursiveCoroutine.h"
@@ -387,11 +386,51 @@ class TypeTraversalAnalyzer {
 private:
   TraversalCache &Cache;
 
-  /// The most `Traversal`s one type's offset may have. A large program's union
-  /// types can give one offset of one type more than the memory of the
-  /// machine holds: past this many, the accesses into it keep their pointer
-  /// arithmetic.
+  /// A point a walk reaches: a type, the offset looked up, the offset the type
+  /// starts at, and the arrays it is in
+  using WalkPoint = std::tuple<const void *,
+                               int64_t,
+                               int64_t,
+                               std::vector<std::tuple<int64_t, uint64_t,
+                                                      uint64_t>>>;
+
+  /// The smallest number of fields the current walk has reached each point
+  /// through. Everything a walk finds below a point it reaches again no less
+  /// deep repeats what it found there before, deeper or later, which never
+  /// ranks ahead: without this, a type that several members of nested unions
+  /// share would be walked once per path to it, and the paths multiply at every
+  /// level of nesting.
+  std::map<WalkPoint, size_t> ShallowestDepth;
+
+  /// The most `Traversal`s one walk collects. The pruning above bounds a walk
+  /// by the points it reaches times their depth, which the union types of a
+  /// large program can still push past the memory of the machine: past this
+  /// many, the walk stops, and the accesses it was for keep their arithmetic.
   static constexpr size_t MaxTraversals = size_t(1) << 18;
+  bool TooManyTraversals = false;
+
+  /// Whether the walk has reached this point before through \p Depth fields or
+  /// fewer; if not, record that it has now
+  bool reachedNoDeeper(mlir::Type Type,
+                       int64_t Offset,
+                       int64_t CurrentOffset,
+                       size_t Depth,
+                       const ArrayPath &Arrays) {
+    std::vector<std::tuple<int64_t, uint64_t, uint64_t>> Shapes;
+    for (const NestedArrayShape &Shape : Arrays)
+      Shapes.emplace_back(Shape.OffsetFromParentArrayElement,
+                          Shape.NumElements,
+                          Shape.Stride);
+    auto [It, Inserted] = ShallowestDepth.try_emplace({ Type.getAsOpaquePointer(),
+                                                        Offset,
+                                                        CurrentOffset,
+                                                        std::move(Shapes) },
+                                                      Depth);
+    if (not Inserted and It->second <= Depth)
+      return true;
+    It->second = Depth;
+    return false;
+  }
 
 public:
   TypeTraversalAnalyzer(TraversalCache &Cache) : Cache(Cache) {}
@@ -413,17 +452,41 @@ public:
                                               int64_t Offset);
 
 private:
-  /// The `ArrayPath`s of \p Type at \p Offset from its start, built from those
-  /// of the types it holds and kept in the cache
-  RecursiveCoroutine<const std::vector<ArrayPath> *>
-  relativeArrayPaths(mlir::Type Type, int64_t Offset);
+  RecursiveCoroutine<void>
+  collectArrayPaths(mlir::Type Type,
+                    int64_t Offset,
+                    int64_t CurrentOffset,
+                    const ArrayPath &CurrentArrayPath,
+                    std::vector<ArrayPath> &ArrayPaths);
 
-  /// The `Traversal`s of \p Type at \p Offset from its start, built from those
-  /// of the types it holds and kept in the cache; nullptr when there are more
-  /// than `MaxTraversals`
-  RecursiveCoroutine<const std::vector<Traversal> *>
-  relativeTraversals(mlir::Type Type, int64_t Offset);
+  RecursiveCoroutine<void>
+  collectTraversals(mlir::Type Type,
+                    int64_t Offset,
+                    int64_t CurrentOffset,
+                    const std::vector<uint64_t> &FieldPath,
+                    const ArrayPath &CurrentArrayPath,
+                    std::vector<Traversal> &Traversals);
 };
+
+/// The `NestedArrayShape` of an array of \p Type entered at \p CurrentOffset,
+/// appended to \p CurrentArrayPath
+static ArrayPath enterArray(clift::ArrayType Type,
+                            int64_t CurrentOffset,
+                            const ArrayPath &CurrentArrayPath) {
+  NestedArrayShape ArrayInfo;
+  ArrayInfo.Stride = getObjectSize(Type.getElementType());
+  ArrayInfo.NumElements = Type.getElementsCount();
+
+  // The offset is relative to the first element of the parent array, if any,
+  // which starts where the offsets of all the arrays around it add up to
+  ArrayInfo.OffsetFromParentArrayElement = CurrentOffset;
+  for (const NestedArrayShape &Parent : CurrentArrayPath)
+    ArrayInfo.OffsetFromParentArrayElement -= Parent.OffsetFromParentArrayElement;
+
+  ArrayPath NewArrayPath = CurrentArrayPath;
+  NewArrayPath.push_back(ArrayInfo);
+  return NewArrayPath;
+}
 
 const std::vector<ArrayPath> &
 TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
@@ -433,9 +496,8 @@ TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
 
   std::vector<ArrayPath> ArrayPaths;
   ArrayPaths.push_back(ArrayPath());
-  const std::vector<ArrayPath> *Relative = rc_eval(relativeArrayPaths(BaseType,
-                                                                     Offset));
-  llvm::append_range(ArrayPaths, *Relative);
+  ShallowestDepth.clear();
+  rc_eval(collectArrayPaths(BaseType, Offset, 0, {}, ArrayPaths));
 
   for (ArrayPath &Path : ArrayPaths) {
     std::sort(Path.begin(),
@@ -445,20 +507,43 @@ TypeTraversalAnalyzer::getArrayPaths(mlir::Type BaseType, int64_t Offset) {
               });
   }
 
-  // `relativeArrayPaths` may have grown the cache: look the entry up again
+  // `collectArrayPaths` may have grown the cache: look the entry up again
   return Cache.ArrayPaths[{ BaseType, Offset }] = std::move(ArrayPaths);
 }
 
-/// Keeps, in their places, only the first of the shallowest of the
-/// `Traversal`s landing on one type at one offset through the same arrays:
-/// `getBestTraversal` scores those alike but for their depth, and can only
-/// choose that one
-static void keepFirstShallowest(std::vector<Traversal> &Traversals) {
+const std::vector<Traversal> &
+TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
+  auto [It, Inserted] = Cache.Traversals.try_emplace({ BaseType, Offset });
+  if (not Inserted)
+    return It->second;
+
+  std::vector<Traversal> Traversals;
+  ShallowestDepth.clear();
+  TooManyTraversals = false;
+  rc_eval(collectTraversals(BaseType, Offset, 0, {}, {}, Traversals));
+  ShallowestDepth.clear();
+  if (TooManyTraversals) {
+    // Name the type by its handle: printing it writes out every class type it
+    // holds, which for such a type can take more memory than the walk did
+    std::string Handle = "a type without a handle";
+    if (auto Defined = mlir::dyn_cast<clift::DefinedType>(BaseType))
+      Handle = Defined.getHandle().str();
+    revng_log(LimitLog,
+              "more than " << MaxTraversals << " traversals reach offset "
+                           << Offset << " of " << Handle);
+    Traversals.clear();
+    Traversals.shrink_to_fit();
+    return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
+  }
+
+  // Of the traversals landing on one type at one offset through the same
+  // arrays, which `getBestTraversal` scores alike but for their depth, it can
+  // only choose the first of the shallowest: keep just that one, in its place
   using Key = std::tuple<const void *,
                          int64_t,
-                         llvm::SmallVector<std::pair<uint64_t, uint64_t>, 4>>;
+                         std::vector<std::pair<uint64_t, uint64_t>>>;
   auto KeyOf = [](const Traversal &T) {
-    llvm::SmallVector<std::pair<uint64_t, uint64_t>, 4> Arrays;
+    std::vector<std::pair<uint64_t, uint64_t>> Arrays;
     for (const ArrayShape &Shape : T.TraversedArrays)
       Arrays.emplace_back(Shape.NumElements, Shape.Stride);
     return Key{ T.TargetType.getAsOpaquePointer(), T.StartOffset, Arrays };
@@ -481,29 +566,7 @@ static void keepFirstShallowest(std::vector<Traversal> &Traversals) {
     ++Kept;
   }
   Traversals.erase(Traversals.begin() + Kept, Traversals.end());
-}
 
-const std::vector<Traversal> &
-TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
-  auto [It, Inserted] = Cache.Traversals.try_emplace({ BaseType, Offset });
-  if (not Inserted)
-    return It->second;
-
-  const std::vector<Traversal> *Relative = rc_eval(relativeTraversals(BaseType,
-                                                                     Offset));
-  if (Relative == nullptr) {
-    // Name the type by its handle: printing it writes out every class type it
-    // holds, which for such a type can take more memory than the walk did
-    std::string Handle = "a type without a handle";
-    if (auto Defined = mlir::dyn_cast<clift::DefinedType>(BaseType))
-      Handle = Defined.getHandle().str();
-    revng_log(LimitLog,
-              "more than " << MaxTraversals << " traversals reach offset "
-                           << Offset << " of " << Handle);
-    return Cache.Traversals[{ BaseType, Offset }] = std::vector<Traversal>();
-  }
-
-  std::vector<Traversal> Traversals = *Relative;
   std::stable_sort(Traversals.begin(),
                    Traversals.end(),
                    [](const Traversal &A, const Traversal &B) {
@@ -516,171 +579,141 @@ TypeTraversalAnalyzer::getTraversals(mlir::Type BaseType, int64_t Offset) {
   return Cache.Traversals[{ BaseType, Offset }] = std::move(Traversals);
 }
 
-RecursiveCoroutine<const std::vector<ArrayPath> *>
-TypeTraversalAnalyzer::relativeArrayPaths(mlir::Type Type, int64_t Offset) {
-  if (auto It = Cache.RelativeArrayPaths.find({ Type, Offset });
-      It != Cache.RelativeArrayPaths.end())
-    rc_return It->second.get();
+RecursiveCoroutine<void>
+TypeTraversalAnalyzer::collectArrayPaths(mlir::Type Type,
+                                         int64_t Offset,
+                                         int64_t CurrentOffset,
+                                         const ArrayPath &CurrentArrayPath,
+                                         std::vector<ArrayPath> &ArrayPaths) {
+  if (reachedNoDeeper(Type, Offset, CurrentOffset, 0, CurrentArrayPath))
+    rc_return;
 
-  std::vector<ArrayPath> Result;
   if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
-    llvm::append_range(Result,
-                       *rc_recur relativeArrayPaths(Typedef.getUnderlyingType(),
-                                                    Offset));
+    rc_recur collectArrayPaths(Typedef.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               CurrentArrayPath,
+                               ArrayPaths);
   } else if (auto Enum = mlir::dyn_cast<clift::EnumType>(Type)) {
-    llvm::append_range(Result,
-                       *rc_recur relativeArrayPaths(Enum.getUnderlyingType(),
-                                                    Offset));
+    rc_recur collectArrayPaths(Enum.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               CurrentArrayPath,
+                               ArrayPaths);
   } else if (auto Array = mlir::dyn_cast<clift::ArrayType>(Type)) {
-    // An array covers the offset if the offset lands in one of its elements;
-    // the paths go on into that element as if it were the first
+    // An array covers the offset if the offset lands in one of its elements
     uint64_t Stride = getObjectSize(Array.getElementType());
-    uint64_t Relative = Offset;
-    if (Relative / Stride < Array.getElementsCount()) {
-      NestedArrayShape Shape{ .OffsetFromParentArrayElement = 0,
-                              .NumElements = Array.getElementsCount(),
-                              .Stride = Stride };
-      Result.push_back({ Shape });
-      const std::vector<ArrayPath>
-        *Inner = rc_recur relativeArrayPaths(Array.getElementType(),
-                                             Relative % Stride);
-      for (const ArrayPath &Path : *Inner) {
-        ArrayPath &New = Result.emplace_back(ArrayPath{ Shape });
-        llvm::append_range(New, Path);
-      }
-    }
+    uint64_t Relative = Offset - CurrentOffset;
+    if (Relative / Stride >= Array.getElementsCount())
+      rc_return;
+
+    ArrayPath NewArrayPath = enterArray(Array, CurrentOffset, CurrentArrayPath);
+    ArrayPaths.push_back(NewArrayPath);
+
+    // Go on into the element the offset lands in, as if it were the first
+    rc_recur collectArrayPaths(Array.getElementType(),
+                               CurrentOffset + Relative % Stride,
+                               CurrentOffset,
+                               NewArrayPath,
+                               ArrayPaths);
   } else if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
     for (clift::FieldAttr Field : Class.getFields()) {
-      int64_t FieldOffset = Field.getOffset();
+      int64_t FieldOffset = CurrentOffset + Field.getOffset();
       uint64_t FieldSize = getObjectSize(Field.getType());
-      if (FieldOffset > Offset
-          or static_cast<uint64_t>(Offset - FieldOffset) >= FieldSize)
-        continue;
-
-      const std::vector<ArrayPath>
-        *Inner = rc_recur relativeArrayPaths(Field.getType(),
-                                             Offset - FieldOffset);
-      for (const ArrayPath &Path : *Inner) {
-        ArrayPath &New = Result.emplace_back(Path);
-        New.front().OffsetFromParentArrayElement += FieldOffset;
-      }
+      if (FieldOffset <= Offset
+          and static_cast<uint64_t>(Offset - FieldOffset) < FieldSize)
+        rc_recur collectArrayPaths(Field.getType(),
+                                   Offset,
+                                   FieldOffset,
+                                   CurrentArrayPath,
+                                   ArrayPaths);
     }
   }
-
-  // The same path found through several fields, such as members of nested
-  // unions holding the same array, describes the same access once
-  auto Shapes = [](const ArrayPath &Path) {
-    llvm::SmallVector<std::tuple<int64_t, uint64_t, uint64_t>, 4> Result;
-    for (const NestedArrayShape &Shape : Path)
-      Result.emplace_back(Shape.OffsetFromParentArrayElement,
-                          Shape.NumElements,
-                          Shape.Stride);
-    return Result;
-  };
-  std::set<llvm::SmallVector<std::tuple<int64_t, uint64_t, uint64_t>, 4>> Seen;
-  llvm::erase_if(Result, [&](const ArrayPath &Path) {
-    return not Seen.insert(Shapes(Path)).second;
-  });
-
-  Cache.StoredItems += Result.size();
-  auto &Slot = Cache.RelativeArrayPaths[{ Type, Offset }];
-  Slot = std::make_unique<std::vector<ArrayPath>>(std::move(Result));
-  rc_return Slot.get();
 }
 
-RecursiveCoroutine<const std::vector<Traversal> *>
-TypeTraversalAnalyzer::relativeTraversals(mlir::Type Type, int64_t Offset) {
+RecursiveCoroutine<void>
+TypeTraversalAnalyzer::collectTraversals(mlir::Type Type,
+                                         int64_t Offset,
+                                         int64_t CurrentOffset,
+                                         const std::vector<uint64_t> &FieldPath,
+                                         const ArrayPath &CurrentArrayPath,
+                                         std::vector<Traversal> &Traversals) {
   // We should never reach a type with zero size - if we do, it means there is
   // something severely wrong in the types we're working with
   revng_assert(getObjectSizeOrZero(Type) > 0);
 
-  if (auto It = Cache.RelativeTraversals.find({ Type, Offset });
-      It != Cache.RelativeTraversals.end())
-    rc_return It->second.get();
+  if (TooManyTraversals)
+    rc_return;
+  if (Traversals.size() >= MaxTraversals) {
+    TooManyTraversals = true;
+    rc_return;
+  }
 
-  std::vector<Traversal> Result;
-  bool TooMany = false;
-
-  // The traversals of a part of `Type` at `PartOffset`, through the field
-  // `Field` or into the first element of an array of `Shape`
-  auto Append = [&](const std::vector<Traversal> *Part,
-                    int64_t PartOffset,
-                    std::optional<uint64_t> Field,
-                    std::optional<ArrayShape> Shape) {
-    if (Part == nullptr) {
-      TooMany = true;
-      return;
-    }
-    for (const Traversal &T : *Part) {
-      Traversal &New = Result.emplace_back(T);
-      New.StartOffset += PartOffset;
-      if (Field)
-        New.TraversedFields.insert(New.TraversedFields.begin(), *Field);
-      if (Shape)
-        New.TraversedArrays.insert(llvm::upper_bound(New.TraversedArrays,
-                                                     *Shape),
-                                   *Shape);
-    }
-  };
+  if (reachedNoDeeper(Type,
+                      Offset,
+                      CurrentOffset,
+                      FieldPath.size(),
+                      CurrentArrayPath))
+    rc_return;
 
   // Pointers are leaves: we do not traverse through them, but a `Traversal`
   // can land on a field whose type is a pointer
   if (mlir::isa<clift::PrimitiveType, clift::PointerType>(Type)) {
-    Result.emplace_back(Type, 0, 0, std::vector<uint64_t>(), ArrayPath());
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
   } else if (auto Typedef = mlir::dyn_cast<clift::TypedefType>(Type)) {
-    Result.emplace_back(Type, 0, 0, std::vector<uint64_t>(), ArrayPath());
-    Append(rc_recur relativeTraversals(Typedef.getUnderlyingType(), Offset),
-           0,
-           std::nullopt,
-           std::nullopt);
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
+    rc_recur collectTraversals(Typedef.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               FieldPath,
+                               CurrentArrayPath,
+                               Traversals);
   } else if (auto Enum = mlir::dyn_cast<clift::EnumType>(Type)) {
-    Result.emplace_back(Type, 0, 0, std::vector<uint64_t>(), ArrayPath());
-    Append(rc_recur relativeTraversals(Enum.getUnderlyingType(), Offset),
-           0,
-           std::nullopt,
-           std::nullopt);
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
+    rc_recur collectTraversals(Enum.getUnderlyingType(),
+                               Offset,
+                               CurrentOffset,
+                               FieldPath,
+                               CurrentArrayPath,
+                               Traversals);
   } else if (auto Array = mlir::dyn_cast<clift::ArrayType>(Type)) {
-    Result.emplace_back(Type, 0, 0, std::vector<uint64_t>(), ArrayPath());
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
 
     // Only the first element is walked: the access's constant array indices
     // have already been made explicit. An element ending at the offset is still
     // walked, as an access of no size there can land on its last field.
     uint64_t Stride = getObjectSize(Array.getElementType());
-    if (static_cast<uint64_t>(Offset) <= Stride)
-      Append(rc_recur relativeTraversals(Array.getElementType(), Offset),
-             0,
-             std::nullopt,
-             ArrayShape{ .NumElements = Array.getElementsCount(),
-                         .Stride = Stride });
+    if (static_cast<uint64_t>(Offset - CurrentOffset) <= Stride)
+      rc_recur collectTraversals(Array.getElementType(),
+                                 Offset,
+                                 CurrentOffset,
+                                 FieldPath,
+                                 enterArray(Array,
+                                            CurrentOffset,
+                                            CurrentArrayPath),
+                                 Traversals);
   } else if (auto Class = mlir::dyn_cast<clift::ClassType>(Type)) {
-    Result.emplace_back(Type, 0, 0, std::vector<uint64_t>(), ArrayPath());
+    Traversals.emplace_back(Type, CurrentOffset, 0, FieldPath, CurrentArrayPath);
 
     // For `union`s, `Field.getOffset()` always returns 0 by verification
     llvm::ArrayRef<clift::FieldAttr> Fields = Class.getFields();
-    for (size_t I = 0; I < Fields.size() and not TooMany; ++I) {
-      int64_t FieldOffset = Fields[I].getOffset();
+    for (size_t I = 0; I < Fields.size(); ++I) {
+      int64_t FieldOffset = CurrentOffset + Fields[I].getOffset();
       uint64_t FieldSize = getObjectSize(Fields[I].getType());
       if (FieldOffset > Offset
           or static_cast<uint64_t>(Offset - FieldOffset) > FieldSize)
         continue;
 
-      Append(rc_recur relativeTraversals(Fields[I].getType(),
-                                         Offset - FieldOffset),
-             FieldOffset,
-             static_cast<uint64_t>(I),
-             std::nullopt);
+      std::vector<uint64_t> NewFieldPath = FieldPath;
+      NewFieldPath.push_back(static_cast<uint64_t>(I));
+      rc_recur collectTraversals(Fields[I].getType(),
+                                 Offset,
+                                 FieldOffset,
+                                 NewFieldPath,
+                                 CurrentArrayPath,
+                                 Traversals);
     }
   }
-
-  auto &Slot = Cache.RelativeTraversals[{ Type, Offset }];
-  if (not TooMany) {
-    keepFirstShallowest(Result);
-    if (Result.size() <= MaxTraversals) {
-      Cache.StoredItems += Result.size();
-      Slot = std::make_unique<std::vector<Traversal>>(std::move(Result));
-    }
-  }
-  rc_return Slot.get();
 }
 
 // =============================================================================

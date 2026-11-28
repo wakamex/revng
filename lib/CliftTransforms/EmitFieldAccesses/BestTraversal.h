@@ -5,7 +5,6 @@
 //
 
 #include <compare>
-#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -125,23 +124,6 @@ struct TraversalCache {
   /// The `ArrayPath`s covering each offset of each base type looked up so far
   llvm::DenseMap<std::pair<mlir::Type, int64_t>, std::vector<ArrayPath>>
     ArrayPaths;
-
-  /// Each type's `Traversal`s of an offset relative to its start, which those
-  /// of every type holding it are built from: in the order a walk meets them,
-  /// and only the first of the shallowest landing on one type at one offset
-  /// through the same arrays. nullptr when there are too many.
-  llvm::DenseMap<std::pair<mlir::Type, int64_t>,
-                 std::unique_ptr<std::vector<Traversal>>>
-    RelativeTraversals;
-
-  /// Each type's `ArrayPath`s of an offset relative to its start, the
-  /// outermost array's offset relative to that start, each path once
-  llvm::DenseMap<std::pair<mlir::Type, int64_t>,
-                 std::unique_ptr<std::vector<ArrayPath>>>
-    RelativeArrayPaths;
-
-  /// How many `Traversal`s and `ArrayPath`s the maps above hold
-  size_t StoredItems = 0;
 };
 
 mlir::Type deriveBaseType(mlir::Value BasePointer);
