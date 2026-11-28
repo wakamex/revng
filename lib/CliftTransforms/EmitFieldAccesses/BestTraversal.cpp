@@ -8,6 +8,9 @@
 #include <map>
 #include <optional>
 #include <tuple>
+#include <unordered_map>
+
+#include "llvm/ADT/Hashing.h"
 
 #include "revng/ADT/RecursiveCoroutine.h"
 #include "revng/Clift/Clift.h"
@@ -387,12 +390,13 @@ private:
   TraversalCache &Cache;
 
   /// A point a walk reaches: a type, the offset looked up, the offset the type
-  /// starts at, and the arrays it is in
-  using WalkPoint = std::tuple<const void *,
-                               int64_t,
-                               int64_t,
-                               std::vector<std::tuple<int64_t, uint64_t,
-                                                      uint64_t>>>;
+  /// starts at, and the offset, count and stride of each array it is in
+  using WalkPoint = llvm::SmallVector<int64_t, 8>;
+  struct WalkPointHash {
+    size_t operator()(const WalkPoint &Point) const {
+      return llvm::hash_combine_range(Point.begin(), Point.end());
+    }
+  };
 
   /// The smallest number of fields the current walk has reached each point
   /// through. Everything a walk finds below a point it reaches again no less
@@ -400,7 +404,7 @@ private:
   /// ranks ahead: without this, a type that several members of nested unions
   /// share would be walked once per path to it, and the paths multiply at every
   /// level of nesting.
-  std::map<WalkPoint, size_t> ShallowestDepth;
+  std::unordered_map<WalkPoint, size_t, WalkPointHash> ShallowestDepth;
 
   /// The most `Traversal`s one walk collects. The pruning above bounds a walk
   /// by the points it reaches times their depth, which the union types of a
@@ -416,16 +420,15 @@ private:
                        int64_t CurrentOffset,
                        size_t Depth,
                        const ArrayPath &Arrays) {
-    std::vector<std::tuple<int64_t, uint64_t, uint64_t>> Shapes;
-    for (const NestedArrayShape &Shape : Arrays)
-      Shapes.emplace_back(Shape.OffsetFromParentArrayElement,
-                          Shape.NumElements,
-                          Shape.Stride);
-    auto [It, Inserted] = ShallowestDepth.try_emplace({ Type.getAsOpaquePointer(),
-                                                        Offset,
-                                                        CurrentOffset,
-                                                        std::move(Shapes) },
-                                                      Depth);
+    WalkPoint Point{ reinterpret_cast<intptr_t>(Type.getAsOpaquePointer()),
+                     Offset,
+                     CurrentOffset };
+    for (const NestedArrayShape &Shape : Arrays) {
+      Point.push_back(Shape.OffsetFromParentArrayElement);
+      Point.push_back(static_cast<int64_t>(Shape.NumElements));
+      Point.push_back(static_cast<int64_t>(Shape.Stride));
+    }
+    auto [It, Inserted] = ShallowestDepth.try_emplace(std::move(Point), Depth);
     if (not Inserted and It->second <= Depth)
       return true;
     It->second = Depth;
